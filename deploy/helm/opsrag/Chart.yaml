@@ -1,0 +1,21 @@
+apiVersion: v2
+name: opsrag
+description: Agentic GraphRAG for DevOps/SRE - query runbooks, postmortems, manifests, and live systems with cited answers.
+type: application
+# Chart version is independent of the app version; bump on chart changes.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/OWNER/opsrag
+sources:
+  - https://github.com/OWNER/opsrag
+keywords:
+  - rag
+  - sre
+  - devops
+  - langgraph
+  - mcp
+maintainers:
+  - name: opsrag maintainers
+annotations:
+  licenses: Apache-2.0

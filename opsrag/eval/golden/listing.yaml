@@ -1,0 +1,83 @@
+# listing -- repo-scoped or directory-scoped enumeration. Exercises the
+# structural file-listing path (Qdrant scroll + synthetic dir-listing chunk).
+# Some are known-strong (verified working), some are stress-tests of
+# listing-intent hint coverage.
+
+- id: list_001
+  category: listing
+  query: "List all files in projects/staging/apps/qa-runner of the terraform repo."
+  expected_sources:
+    # Listing answers cite the synthetic `dir-listing:<path>` chunk, not
+    # individual files. Match that convention. Suffix-match in the
+    # SourceRecall metric handles repo-prefix variation.
+    - dir-listing:projects/staging/apps/qa-runner
+  must_contain:
+    - "app-acme-notes-be.tf"
+    - "main.tf"
+    - "variables.tf"
+  must_not_contain:
+    - "only one file"
+    - "does not contain"
+  notes: "Verified working pre-baseline -- repo + path-prefix filtering + structural enumeration."
+
+- id: list_002
+  category: listing
+  query: "What files are in devops/gitops-pipeline-templates?"
+  expected_sources:
+    - devops/gitops-pipeline-templates/generic-pipeline.yaml
+  must_contain:
+    - "cd.yaml"
+    - "ci.yaml"
+    - "library"
+  must_not_contain:
+    - "does not contain"
+  notes: "Repo-level listing."
+
+- id: list_003
+  category: listing
+  query: "How many distinct files are in the terraform repo?"
+  expected_sources: []
+  # 1152 confirmed via Qdrant scroll on 2026-05-07. Was 1132 at baseline
+  # but the repo grew 20 files since then. Update if the index changes.
+  must_contain:
+    - "1152"
+  must_not_contain:
+    - "unknown"
+    - "cannot determine"
+  notes: "Count answer -- exercises list_files() total return."
+
+- id: list_004
+  category: listing
+  query: "List all kafka runbooks in the SRE knowledge base."
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/runbooks/kafka/kafka-topic-has-consumer-lag.md
+  must_contain:
+    - "kafka"
+  must_not_contain:
+    - "no kafka"
+  notes: "Tests listing-intent on a sub-path within a repo. Known weak -- listing hints may not catch 'list all X runbooks'."
+
+- id: list_005
+  category: listing
+  query: "List the postmortem files in the SRE knowledge base."
+  expected_sources:
+    # INDEX.md doesn't exist in the indexed repo; the actual postmortems
+    # live as `INC-NNNN.md` files under docs/incidents/. Verified 2026-05-07.
+    - devops/sre/sre-knowledge-base/docs/incidents/INC-2226.md
+  must_contain:
+    - "INC-2226"
+  must_not_contain:
+    - "no postmortems"
+  notes: "Postmortem listing via dir-listing scroll over docs/incidents/."
+
+- id: list_006
+  category: listing
+  query: "What service folders exist under docs/services in the sre-knowledge-base?"
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/services/acme-notes-be/introduction.md
+  must_contain:
+    - "acme-notes-be"
+    - "db-ops"
+  must_not_contain:
+    - "no services"
+  notes: "Service folder enumeration -- exercises path-scoped listing."

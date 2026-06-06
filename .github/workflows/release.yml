@@ -1,0 +1,168 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Validate the release tag once, expose it as a job output that downstream
+  # jobs can rely on. Keeps user-controlled values out of every `run:` block.
+  # ---------------------------------------------------------------------------
+  resolve-tag:
+    name: resolve + validate tag
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve tag
+        id: resolve
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "${REF_TYPE}" != "tag" ]; then
+            echo "release workflow only runs on tag refs (got ref_type=${REF_TYPE})" >&2
+            exit 1
+          fi
+          TAG="${REF_NAME}"
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "release tag '${TAG}' does not match v<semver>" >&2
+            exit 1
+          fi
+          {
+            echo "tag=${TAG}"
+            echo "version=${TAG#v}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: build + push container image
+    runs-on: ubuntu-24.04
+    needs: resolve-tag
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.resolve-tag.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ needs.resolve-tag.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.resolve-tag.outputs.tag }}
+            type=raw,value=latest,enable=${{ !contains(needs.resolve-tag.outputs.tag, '-') }}
+          labels: |
+            org.opencontainers.image.title=opsrag
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.resolve-tag.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Verify Dockerfile present
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "Dockerfile not yet ported (T036); aborting release." >&2
+            exit 1
+          fi
+
+      - name: Build + push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Scan the pushed image (by immutable digest) and gate the release on
+      # CRITICAL vulnerabilities. Runs after the multi-arch build/SBOM/
+      # provenance so none of that is disturbed; helm-package `needs` this job.
+      - name: Trivy scan pushed image (gate on CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  helm-package:
+    name: package + publish Helm chart
+    runs-on: ubuntu-24.04
+    needs: [resolve-tag, build-and-push]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: helm package
+        env:
+          CHART_VERSION: ${{ needs.resolve-tag.outputs.version }}
+        run: |
+          if [ ! -d deploy/helm/opsrag ]; then
+            echo "deploy/helm/opsrag/ not yet authored; skipping chart publish."
+            exit 0
+          fi
+          helm package deploy/helm/opsrag \
+            --version "${CHART_VERSION}" \
+            --app-version "${CHART_VERSION}" \
+            --destination ./charts
+
+      - name: Login to GHCR (OCI)
+        if: hashFiles('charts/*.tgz') != ''
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          REGISTRY_HOST: ${{ env.REGISTRY }}
+        run: |
+          printf '%s' "${GHCR_TOKEN}" \
+            | helm registry login "${REGISTRY_HOST}" \
+              --username "${GHCR_USER}" --password-stdin
+
+      - name: helm push (OCI)
+        if: hashFiles('charts/*.tgz') != ''
+        env:
+          REGISTRY_HOST: ${{ env.REGISTRY }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          for tgz in charts/*.tgz; do
+            helm push "$tgz" "oci://${REGISTRY_HOST}/${REPO_OWNER}/charts"
+          done

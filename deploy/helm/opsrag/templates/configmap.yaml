@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opsrag.fullname" . }}-config
+  labels:
+    {{- include "opsrag.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- /* cloud_provider selects a per-purpose model bundle (aws=Bedrock,
+           gcp=Vertex). Only emitted when set so default behaviour (None) is
+           unchanged. Explicit blocks + `models` + OPSRAG_* env always win. */}}
+    {{- if .Values.config.cloudProvider }}
+    cloud_provider: {{ .Values.config.cloudProvider }}
+    {{- end }}
+    auth:
+      issuer: {{ .Values.auth.issuer | quote }}
+      audience: {{ .Values.auth.audience | quote }}
+      jwks_cache_seconds: {{ .Values.auth.jwksCacheSeconds | default 300 }}
+    llm:
+      provider: {{ .Values.config.llm.provider }}
+      model: {{ .Values.config.llm.model }}
+      api_key_env: {{ .Values.config.llm.apiKeyEnv }}
+      {{- with .Values.config.llm.awsRegion }}
+      aws_region: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.config.llm.project }}
+      project: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.config.llm.location }}
+      location: {{ . | quote }}
+      {{- end }}
+    embedding:
+      provider: {{ .Values.config.embedding.provider }}
+      model: {{ .Values.config.embedding.model }}
+      {{- with .Values.config.embedding.dimension }}
+      dimension: {{ . }}
+      {{- end }}
+      {{- with .Values.config.embedding.awsRegion }}
+      aws_region: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.config.embedding.project }}
+      project: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.config.embedding.location }}
+      location: {{ . | quote }}
+      {{- end }}
+    {{- with .Values.config.reranker }}
+    reranker:
+      {{- with .provider }}
+      provider: {{ . }}
+      {{- end }}
+      {{- with .model }}
+      model: {{ . }}
+      {{- end }}
+      {{- with .awsRegion }}
+      aws_region: {{ . | quote }}
+      {{- end }}
+      {{- with .project }}
+      project: {{ . | quote }}
+      {{- end }}
+      {{- with .location }}
+      location: {{ . | quote }}
+      {{- end }}
+    {{- end }}
+    vector_store:
+      provider: {{ .Values.config.vectorStore.provider }}
+      url: {{ .Values.config.vectorStore.url | quote }}
+      collection: {{ .Values.config.vectorStore.collection }}
+      {{- if .Values.config.vectorStore.allowDimensionChange }}
+      allow_dimension_change: true
+      {{- end }}
+    knowledge_graph:
+      provider: {{ .Values.config.knowledgeGraph.provider }}
+    session:
+      provider: {{ .Values.config.session.provider }}
+      dsn_env: {{ .Values.config.session.dsnEnv }}
+    observability:
+      provider: {{ .Values.config.observability.provider }}
+      project_name: {{ .Values.config.observability.projectName }}
+    mcp:
+      {{- range $name, $cfg := .Values.mcp }}
+      {{ $name }}:
+        enabled: {{ $cfg.enabled }}
+      {{- end }}

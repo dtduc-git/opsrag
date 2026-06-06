@@ -1,0 +1,245 @@
+# =============================================================================
+# opsrag Helm chart - default values
+# =============================================================================
+# Every key is documented inline. Secrets are NOT set here - reference them via
+# existing Kubernetes Secrets (secretRef) or the opt-in `secret` block. All 14
+# MCP integrations are present and disabled by default (FR-011); each enabled
+# flag is wired to the api container as OPSRAG_MCP_<NAME>_ENABLED.
+# =============================================================================
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/OWNER/opsrag
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# --- Authentication (OIDC) ---------------------------------------------------
+auth:
+  issuer: https://your-idp.example.com   # OIDC discovery base URL (required)
+  audience: opsrag                        # expected token audience (required)
+  jwksCacheSeconds: 300
+
+# --- API workload ------------------------------------------------------------
+api:
+  replicaCount: 2
+  port: 8080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Extra environment variables (name/value) for the api container.
+  extraEnv: []
+  # Name of an existing Secret whose keys are injected as env vars (LLM keys,
+  # MCP credentials, POSTGRES_DSN, ...). Empty = none.
+  envFromSecret: ""
+  service:
+    type: ClusterIP
+    port: 80
+
+# --- UI workload -------------------------------------------------------------
+ui:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/OWNER/opsrag-ui
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  port: 5173
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# --- Indexing Job (ephemeral; replaces the always-on indexer) ----------------
+# Indexing runs as a run-to-completion Job, not a long-running pod. The CronJob
+# below is BOTH the scheduled full-reindex and the template the API clones for
+# ad-hoc POST /index/repo Jobs. Backend pods stay pure-serving; progress is
+# tracked in the durable Postgres job-state, so all replicas show a consistent
+# /indexing/status (the old in-memory tracker diverged per pod).
+indexJob:
+  enabled: true
+  # API trigger mode: auto | k8s | inprocess.
+  #   auto      -> spawn a Job when running in-cluster, else in-process (dev)
+  #   k8s       -> always spawn a Job (errors if RBAC/cronjob missing)
+  #   inprocess -> never spawn a Job (legacy in-process indexing)
+  mode: auto
+  rbac:
+    # Create the Role + RoleBinding letting the API SA clone the CronJob and
+    # create Jobs in this namespace. Disable if you manage RBAC out-of-band.
+    create: true
+  # Scheduled full reindex (--all). Set suspendSchedule=true to keep the
+  # template available for ad-hoc Jobs without running on a timer.
+  schedule: "0 3 * * *"
+  suspendSchedule: false
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  extraEnv: []
+  nodeSelector: {}
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 4Gi
+
+# --- Slack bot worker (opt-in) ----------------------------------------------
+slackBot:
+  enabled: false
+  replicaCount: 1
+  # Slack tokens come from envFromSecret / secretRef, never inline.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# --- Service account ---------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# --- Ingress (opt-in) --------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: opsrag.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- Config (rendered into a ConfigMap, mounted as config.yaml) --------------
+# These mirror the app's config.yaml. MCP flags below drive both the ConfigMap
+# and the OPSRAG_MCP_<NAME>_ENABLED env vars on the api container.
+config:
+  # Optional cloud model bundle: aws (Bedrock) | gcp (Vertex) | "" (none).
+  # When set it fills UNSET model slots (llm/embedding/reranker/pro_model and
+  # the per-purpose `models` block) with sane provider defaults -- no rebuild.
+  # Precedence: OPSRAG_* env > explicit blocks below > cloud bundle default.
+  # See values-aws.yaml / values-gcp.yaml for complete overlays.
+  cloudProvider: ""
+  llm:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    apiKeyEnv: ANTHROPIC_API_KEY
+    # Cloud routing knobs (emitted only when set). aws_region for Bedrock;
+    # project + location for Vertex.
+    awsRegion: ""
+    project: ""
+    location: ""
+  embedding:
+    provider: fastembed
+    model: BAAI/bge-small-en-v1.5
+    # Embedding dimension MUST match the model AND the Qdrant collection.
+    # Leave empty to let the cloud bundle default fill it (aws Cohere Embed v4
+    # = 1536; gcp gemini-embedding-001 = 3072). Empty = provider default.
+    dimension: ""
+    awsRegion: ""
+    project: ""
+    location: ""
+  # Optional reranker block (emitted only when provider set). The cloud bundle
+  # fills this automatically (aws cohere.rerank-v3-5; gcp semantic-ranker).
+  reranker: {}
+    # provider: bedrock
+    # model: cohere.rerank-v3-5:0
+    # awsRegion: us-east-1
+  vectorStore:
+    provider: qdrant
+    url: http://qdrant:6333
+    collection: opsrag
+    # Set true ONLY for an intentional reindex after switching embedding models
+    # (a silent dimension mismatch corrupts the shared Qdrant index + caches).
+    allowDimensionChange: false
+  knowledgeGraph:
+    provider: none
+  session:
+    provider: postgres
+    dsnEnv: POSTGRES_DSN
+  observability:
+    provider: console
+    projectName: opsrag
+
+# --- MCP integrations (all 14; disabled by default) --------------------------
+# The key set MUST equal the MCPIntegration registry exactly (CI-enforced).
+# Each `enabled` maps to OPSRAG_MCP_<NAME>_ENABLED on the api container.
+# `secretRef` optionally names a Secret carrying that integration's credentials.
+mcp:
+  aws:           { enabled: false, secretRef: "" }
+  azure:         { enabled: false, secretRef: "" }
+  cloudflare:    { enabled: false, secretRef: "" }
+  code:          { enabled: false, secretRef: "" }
+  datadog:       { enabled: false, secretRef: "" }
+  elasticsearch: { enabled: false, secretRef: "" }
+  gcp:           { enabled: false, secretRef: "" }
+  github:        { enabled: false, secretRef: "" }
+  gitlab:        { enabled: false, secretRef: "" }
+  grafana:       { enabled: false, secretRef: "" }
+  knowledge:     { enabled: false, secretRef: "" }
+  kubernetes:    { enabled: false, secretRef: "" }
+  loki:          { enabled: false, secretRef: "" }
+  prometheus:    { enabled: false, secretRef: "" }
+  rootly:        { enabled: false, secretRef: "" }
+  runbooks:      { enabled: false, secretRef: "" }
+  sentry:        { enabled: false, secretRef: "" }
+  slack:         { enabled: false, secretRef: "" }
+  splunk:        { enabled: false, secretRef: "" }
+  tool_cache:    { enabled: false, secretRef: "" }
+
+# --- Opt-in Secret (operator can instead use envFromSecret) ------------------
+secret:
+  create: false
+  # name defaults to <fullname>-secrets when create=true
+  name: ""
+  data: {}   # key: value pairs (stringData)
+
+# --- Network policy (opt-in egress allowlist) --------------------------------
+networkPolicy:
+  enabled: false
+  # Extra egress rules appended to the defaults (DNS + intra-namespace).
+  egress: []
+
+# --- Pod disruption budget ---------------------------------------------------
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# --- Horizontal pod autoscaler (api) -----------------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# --- Pod-level settings ------------------------------------------------------
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+nodeSelector: {}
+tolerations: []
+affinity: {}

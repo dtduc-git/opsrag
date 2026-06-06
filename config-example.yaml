@@ -1,0 +1,250 @@
+# =============================================================================
+# opsrag - annotated configuration reference
+# =============================================================================
+# This file documents EVERY available configuration block and its options.
+# It is a reference, not a ready-to-run config: copy the blocks you need into
+# your own config.yaml (see config.yaml for the minimal shipped default).
+#
+# Conventions:
+#   - Any key ending in `_env` names the ENV VAR that carries the secret -
+#     the secret value itself is never written here or in config.yaml.
+#   - Blocks with `enabled: false` are inert until you flip them on.
+#   - The root model forbids unknown keys: a typo'd block name fails startup.
+# =============================================================================
+
+# --- Authentication (OIDC) ---------------------------------------------------
+auth:
+  issuer: https://your-idp.example.com        # OIDC discovery base URL
+  audience: opsrag                             # expected token audience
+  jwks_cache_seconds: 300                      # how long to cache signing keys
+
+# --- Cloud model bundle (optional shortcut) ----------------------------------
+# Set ONE provider to get sane per-purpose model defaults (reason / tool_call /
+# embed / rerank / summarize / extract) without spelling out every slot below.
+# Any explicit slot (llm/embedding/reranker/agent.pro_model) or env var always
+# wins over the bundle. Precedence: env var > this YAML > bundle default.
+#   cloud_provider: aws   # -> Bedrock: Sonnet 4.6 (reason+pro), Haiku 4.5 (tools),
+#                         #    Cohere Embed v4 + Rerank 3.5
+#   cloud_provider: gcp   # -> Vertex: Gemini 2.5 Flash/Pro + Gemini embeddings
+#
+# Override any model at deploy time via env (no rebuild) -- handy for picking a
+# cost/quality tier or bumping a deprecated model id:
+#   OPSRAG_CLOUD_PROVIDER, OPSRAG_LLM_PROVIDER, OPSRAG_LLM_MODEL, OPSRAG_PRO_MODEL,
+#   OPSRAG_EMBEDDING_PROVIDER, OPSRAG_EMBEDDING_MODEL, OPSRAG_EMBEDDING_DIMENSION,
+#   OPSRAG_RERANKER_PROVIDER, OPSRAG_RERANKER_MODEL   (see .env.example)
+# cloud_provider: aws
+
+# --- LLM provider ------------------------------------------------------------
+llm:
+  provider: anthropic            # anthropic | openai | vertex | bedrock
+  model: claude-sonnet-4-20250514
+  api_key_env: ANTHROPIC_API_KEY # anthropic/openai
+  max_tokens: 4096
+  # Vertex AI:
+  #   provider: vertex
+  #   model: gemini-2.0-flash
+  #   project: your-gcp-project
+  #   location: us-central1
+  # Bedrock:
+  #   provider: bedrock
+  #   model: anthropic.claude-sonnet-4-20250514-v1:0
+  #   aws_region: us-east-1
+  #   aws_profile: your-aws-profile
+
+# --- Embeddings --------------------------------------------------------------
+embedding:
+  provider: fastembed            # fastembed | openai | vertex | bedrock
+  model: BAAI/bge-small-en-v1.5  # fastembed: local ONNX (384-dim)
+  # dimension: 384               # override when the provider supports it
+  # openai:   provider: openai, model: text-embedding-3-large, api_key_env: OPENAI_API_KEY
+  # vertex:   provider: vertex,  model: text-embedding-005, project/location
+  # bedrock:  provider: bedrock, model: amazon.titan-embed-text-v2:0, aws_region
+
+# --- Vector store ------------------------------------------------------------
+vector_store:
+  provider: qdrant               # qdrant | pgvector
+  url: http://localhost:6333
+  collection: opsrag
+  # api_key_env: QDRANT_API_KEY  # for Qdrant Cloud
+  # pgvector:
+  #   provider: pgvector
+  #   dsn_env: PGVECTOR_DSN
+
+# --- Code lane (OPTIONAL, Qdrant only) ---------------------------------------
+# Retrieval is always hybrid (dense + BM25 RRF). Enabling the code lane adds a
+# 4th RRF lane over a SEPARATE collection of code chunks embedded with a
+# code-specialized embedder -- big win for "where is function X / which file
+# defines Y" queries. Leave BOTH blocks unset (the default) to run dense+BM25
+# only; you still get the BM25 lexical boost without this.
+#
+# To enable: set both blocks, then RE-INDEX (code chunk boundaries change, so
+# the code collection must be (re)built). Prose retrieval is unaffected.
+# code_embedding:                # embedder for the code collection (any EmbeddingConfig)
+#   provider: bedrock
+#   model: cohere.embed-english-v3   # or a code-tuned model (e.g. voyage-code, jina-code via litellm)
+#   aws_region: us-west-2
+# code_vector_store:             # the separate code collection (Qdrant)
+#   provider: qdrant
+#   url: http://localhost:6333
+#   collection: opsrag_code
+
+# --- Knowledge graph ---------------------------------------------------------
+knowledge_graph:
+  provider: none                 # none (FR-019 null backend) | neo4j
+  # neo4j:
+  #   provider: neo4j
+  #   url: bolt://localhost:7687
+  #   username: neo4j
+  #   password_env: NEO4J_PASSWORD
+  #   database: neo4j
+
+# --- Reranker ----------------------------------------------------------------
+reranker:
+  provider: noop                 # noop | cohere | fastembed | vertex
+  # cohere:  provider: cohere, model: rerank-v3.5, api_key_env: COHERE_API_KEY
+  # vertex:  provider: vertex,  project: your-gcp-project, location: global
+
+# --- Sessions / Memory -------------------------------------------------------
+session:
+  provider: postgres             # memory | postgres
+  dsn_env: POSTGRES_DSN
+memory:
+  provider: memory               # memory | postgres
+  # dsn_env: POSTGRES_DSN
+
+# --- Chunking ----------------------------------------------------------------
+chunking:
+  strategy: parent_child         # parent_child | fixed_size
+  child_size: 256
+  child_overlap: 32
+  parent_max_tokens: 1024
+  # fixed_size: strategy: fixed_size, chunk_size: 512, overlap: 64
+
+# --- Entity extraction -------------------------------------------------------
+entity_extraction:
+  method: rule_based             # rule_based | llm | hybrid
+
+# --- Observability -----------------------------------------------------------
+observability:
+  provider: console              # console | phoenix
+  project_name: opsrag
+  # phoenix: provider: phoenix, endpoint: http://localhost:6006 (PHOENIX_API_KEY optional)
+
+# --- Agent tuning ------------------------------------------------------------
+agent:
+  mode: full                     # full | minimal  (legacy 'hybrid' lane removed)
+  top_k: 10
+  rerank_top_k: 5
+  max_retries: 3
+  # pro_model: claude-opus-4-...   # optional escalation model
+
+# --- SCM (source indexing) ---------------------------------------------------
+scm:
+  provider: gitlab               # gitlab | github
+  base_url: https://gitlab.com
+  token_env: GITLAB_TOKEN
+  repos: []                      # list of repo paths/URLs to index
+  default_branch: main
+  auto_index: true
+  clone_mode: true
+  use_ssh: false
+  # ssh_host / ssh_user when use_ssh: true
+
+# --- HTTP API ----------------------------------------------------------------
+api:
+  api_keys: []                   # static API keys (alternative to OIDC, dev only)
+  api_keys_env: OPSRAG_API_KEYS
+  rate_limit_enabled: true
+  rate_limit_rpm: 60
+
+# --- Branding (UI white-label) -----------------------------------------------
+brand:
+  name: OpsRAG
+  subtitle: DevOps Intelligence
+  assistant_name: OpsRAG
+  favicon_url: ""
+  accent_color: ""
+
+# --- Scheduler (daily background indexing) -----------------------------------
+scheduler:
+  enabled: false
+  timezone: UTC
+  cron_hour: 2
+  cron_minute: 0
+  jitter_seconds: 900
+  parallel_limit: 3
+
+# --- Deployment context (Principle VI: org-specific facts via config) ---------
+# Feeds prompt templates and dynamic regexes so no deployment fact is hardcoded
+# in code. All lists are optional and default to empty.
+deployment:
+  organization_label: null       # display name for your org (optional)
+  services: []                   # e.g. [api, web, worker]
+  environments: []               # e.g. [prod, staging, dev]
+  key_repos: []                  # notable repos with one-line layout hints
+  kubernetes: {}                 # clusters: [...], default_cluster: ...
+  cloud: {}                      # gcp_projects: [...], etc.
+  tracker: {}                    # ticket_prefix, base_url
+  source_urls: {}                # confluence/slack/rootly/scm base URLs for links
+  semantic_router_examples: {}   # optional classifier augmentation examples
+
+# --- Non-git knowledge sources (opt-in ingestion) ----------------------------
+confluence:
+  enabled: false
+  base_url: https://your-org.atlassian.net/wiki
+  email_env: CONFLUENCE_EMAIL
+  api_token_env: CONFLUENCE_API_TOKEN
+  spaces_allowlist: []
+  spaces_denylist: []
+  label_denylist: []
+rootly:
+  enabled: false
+  api_token_env: ROOTLY_API_TOKEN
+  base_url: https://api.rootly.com/v1
+  web_base_url: null             # for clickable incident links
+  statuses: []
+  post_mortem_statuses: []
+  skip_private: true
+slack:
+  enabled: false
+  bot_token_env: SLACK_BOT_TOKEN
+  workspace_url: null            # for clickable message links
+  channels_allowlist: []
+  backfill_days: 30
+  min_replies_per_thread: 1
+
+# --- Slack bot (Socket Mode worker) ------------------------------------------
+slack_bot:
+  enabled: false
+  bot_token_env: OPSRAG_SLACK_BOT_TOKEN
+  app_token_env: OPSRAG_SLACK_APP_TOKEN
+  channels_allowlist: []
+  streaming_enabled: true
+  per_user_daily_quota: 200
+
+# --- MCP integrations --------------------------------------------------------
+# All fourteen, disabled. Flip `enabled: true` and provide the integration's
+# required env (see .env.example). Missing env on an enabled MCP fails startup
+# with MCP_MISCONFIGURED:<name>:<env> (FR-004). Per-integration knobs go under
+# `extra:` and are validated by that integration's own model.
+mcp:
+  aws:           { enabled: false }   # AWS read-only (EC2/EKS/ECS/CloudWatch/S3/Cost + aws_read)
+  azure:         { enabled: false }   # Azure read-only (Monitor/AKS/Resource Graph)
+  cloudflare:    { enabled: false }   # Cloudflare zones / DNS / Zero-Trust
+  code:          { enabled: false }   # code search lane
+  datadog:       { enabled: false }   # Datadog metrics / monitors / APM
+  elasticsearch: { enabled: false }   # Elasticsearch / OpenSearch log search
+  gcp:           { enabled: false }   # Google Cloud read-only (Logging/Monitoring/GKE/Run/Asset)
+  github:        { enabled: false }   # GitHub API (files, commits, PRs, issues, Actions)
+  gitlab:        { enabled: false }   # GitLab API (MRs, pipelines, files)
+  grafana:       { enabled: false }   # Grafana dashboards + Prometheus/Loki proxy + alerts
+  knowledge:     { enabled: false }   # internal knowledge base
+  kubernetes:    { enabled: false }   # K8s inspection (needs KUBECONFIG)
+  loki:          { enabled: false }   # Grafana Loki log queries (LogQL)
+  prometheus:    { enabled: false }   # Prometheus queries
+  rootly:        { enabled: false }   # Rootly incidents
+  runbooks:      { enabled: false }   # runbook lookup tool
+  sentry:        { enabled: false }   # Sentry errors / issues / events
+  slack:         { enabled: false }   # Slack search tool
+  splunk:        { enabled: false }   # Splunk SPL search (read-only)
+  tool_cache:    { enabled: false }   # cross-tool result cache

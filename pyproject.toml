@@ -1,0 +1,190 @@
+[project]
+name = "opsrag"
+version = "0.1.0a0"
+description = "Agentic GraphRAG for DevOps and SRE — vendor-neutral, OIDC-authenticated, with opt-in MCP integrations."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "The opsrag Authors" },
+]
+keywords = [
+    "agentic",
+    "rag",
+    "graphrag",
+    "sre",
+    "devops",
+    "langgraph",
+    "mcp",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Systems Administration",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    # Agent orchestration
+    "langgraph>=1.1",
+    "langgraph-checkpoint-postgres>=2.0",
+    # HTTP surface
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    # Config / validation
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    # OIDC Bearer-token verification (JWKS-based; provider-agnostic).
+    "pyjwt[crypto]>=2.8",
+    # Default LLM providers
+    "anthropic>=0.45",
+    "openai>=1.60",
+    # Default vector store and the optional graph store
+    "qdrant-client>=1.13",
+    "neo4j>=5.25",
+    # Session, checkpoint, and memory storage
+    "psycopg[binary,pool]>=3.2",
+    # Observability — Phoenix + OpenInference instrumentations consumed by
+    # arize-phoenix-otel's register(auto_instrument=True). The wrapper only
+    # attaches instrumentations that are actually installed, so these must
+    # be present for Phoenix to see LangGraph / Anthropic / Vertex traces.
+    "arize-phoenix-otel>=0.10",
+    "arize-phoenix-evals>=0.20",
+    "openinference-instrumentation-langchain>=0.1.64",
+    "openinference-instrumentation-anthropic>=1.0.3",
+    "openinference-instrumentation-vertexai>=0.1.14",
+    # Scheduling for periodic ingestion
+    "apscheduler>=3.10",
+    # MCP integrations — Kubernetes uses the async client to keep the
+    # FastAPI event loop free.
+    "kubernetes_asyncio>=32.0",
+    # Slack chatbot (Socket Mode, outbound websocket only)
+    "slack-sdk>=3.27.0",
+]
+
+[project.optional-dependencies]
+fastembed = ["fastembed>=0.5"]
+vertex = [
+    "google-cloud-aiplatform>=1.80",
+    "anthropic[vertex]>=0.45",
+    # sentencepiece is required by `vertexai.tokenization` (consumed by
+    # opsrag.tokenization). google-cloud-aiplatform does not pull it in
+    # automatically, so it is listed alongside the SDK that needs it.
+    "sentencepiece>=0.2",
+]
+bedrock = ["boto3>=1.35"]
+# Scoped LiteLLM adapter: routes embeddings + LLM through LiteLLM so any
+# LiteLLM-supported backend (Voyage, Gemini, self-hosted OpenAI-compatible
+# Qwen, Bedrock, OpenAI, ...) becomes a config flip.
+litellm = ["litellm>=1.50"]
+pgvector = ["asyncpg>=0.30"]
+cohere = ["cohere>=5.13"]
+# Mem0 per-service operational memory (provider="mem0"). Reuses the project's
+# existing Qdrant + configured LLM/embedder; no separate datastore.
+mem0 = ["mem0ai>=0.1"]
+# First-party login (auth.mode="login"): Argon2id passwords, Authlib SSO
+# (Google / Microsoft-Entra / GitHub), cookie sessions + rotating refresh
+# tokens. Optional — the default OIDC resource-server path needs none of it.
+login = [
+    "pwdlib[argon2]>=0.2",     # Argon2id password hashing (passlib successor)
+    "authlib>=1.3",            # server-side OAuth2/OIDC client for SSO
+    "itsdangerous>=2.2",       # signed session cookie + state/nonce
+    "python-multipart>=0.0.9", # form-encoded POST /auth/login body
+]
+# spaCy NER for the Q&A cache discriminator (free-form entity layer on top
+# of the regex layer). The model `en_core_web_sm` is ~13MB and is pulled
+# separately by `python -m spacy download` in the Dockerfile so it does
+# not bloat the wheel build.
+ner = ["spacy>=3.7,<4.0"]
+# Eval is local-only — NOT in the production container. Local dev / CI
+# runners install with `pip install -e ".[vertex,eval]"` (or
+# `uv sync --extra eval`). The container Dockerfile stays lean.
+eval = [
+    "deepeval>=2.0",
+    "pyyaml>=6.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=3.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/OWNER/opsrag"
+Repository = "https://github.com/OWNER/opsrag"
+Issues = "https://github.com/OWNER/opsrag/issues"
+Changelog = "https://github.com/OWNER/opsrag/blob/master/CHANGELOG.md"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["opsrag*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "opsrag/eval"]
+markers = [
+    "requires_cloudsql: integration test needs a live CloudSQL fixture; skipped by default in CI",
+    "slow: integration test that exceeds 10 seconds wall time",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "W",   # pycodestyle warnings
+]
+# Rules ignored project-wide because they fight patterns the ported codebase
+# uses deliberately (not bugs). The high-signal F-rules (undefined name,
+# redefinition, f-string issues) plus import hygiene stay enforced.
+ignore = [
+    "E501",  # line-too-long: the ported code is dense; not worth reflowing.
+    "E402",  # module import not at top: intentional lazy imports (optional
+             # deps / avoid import cycles) are used throughout.
+    "B008",  # function call in arg default: this IS the FastAPI Depends()
+             # pattern; ruff's own docs recommend ignoring it for FastAPI.
+    "B904",  # raise-from inside except: stylistic; many sites re-raise plainly.
+    "B905",  # zip() without strict=: equal-length is guaranteed at call sites.
+    "B023",  # function-uses-loop-variable: pre-existing; closures are awaited
+             # immediately at each site (no deferred-binding bug). Revisit.
+    "E701",  # multiple statements on one line: a few intentional one-liners.
+    "F841",  # unused local variable: pre-existing dead assigns; harmless. The
+             # high-signal F821 (undefined name) stays on -- it caught a real
+             # missing `import os` in the Slack handler.
+    "E741",  # ambiguous variable name (l/I/O): one pre-existing site.
+    "B007",  # unused loop control variable: cosmetic.
+    "UP042", # str+Enum -> StrEnum: deliberately NOT applied. DocType et al.
+             # round-trip through API payloads via `.value`; StrEnum changes
+             # `str(member)` semantics and risks serialization drift.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__ files re-export provider classes via `__all__.append()`
+# inside try/except (optional deps). Ruff can't see dynamic __all__, so it
+# false-flags these as unused. Standard exemption for re-export hubs.
+"**/__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["opsrag"]
+ignore_missing_imports = true

@@ -1,0 +1,203 @@
+# ============================================================
+# opsrag - Local Evaluation Stack
+# ============================================================
+#
+# Quick start:
+#   1. cp .env.example .env
+#   2. Set ANTHROPIC_API_KEY (or your provider's key) in .env
+#   3. docker compose -f deploy/compose/docker-compose.yaml up -d
+#   4. Follow specs/.../quickstart.md from step 4 onward
+#
+# Services (see quickstart.md section 3):
+#   opsrag-api  -> http://localhost:8080  FastAPI backend
+#   opsrag-ui   -> http://localhost:5173  React SPA
+#   qdrant      -> http://localhost:6333  Vector store
+#   postgres    -> localhost:5432         Sessions / memory / checkpoints
+#   dex         -> http://localhost:5556  Bundled local OIDC issuer
+#   phoenix     -> http://localhost:6006  Local trace viewer
+#
+# Everything that varies between deployments comes from .env or
+# config.yaml. The placeholder image refs below use "your-org" and
+# must be replaced with your own registry path before publishing.
+# ============================================================
+
+services:
+  # -- opsrag API (FastAPI backend) -----------------------------------
+  opsrag-api:
+    # Build the image from the repository root by default. To use a
+    # prebuilt image instead, comment out `build` and uncomment `image`.
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ghcr.io/your-org/opsrag:latest
+    env_file:
+      - .env
+    environment:
+      OPSRAG_ROLE: api
+      OPSRAG_CONFIG: /app/config.yaml
+      # Connection strings point at the sibling compose services. These
+      # `environment:` values take precedence over any same-named keys in .env.
+      QDRANT_URL: http://qdrant:6333
+      POSTGRES_DSN: postgresql://opsrag:opsrag@postgres:5432/opsrag
+      # Local trace collector.
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+      # Knowledge graph (OPT-IN). The graph lane stays OFF unless you set
+      # knowledge_graph.provider=neo4j in config.yaml. When you do, opsrag-api
+      # reads the Neo4j password from NEO4J_PASSWORD (config.password_env) and
+      # connects to the sibling `neo4j` service. URL/user are config defaults
+      # (bolt://localhost:7687 / neo4j) -- override knowledge_graph.url to
+      # bolt://neo4j:7687 in config.yaml to reach the compose service.
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-opsrag-password}
+    volumes:
+      # Demo profile: mount the SSO-skipped (no-auth) config over the image's
+      # shipped default so the cookie-less UI can call the API.
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      dex:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # -- opsrag indexing Job (run-to-completion) ------------------------
+  # NOT started by `up` (guarded behind the `jobs` profile). Run on demand:
+  #   docker compose run --rm opsrag-indexer-job --repo devops/foo --branch master
+  #   docker compose run --rm opsrag-indexer-job --all
+  # Mirrors opsrag-api's image/env but exits when indexing completes. This is
+  # the local stand-in for the production k8s Job; progress lands in the same
+  # durable Postgres job-state the API reads.
+  opsrag-indexer-job:
+    profiles: ["jobs"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ghcr.io/your-org/opsrag:latest
+    env_file:
+      - .env
+    environment:
+      OPSRAG_ROLE: job-indexer
+      OPSRAG_CONFIG: /app/config.yaml
+      QDRANT_URL: http://qdrant:6333
+      POSTGRES_DSN: postgresql://opsrag:opsrag@postgres:5432/opsrag
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-opsrag-password}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: "no"
+
+  # -- opsrag UI (React SPA served by nginx) --------------------------
+  opsrag-ui:
+    # Built from ui/ (nginx serves the static SPA on container port 3000 and
+    # proxies /api/* to the opsrag-api service - see ui/nginx.conf). The SPA is
+    # configured at BUILD time (Vite env), so no runtime env is needed here.
+    build:
+      context: ../../ui
+      dockerfile: Dockerfile
+    image: ghcr.io/your-org/opsrag-ui:latest
+    ports:
+      - "5173:3000"   # browse http://localhost:5173 (nginx listens on 3000)
+    depends_on:
+      opsrag-api:
+        condition: service_started
+    restart: unless-stopped
+
+  # -- Qdrant (vector store) ------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.18
+    ports:
+      - "6333:6333"   # REST API + dashboard
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  # -- PostgreSQL (sessions / memory / checkpoints) -------------------
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: opsrag
+      POSTGRES_USER: opsrag
+      POSTGRES_PASSWORD: opsrag
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opsrag -d opsrag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # -- Dex (bundled local OIDC issuer) --------------------------------
+  dex:
+    image: dexidp/dex:v2.45.1
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex/config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "5556:5556"
+    restart: unless-stopped
+
+  # -- Phoenix (local trace viewer) -----------------------------------
+  phoenix:
+    image: arizephoenix/phoenix:version-16.3.0
+    ports:
+      - "6006:6006"   # Phoenix UI
+      - "4317:4317"   # OTLP gRPC collector
+    volumes:
+      - phoenix-data:/data
+    restart: unless-stopped
+
+  # -- Neo4j (knowledge graph -- OPT-IN) ------------------------------
+  # The graph lane is OFF by default (knowledge_graph.provider=none). This
+  # service exists so you can test the graph locally: set
+  # knowledge_graph.provider=neo4j in config.yaml and point opsrag-api at it
+  # (see the commented NEO4J_* env on opsrag-api above). Ships with the APOC
+  # plugin enabled -- the graph store's upsert/traverse Cypher requires it,
+  # and the factory fails fast at startup if APOC is missing.
+  neo4j:
+    image: neo4j:5
+    environment:
+      # Username is always `neo4j`; password comes from .env (NEO4J_PASSWORD).
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-opsrag-password}
+      # Enable the APOC procedure library (required by the graph store).
+      NEO4J_PLUGINS: '["apoc"]'
+      # APOC needs these unrestricted for addLabels / merge.relationship.
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_allowlist: apoc.*
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      # `RETURN 1` over cypher-shell confirms the DB is accepting queries.
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_PASSWORD:-opsrag-password}\" 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  qdrant-data:
+  pg-data:
+  phoenix-data:
+  neo4j-data:

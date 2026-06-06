@@ -1,0 +1,159 @@
+# =============================================================================
+# opsrag on AWS (EKS + Amazon Bedrock) -- production example overlay
+# =============================================================================
+# Usage:
+#   helm upgrade --install opsrag deploy/helm/opsrag \
+#     --namespace opsrag --create-namespace \
+#     -f deploy/helm/opsrag/values-aws.yaml \
+#     --set image.repository=<your-ecr>/opsrag --set image.tag=<tag>
+#
+# This overlay assumes:
+#   * An EKS cluster with the AWS Load Balancer Controller installed (for the
+#     ALB ingress) and an OIDC provider associated (for IRSA).
+#   * Qdrant and Postgres reachable in-cluster (adjust URLs/DSN below).
+#   * Bedrock model access ENABLED in your region for the chosen models
+#     (Bedrock console -> Model access).
+#
+# Credentials model: IRSA (IAM Roles for Service Accounts). NO static AWS keys
+# live in the pod -- the SDK picks up credentials from the projected token that
+# EKS injects when the ServiceAccount carries the role-arn annotation below.
+# -----------------------------------------------------------------------------
+
+image:
+  repository: <your-account>.dkr.ecr.us-east-1.amazonaws.com/opsrag
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# --- OIDC (your IdP -- unrelated to AWS IAM) ---------------------------------
+auth:
+  issuer: https://your-idp.example.com
+  audience: opsrag
+
+# --- App config: select the AWS/Bedrock model bundle -------------------------
+# cloud_provider=aws fills the model slots with the Bedrock bundle:
+#   reason/pro  = Sonnet 4.6   (us.anthropic.claude-sonnet-4-6)
+#   tool_call   = Haiku 4.5    (us.anthropic.claude-haiku-4-5-...)
+#   embed       = Cohere Embed v4 (us.cohere.embed-v4:0, 1536-dim)
+#   rerank      = Cohere Rerank 3.5 ON Bedrock (cohere.rerank-v3-5:0)
+# Override any slot below or via OPSRAG_* env (precedence: env > config > bundle).
+config:
+  cloudProvider: aws
+  llm:
+    # Leave provider/model at the shipped Anthropic defaults so the aws bundle
+    # fills them with Bedrock Sonnet 4.6. aws_region targets the Bedrock region.
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    apiKeyEnv: ANTHROPIC_API_KEY   # unused on Bedrock (IRSA), kept for schema
+    awsRegion: us-east-1
+  embedding:
+    # Defaults left at fastembed so the aws bundle promotes them to Cohere
+    # Embed v4 on Bedrock. dimension is filled to 1536 by the bundle; we pin it
+    # here too so the Qdrant collection guard is explicit.
+    provider: fastembed
+    model: BAAI/bge-small-en-v1.5
+    dimension: 1536               # MUST match Cohere Embed v4 + the collection
+    awsRegion: us-east-1
+  vectorStore:
+    provider: qdrant
+    url: http://qdrant:6333       # adjust to your Qdrant service / managed URL
+    collection: opsrag
+    # allowDimensionChange: true  # ONLY when re-indexing after an embed switch
+  # POSTGRES_DSN is delivered via the envFromSecret below (sessions/usage/memory).
+
+# --- API workload ------------------------------------------------------------
+api:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 2Gi }
+  # Existing Secret injected as env (created out-of-band, see header of README).
+  # Expected keys (placeholders -- never commit real values):
+  #   POSTGRES_DSN, OPSRAG_SESSION_SIGNING_KEY, OPSRAG_ADMIN_PASSWORD,
+  #   GITLAB_TOKEN, CONFLUENCE_API_TOKEN, and any SSO client secrets.
+  envFromSecret: opsrag-secrets
+  # AWS_REGION is the SDK's default region for Bedrock/STS. AWS credentials
+  # themselves come from IRSA (the projected token), NOT from env/secret.
+  extraEnv:
+    - name: AWS_REGION
+      value: us-east-1
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1
+  service:
+    type: ClusterIP
+    port: 80
+
+# --- ServiceAccount + IRSA ---------------------------------------------------
+# The role-arn annotation is what makes EKS inject a web-identity token the AWS
+# SDK exchanges for temporary Bedrock credentials -- no static keys anywhere.
+#
+# Create the IAM role (trust policy = the cluster OIDC provider, condition on
+# this SA: system:serviceaccount:opsrag:opsrag) and attach a policy granting:
+#   bedrock:InvokeModel  on the chosen model ARNs, e.g.
+#     arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-sonnet-4-6
+#     arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-haiku-4-5-*
+#     arn:aws:bedrock:us-east-1::foundation-model/us.cohere.embed-v4:0
+#     arn:aws:bedrock:us-east-1::foundation-model/cohere.rerank-v3-5:0
+#   (add bedrock:InvokeModelWithResponseStream for streaming.)
+# eksctl: eksctl create iamserviceaccount --name opsrag --namespace opsrag \
+#   --cluster <c> --attach-policy-arn <bedrock-policy-arn> --approve
+serviceAccount:
+  create: true
+  name: opsrag
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/opsrag-bedrock
+
+# --- Ingress (AWS Load Balancer Controller / ALB) ----------------------------
+# Swap the annotations for the nginx variant if you run ingress-nginx instead.
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # ACM cert for the host (issue in the same region as the ALB):
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERT_ID>
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    # --- nginx alternative (delete the alb.* lines, set className: nginx) ----
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  hosts:
+    - host: opsrag.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # ALB terminates TLS via the ACM cert above; the tls block is for nginx/cert-manager.
+  tls: []
+    # - hosts: [opsrag.example.com]
+    #   secretName: opsrag-tls
+
+# --- Indexing Job ------------------------------------------------------------
+# Inherits the config volume (cloud_provider=aws) + envFromSecret + IRSA SA, so
+# scheduled and ad-hoc index Jobs reach Bedrock with the same credentials.
+indexJob:
+  enabled: true
+  mode: auto
+  schedule: "0 3 * * *"
+  extraEnv:
+    - name: AWS_REGION
+      value: us-east-1
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { memory: 4Gi }
+
+# --- Reliability -------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# --- MCP integrations (enable what you use; creds via mcp.<name>.secretRef) ---
+mcp:
+  gitlab:     { enabled: true,  secretRef: opsrag-secrets }
+  kubernetes: { enabled: false, secretRef: "" }

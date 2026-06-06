@@ -1,0 +1,71 @@
+# pre-commit hooks for opsrag.
+#
+# Install once:
+#   pip install pre-commit   # or: uv tool install pre-commit
+#   pre-commit install
+#
+# Run on the whole tree:
+#   pre-commit run --all-files
+
+minimum_pre_commit_version: "3.5.0"
+default_language_version:
+  python: python3.11
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+        exclude: ^deploy/helm/.+/templates/.*\.yaml$
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        exclude: ^.*\.md$
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        # Strict typing is enforced in CI on the full `opsrag/` package
+        # (see pyproject.toml). The local hook only checks staged files
+        # to keep commits snappy.
+        additional_dependencies:
+          - "pydantic>=2.10"
+          - "types-PyYAML"
+        files: ^opsrag/.*\.py$
+
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+        args: ["-x"]
+
+  - repo: local
+    hooks:
+      - id: audit-vendor-neutrality
+        name: audit-vendor-neutrality
+        description: >-
+          Reject commits introducing proprietary names, non-English text,
+          or hardcoded internal hosts. Rules live in scripts/audit-rules.yaml.
+        entry: scripts/audit-vendor-neutrality.sh
+        language: system
+        pass_filenames: false
+        require_serial: true
+        # The audit walks `git ls-files`, so it always sees the full tree;
+        # we want it to run on every commit, not only when matching files
+        # change.
+        always_run: true

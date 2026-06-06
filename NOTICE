@@ -1,0 +1,15 @@
+opsrag
+Copyright 2026 The opsrag Authors
+
+This product includes software developed by The opsrag Authors and contributors.
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product previously evolved from an internal, vendor-specific tooling
+project. The public opsrag project is a sanitized, vendor-neutral fork.
+See CHANGELOG.md for the fork-origin entry.
+
+Third-party notices: when adopters package opsrag together with bundled
+runtime dependencies (e.g. inside a container image), the corresponding
+notices of those dependencies must be reproduced alongside this NOTICE
+file in the distributed artefact, per Apache License 2.0 §4(d).

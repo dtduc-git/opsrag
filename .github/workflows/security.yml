@@ -1,0 +1,171 @@
+name: security
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly full sweep (Mondays 06:17 UTC). Picks up newly-disclosed CVEs
+    # against dependencies/images that were clean at merge time.
+    - cron: "17 6 * * 1"
+  workflow_dispatch: {}
+
+# Least-privilege defaults. Jobs that upload SARIF widen to security-events.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  UV_VERSION: "0.5.x"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Trivy filesystem scan: dependency CVEs + leaked secrets in the working tree.
+  # ---------------------------------------------------------------------------
+  trivy-fs:
+    name: trivy-fs (deps + secrets)
+    runs-on: ubuntu-24.04
+    # Non-blocking: the scan reports CVEs/secrets (SARIF), and the SARIF upload
+    # needs GHAS which a private repo lacks. Don't let either fail the run.
+    continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan (SARIF, non-failing report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+
+      - name: Upload Trivy fs SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        # Code-scanning SARIF upload needs GitHub Advanced Security, which is
+        # not available on a private repo without a GHAS license. Don't fail
+        # the job over it -- the scan still ran. Flip off once GHAS is enabled.
+        continue-on-error: true
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  # ---------------------------------------------------------------------------
+  # Trivy config scan: Dockerfile / IaC / Kubernetes manifest misconfigurations.
+  # ---------------------------------------------------------------------------
+  trivy-config:
+    name: trivy-config (IaC misconfig)
+    runs-on: ubuntu-24.04
+    # Non-blocking: see trivy-fs (scan reports; SARIF upload needs GHAS).
+    continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy config scan (SARIF)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-config.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
+      - name: Upload Trivy config SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        # See trivy-fs: SARIF upload needs GHAS (unavailable on private repo).
+        continue-on-error: true
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+
+  # ---------------------------------------------------------------------------
+  # Dependency audit against the resolved uv environment.
+  # ---------------------------------------------------------------------------
+  pip-audit:
+    name: pip-audit (resolved env)
+    runs-on: ubuntu-24.04
+    # Non-blocking: report dependency CVEs without gating merges. `--strict`
+    # fails on any advisory, which would red-flag CI on a transitive CVE the
+    # repo can't immediately patch. Review findings in the job log; tighten
+    # back to blocking once the dependency tree is clean.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --extra dev
+      - name: pip-audit (audit the synced venv)
+        run: uv run --with pip-audit pip-audit --strict
+
+  # ---------------------------------------------------------------------------
+  # Secret scan over history (push) / diff (PR). gitleaks-action needs no
+  # license for public repos; GITLEAKS_LICENSE is optional and only required
+  # for org-account private repos. Passing it through is non-fatal when unset.
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-24.04
+    # Non-blocking: gitleaks-action@v2 requires a GITLEAKS_LICENSE for private
+    # repos under an organization account; without it the action errors. Keep
+    # the scan running for visibility but don't gate merges on the license.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: only needed for private repos under a GitHub *organization*
+          # account. Unset on public/personal repos -> the action runs fine.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ---------------------------------------------------------------------------
+  # CodeQL static analysis (Python).
+  # ---------------------------------------------------------------------------
+  codeql:
+    name: codeql (python)
+    runs-on: ubuntu-24.04
+    # Non-blocking: CodeQL analysis uploads results to GitHub code scanning,
+    # which needs Advanced Security -- unavailable on a private repo without a
+    # GHAS license, so `analyze` fails at upload. Flip off once GHAS is enabled.
+    continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
