@@ -1,0 +1,83 @@
+# confluence -- Phase 2 connector regression suite (2026-05-06).
+# Locks the SRE space pilot ingestion. All five queries target
+# Confluence-only content (not duplicated in any indexed git repo).
+#
+# `expected_sources` use the OpsRAG path convention for Confluence:
+#   <page_id>:<slug>.md  (under repo `confluence:SRE`).
+
+- id: confluence_001
+  category: confluence
+  query: "What is the IAM Database CloudSQL Access Rule per the SRE wiki?"
+  expected_sources:
+    - 5355798530:iam-database-cloudsql-access-rule.md
+  must_contain:
+    - "Cloud SQL"
+    - "PostgreSQL"
+  must_not_contain:
+    - "context does not contain"
+    - "I don't have access"
+  notes: |
+    Locks Confluence retrieval for an SRE-only access-control policy.
+    Pre-Phase-2 OpsRAG had no visibility into this content; only after
+    the SRE-space ingestion does this query produce a grounded answer.
+    Page id 5355798530 was confirmed indexed during the 2026-05-06 pilot.
+
+- id: confluence_002
+  category: confluence
+  query: "How do we manage Cloudflare DNS records with ExternalDNS in Kubernetes?"
+  expected_sources:
+    # Slug truncated to 60 chars in connector -- path ends `kubernet.md`,
+    # not `kubernetes.md`. Suffix-match in metric handles the rest.
+    - 5286559778:managing-cloudflare-dns-records-with-externaldns-in-kubernet.md
+  must_contain:
+    - "ExternalDNS"
+    - "Cloudflare"
+  must_not_contain:
+    - "context does not contain"
+  notes: |
+    Tests retrieval of an organization-specific operational doc that
+    lives only in Confluence (not duplicated in gitops-monorepo or
+    sre-knowledge-base).
+
+- id: confluence_003
+  category: confluence
+  query: "How do we right-size Kubernetes workloads using Prometheus and VictoriaMetrics?"
+  expected_sources:
+    - 5451448427:kubernetes-workload-rightsizing-with-prometheus-victoriametrics.md
+  must_contain:
+    - "Prometheus"
+    - "VictoriaMetrics"
+  must_not_contain:
+    - "no information"
+    - "context does not contain"
+  notes: |
+    Multi-tool synthesis question; tests that the connector indexed
+    technical SRE pages with code/config blocks intact.
+
+- id: confluence_004
+  category: confluence
+  query: "What is the procedure to get access to CloudSQL instances?"
+  expected_sources:
+    - 3536323499:procedure-to-get-access-to-cloudsql-instances.md
+  must_contain:
+    - "CloudSQL"
+  must_not_contain:
+    - "I cannot determine"
+    - "context does not contain"
+  notes: |
+    Procedural query -- tests whether Confluence runbook-style content
+    surfaces alongside the gitops-monorepo runbook for a related topic.
+
+- id: confluence_005
+  category: confluence
+  query: "What does the SLO Audit Methodology page describe?"
+  expected_sources:
+    - 764314729:slo-audit-methodology.md
+  must_contain:
+    - "SLO"
+  must_not_contain:
+    - "context does not contain"
+    - "no information"
+  notes: |
+    Direct page-title-based retrieval; smoke test that exact-phrasing
+    queries hit the right page when content is unique to Confluence.

@@ -1,0 +1,57 @@
+# ============================================================
+# Dex - Bundled local OIDC issuer for the opsrag eval stack
+# ============================================================
+#
+# This config exists ONLY for the local docker-compose walkthrough.
+# It is NOT a production identity provider. In a real deployment you
+# point opsrag at your own OIDC issuer via OPSRAG_OIDC_ISSUER.
+#
+# Issuer must match what the API and UI use to validate tokens.
+# See quickstart.md section 6.
+issuer: http://localhost:5556/dex
+
+# In-memory storage: state is discarded on restart. Fine for eval.
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+# Enable the resource-owner password grant so the quickstart's
+# grant_type=password flow works without a browser.
+oauth2:
+  passwordConnector: local
+  # Allow tokens to be refreshed during the eval session.
+  skipApprovalScreen: true
+
+# Static credential database (no external user directory needed).
+enablePasswordDB: true
+
+# -- One static user ------------------------------------------------
+# Login: evaluator@example.com / evaluator
+#
+# The hash below is bcrypt of the password "evaluator". To regenerate
+# (for example to change the password), run one of:
+#
+#   python3 -c "import bcrypt; print(bcrypt.hashpw(b'evaluator', bcrypt.gensalt(rounds=10)).decode())"
+#   htpasswd -bnBC 10 "" evaluator | tr -d ':\n'
+#
+# Then paste the result into hash below.
+staticPasswords:
+  - email: "evaluator@example.com"
+    # bcrypt hash of "evaluator"
+    hash: "$2b$10$bKjPnqvNQ3NR1iqq7BdH2.nDyKvsgpJiPlGIo/PDyBsPHeeSWbkte"
+    username: "evaluator"
+    userID: "00000000-0000-0000-0000-000000000001"
+
+# -- One static client ----------------------------------------------
+# The opsrag API and UI authenticate as this client.
+staticClients:
+  - id: opsrag-local
+    name: "opsrag local"
+    # Placeholder secret for local eval only. CHANGE_ME for any non-local use.
+    secret: local-secret
+    redirectURIs:
+      - http://localhost:5173/callback
+      - http://localhost:5173/auth/callback
+      - http://localhost:8080/auth/callback

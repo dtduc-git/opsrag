@@ -1,0 +1,318 @@
+# audit-rules.yaml
+#
+# Configuration for scripts/audit-vendor-neutrality.sh.
+# All lists are case-insensitive substring matches (no regex).
+# Update whenever a new leak vector is discovered.
+
+
+# ---------------------------------------------------------------------------
+# Check 1 — proprietary names.
+#
+# This list ships with synthetic EXAMPLE tokens ("example-corp", "EXMPL-", etc.)
+# so the check is a working, non-empty demonstration out of the box. Before
+# relying on it, REPLACE these with your own organization's real identifiers —
+# company name, internal service shortnames, repo/path prefixes, ticket
+# prefixes, chat workspace, etc.
+#
+# Do NOT list this project's own public placeholders here, or you will get
+# false positives on intentional content:
+#   - "acme" / "acme-notes"  → the synthetic sample corpus
+#   - "your-org"             → the fill-in-the-blank token used in example
+#                              config, compose files, and docs
+#   - "example.com" & friends → RFC 2606 reserved placeholder domains
+#
+# Design notes:
+#   - Your organization identifier (here the placeholder "example-corp") as a
+#     substring catches all *.example-corp.{com,io}, @example-corp.com,
+#     example-corpinc, example-corp-{prod,staging,preprod,production}, etc. — so those
+#     are NOT listed separately. Swap in your real org token.
+#   - Bare product names that collide with common English words should be
+#     OMITTED because case-insensitive substring would false-positive. List
+#     distinctive compound forms (e.g. "<service>-be") instead.
+#   - Generic terms like "integration-api" are too broad to denylist as bare
+#     tokens; only the path-prefixed form "saas/integration-api" is listed.
+# ---------------------------------------------------------------------------
+proprietary_names_denylist:
+  # Company identifiers (replace with your organization's real tokens)
+  - example-corp
+  - example-corp.io
+
+  # Internal service shortnames (compound forms) — example placeholders
+  - example-corp-service-be
+  - example-corp-worker-be
+  - example-corp-worker-fe
+
+  # Internal repo / path forms — example placeholders
+  - saas/example-corp-service-be
+  - devops/example-corp-gitops
+
+  # Internal ticket prefixes (substring catches "EXMPL-1234", etc.) — example
+  - EXMPL-
+
+  # Chat identifiers — example placeholders
+  - example-corp.slack.com           # redundant with "example-corp" rule but explicit for grep-ability
+
+  # ==========================================================================
+  # DO NOT ADD — false-positive landmines:
+  #   acme / acme-notes     → the project's intentional public sample corpus
+  #   your-org              → the fill-in-the-blank token in example config/docs
+  #   integration-api       → too generic; use a path form like "saas/<svc>-api"
+  #   SEC-                  → high false-positive risk on hash refs ("sec-1" etc.)
+  #   Bare product names that collide with English words under case-insensitive
+  #   kong-gateway, sonarqube, datadog, pomerium, sftpgo → public OSS
+  # ==========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Check 1b — paths where proprietary-name hits are tolerated.
+# ---------------------------------------------------------------------------
+proprietary_names_allowlist_paths:
+  - CHANGELOG.md                     # project genesis story
+  - LICENSE
+  - NOTICE
+  - ATTRIBUTION.md
+  - specs/                           # spec-kit working documents
+  - .specify/                        # spec-kit metadata
+  - .claude/                         # claude-code plugin scaffolding (vendor-provided)
+  - samples/                         # synthetic placeholder corpora
+  - docs/history/                    # reserved for future project-history docs
+  - scripts/audit-rules.yaml         # this file lists denylist tokens by design
+
+
+# ---------------------------------------------------------------------------
+# Check 2 — non-English text exempt paths.
+# ASCII-only check is structural; only path-based exemptions are configured here.
+# Per-file marker `# audit:allow-non-ascii` is also supported by the scanner
+# but is intentionally NOT used in this repo (English-only invariant).
+# ---------------------------------------------------------------------------
+non_english_exempt_paths:
+  - tests/fixtures/i18n/             # multilingual test inputs
+  - locales/                         # future i18n locale files (when added)
+  - docs/i18n/                       # future translated docs (when added)
+
+  # Project-management / scaffold content — typographic non-ASCII (em-dashes,
+  # arrows, ellipses) is allowed in human-authored prose here, not in shipped
+  # runtime artefacts. These paths are NOT runtime code paths.
+  - specs/                           # spec-kit feature docs (em-dashes in prose)
+  - .specify/                        # spec-kit metadata + templates
+  - .claude/                         # claude-code plugin scaffolding
+  - docs/superpowers/                # brainstorm/design docs (· § ↔ — in prose)
+  - scripts/audit-rules.yaml         # this file (em-dashes in section headers)
+  - CHANGELOG.md
+  - CONTRIBUTING.md
+  - README.md
+  - SECURITY.md
+  - deploy/helm/                       # Helm chart docs/values: human-authored
+                                       # deployment prose with em-dashes/arrows
+                                       # (cloud-provider examples), like README.md
+
+  # Slack UI uses load-bearing emoji (👍 👎 👀 ✅ 🤔 etc.) in Block Kit messages
+  # and reaction calls. These are part of the user-facing UX, not language text.
+  - opsrag/slack_bot/
+
+  # React UI: source uses typographic Unicode (em dashes, >=, x, box-drawing
+  # comment dividers) and load-bearing emoji (thumbs reactions) - UX/typography,
+  # not non-English language text. Proprietary-name + hardcoded-host checks
+  # still apply to ui/ (only the structural non-ASCII check is exempted here).
+  - ui/
+
+
+# ---------------------------------------------------------------------------
+# Check 3a — paths where hardcoded-host hits are tolerated.
+# Same conceptual model as proprietary_names_allowlist_paths: scaffolding /
+# spec / docs content that explains the system is allowed to reference hosts
+# verbatim without those references being treated as shipped runtime artefacts.
+# ---------------------------------------------------------------------------
+hardcoded_hosts_exempt_paths:
+  - specs/                           # spec-kit feature docs (schema/example URLs)
+  - .specify/                        # spec-kit metadata
+  - docs/superpowers/                # design docs (reference public vendor API hosts)
+  - tests/                           # test fixtures use throwaway hosts/emails (a@b.com, jane@corp.com)
+  - scripts/audit-rules.yaml         # this file (denylist tokens shaped like hosts)
+  - CHANGELOG.md                     # external doc links
+  - CONTRIBUTING.md                  # standards body / DCO / etc. links
+  - SECURITY.md                      # GitHub security-advisory link
+  - README.md                        # external links
+  - NOTICE
+  - LICENSE
+
+
+# ---------------------------------------------------------------------------
+# Check 3b — hardcoded hosts allowlist.
+# Supports fnmatch wildcards (e.g. "*.example.com").
+# ---------------------------------------------------------------------------
+hardcoded_hosts_allowlist:
+  # RFC 2606 / RFC 6761 reserved
+  - example.com
+  - example.org
+  - example.net
+  - example.dev
+  - "*.example.com"
+  - "*.invalid"
+  - "*.test"
+  - "*.localhost"
+  - localhost
+
+  # Local dev / cluster-internal
+  - dex.local
+  - host.docker.internal
+  - kubernetes.default.svc
+  - kubernetes.default.svc.cluster.local
+
+  # Public cloud-provider hosts (legit in deployment docs/values; never
+  # internal/proprietary). Used in the AWS/GCP Helm examples (IRSA / Workload
+  # Identity annotations, Bedrock/Vertex endpoints).
+  - "*.amazonaws.com"
+  - amazonaws.com
+  - eks.amazonaws.com
+  - "*.gke.io"
+  - iam.gke.io
+  - "*.googleapis.com"
+  - googleapis.com
+  - accounts.google.com              # Google OIDC discovery endpoint (SSO)
+  - "*.pkg.dev"                      # GCP Artifact Registry (regional, e.g. us-central1-docker.pkg.dev)
+  - "*.docker.pkg.dev"
+  - "*.run.app"                      # GCP Cloud Run service URLs (gcp MCP)
+
+  # Public vendor API hosts referenced by the read-only MCP integrations.
+  # Default endpoints / OAuth scopes / fake-response samples -- public SaaS,
+  # never internal/proprietary. Per-deployment hosts come from env (e.g.
+  # GRAFANA_URL, LOKI_URL, SPLUNK_URL, GITHUB_API_URL) so they aren't here.
+  - sentry.io                        # sentry MCP default host
+  - "*.sentry.io"                    # regional sentry hosts (us./de.)
+  - management.azure.com             # azure MCP -- ARM
+  - "*.azure.com"
+  - api.loganalytics.io              # azure MCP -- Log Analytics query API
+  - "*.loganalytics.io"
+  - "*.azmk8s.io"                    # AKS API server FQDNs (azure MCP samples)
+  - api.github.com                   # github MCP default host
+  - api.datadoghq.com                # datadog MCP (also *.datadoghq.com region sites)
+  - "*.datadoghq.com"
+  - api.rootly.com                   # rootly MCP
+  - "*.honeycomb.io"                 # (future) honeycomb MCP
+
+  # Project's own identity. opsrag.io is the project domain, used as a
+  # Kubernetes label-key namespace (opsrag.io/index-repo, ...) the way
+  # app.kubernetes.io/* is -- not a network endpoint.
+  - opsrag.io
+  - "*.opsrag.io"
+
+  # Kubernetes gateway/ingress CRD API groups (public ecosystem identifiers,
+  # NOT hosts). Matched verbatim by the multi-provider routing extractor.
+  - istio.io
+  - "*.istio.io"                     # networking.istio.io, security.istio.io, ...
+  - konghq.com
+  - "*.konghq.com"
+  - traefik.io
+  - traefik.containo.us
+  - projectcontour.io
+  - getambassador.io
+  - "*.getambassador.io"
+
+  # Package registries / language docs
+  - python.org
+  - pypi.org
+  - pythonhosted.org
+  - "*.pythonhosted.org"             # uv.lock dependency download URLs
+  - docs.python.org
+  - npmjs.com
+  - npmjs.org
+  - registry.npmjs.org
+  - helm.sh
+  - kubernetes.io
+  - "*.k8s.io"                       # K8s API groups (metrics.k8s.io, v4.channel.k8s.io, gateway.networking.k8s.io)
+  - app.kubernetes.io                # K8s recommended-labels namespace
+  - "*.kubernetes.io"
+
+  # Source control SaaS
+  - github.com
+  - api.github.com
+  - raw.githubusercontent.com
+  - gitlab.com
+  - docs.gitlab.com
+
+  # Google Cloud / Vertex AI
+  - "*.googleapis.com"
+  - vertex.googleapis.com
+  - aiplatform.googleapis.com
+  - storage.googleapis.com
+  - generativelanguage.googleapis.com
+  - "*.gserviceaccount.com"          # GCP service-account email-style identifiers
+  - iam.gke.io                       # GCP Workload Identity annotation namespace
+  - "*.gke.io"
+
+  # Vector / Graph DB SaaS
+  - "*.qdrant.io"
+  - cloud.qdrant.io
+  - neo4j.com
+  - "*.neo4j.io"
+
+  # Observability SaaS
+  - "*.datadoghq.com"
+  - datadoghq.com                    # bare form used by URL-parse logic
+  - api.datadoghq.com
+  - api.datadoghq.eu
+  - datadoghq.eu                     # bare form (URL-parse logic alt site)
+  - rootly.com
+  - "*.rootly.com"
+  - api.rootly.com
+
+  # Communication SaaS
+  - "*.slack.com"
+  - slack.com                        # bare form (Slack API base URL is https://slack.com/api)
+  - api.slack.com
+
+  # Atlassian (Confluence / Jira) SaaS
+  - "*.atlassian.net"
+  - atlassian.net                    # bare form used in 'if "atlassian.net" in url' checks
+
+  # AI provider SaaS
+  - api.anthropic.com
+  - api.openai.com
+  - openrouter.ai
+  - api.cohere.com
+  - "*.cohere.com"
+
+  # Public CDNs / front-end asset hosts (referenced by the React UI)
+  - gstatic.com
+  - "*.gstatic.com"                  # Google Fonts static host (ui/index.html)
+  - jsdelivr.net
+  - "*.jsdelivr.net"                 # jsDelivr CDN (ui mermaid/assets)
+  - cdn.jsdelivr.net
+
+  # Container registries (public, vendor-neutral)
+  - ghcr.io
+  - "*.ghcr.io"
+  - gcr.io                           # Google Container Registry (e.g. distroless base-image refs in comments)
+  - "*.gcr.io"
+  - docker.io
+  - "*.docker.io"
+  - quay.io
+  - "*.quay.io"
+
+  # Standards / docs hosts (referenced from comments, README, CHANGELOG, CONTRIBUTING)
+  - apache.org
+  - "*.apache.org"
+  - whatwg.org
+  - "*.whatwg.org"
+  - keepachangelog.com
+  - semver.org
+  - developercertificate.org
+  - conventionalcommits.org
+  - json-schema.org                  # $schema URL in values.schema.json (Helm chart)
+  - w3.org                           # SVG/XML namespace URIs (inline SVG in ui CSS)
+  - "*.w3.org"
+  - opencollective.com               # OSS funding URLs in npm package-lock.json
+  - tidelift.com                     # OSS funding URLs in npm package-lock.json
+
+  # Cloudflare documentation example
+  - foo.com                          # CF API '?name=foo.com' comment example
+
+  # Identity / Zero-Trust providers (public OIDC hosts referenced in docs/auth.md)
+  - "*.cloudflare.com"
+  - api.cloudflare.com
+  - dex.coreos.com
+  - "*.okta.com"                     # Okta tenant hosts (auth setup docs)
+  - "*.auth0.com"                    # Auth0 tenant hosts
+  - login.microsoftonline.com        # Azure AD / Entra ID OIDC endpoint
+  - "*.microsoftonline.com"

@@ -1,0 +1,110 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# uv
+.uv-cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# --- Node / JS / TS ---------------------------------------------------------
+node_modules/
+.npm
+.eslintcache
+.parcel-cache
+.cache
+.next/
+.nuxt/
+.svelte-kit/
+.vite/
+.turbo/
+
+# UI build artifacts
+ui/dist/
+ui/build/
+ui/coverage/
+
+# --- Secrets & local config -------------------------------------------------
+.env
+.env.*
+!.env.example
+# Real-secret env for the local compose demo (NEVER commit). Covered by `.env`
+# above too, but listed explicitly so the intent is unmistakable.
+deploy/compose/.env
+deploy/compose/.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*-key.json
+.cloudflare-api-key
+.es_key
+config-local.yaml
+config-local.*.yaml
+
+# --- IDE / editor -----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- OS / temp --------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.orig
+
+# --- Docker / Compose -------------------------------------------------------
+.docker/
+docker-compose.override.yaml
+
+# --- Helm -------------------------------------------------------------------
+deploy/helm/**/charts/
+deploy/helm/**/*.tgz
+
+# --- Audit baseline (transient artefacts during sanitization sweep) --------
+audit-baseline.txt
+audit-baseline.err
+
+# --- LangGraph / Phoenix local data -----------------------------------------
+.langgraph/
+phoenix_data/
+
+# --- Spec Kit ephemeral -----------------------------------------------------
+.specify/feature.json.bak
+
+# Throwaway UI design mockups (sidebar redesign exploration)
+ui-mockups/
+design-scratch/
+
+# Audit-test probe fixtures (created/removed by tests/contract/test_audit_*.sh)
+_audit_probe_*

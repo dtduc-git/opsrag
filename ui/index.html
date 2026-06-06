@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#fafaf9" />
+    <!-- Title + favicon are set at runtime by App.tsx via /api/ui-config
+         (driven by OPSRAG_BRAND_* env vars). The values below are only the
+         pre-hydration fallback shown for ~100ms before the fetch resolves. -->
+    <title>OpsRAG</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- Premium type system: Instrument Serif for display, Geist for body,
+         Geist Mono for code. Loaded from Google Fonts; preconnect cuts
+         the first-byte cost across all three families. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <script>
+      // Set background before React hydrates to avoid a flash. The
+      // premium design is light-only; we keep this tiny inline script
+      // so the first paint matches the app shell exactly.
+      document.documentElement.style.background = "#fafaf9";
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

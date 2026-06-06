@@ -1,0 +1,18 @@
+# gitleaks configuration for opsrag.
+#
+# Extends the default ruleset and allowlists known, intentional placeholders
+# so the secret scan stays green without masking real credentials.
+title = "opsrag gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documentation placeholders — not real secrets."
+regexes = [
+  # `opsrag_xxx` is the placeholder MCP token shown in the UI's curl example
+  # (MCPTokensPage.tsx) and the README; it is illustrative, not a credential.
+  '''opsrag_xxx''',
+  # Generic bearer-token placeholders used in docs/examples.
+  '''Bearer\s+(opsrag_xxx|<[^>]+>|YOUR[_-]?TOKEN|xxx+)''',
+]

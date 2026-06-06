@@ -1,0 +1,236 @@
+# multi_doc_synthesis -- questions that genuinely need info from BOTH
+# expected_sources to answer correctly. Spec 2 rewrite (2026-05-07).
+#
+# Authoring contract per `tests/eval/specs/sprint0-02-multi-doc-rewrite.md`:
+#   - Each query has TWO sub-questions (part A, part B)
+#   - Part A's answer is found ONLY in expected_sources[0]
+#   - Part B's answer is found ONLY in expected_sources[1]
+#   - must_contain has one anchor for each part
+#
+# This locks recall above the previous 0.452 ceiling -- bot CANNOT
+# satisfy MustContain by retrieving just one of the two docs.
+
+- id: synth_001
+  category: multi_doc_synthesis
+  query: |
+    What `CI_MERGE_REQUEST_LABELS` condition does generic-pipeline.yaml
+    use to include preview.yaml, AND what stage do the `.python_unit_tests`
+    and `.nodejs_unit_tests` jobs in preview.yaml run in?
+  expected_sources:
+    - devops/gitops-pipeline-templates/generic-pipeline.yaml
+    - devops/gitops-pipeline-templates/preview.yaml
+  must_contain:
+    - "MERGE_REQUEST_LABELS"   # only in generic-pipeline.yaml's include rule
+    - "post-tests"              # only in preview.yaml -- the stage of unit-test jobs
+  must_not_contain:
+    - "does not specify"
+  notes: |
+    Spec 2 rewrite. Part A (`MERGE_REQUEST_LABELS =~ /preview/`) lives
+    in generic-pipeline.yaml's top-level `include:` block. Part B
+    (`stage: post-tests`) lives in preview.yaml's job definitions. Bot
+    must retrieve BOTH files to satisfy both anchors.
+
+- id: synth_002
+  category: multi_doc_synthesis
+  query: |
+    What Python script does cd.yaml's post-release job invoke, AND
+    which artifact does .delivery-job in dynamic-pipeline-template.yaml
+    declare it triggers from?
+  expected_sources:
+    - devops/gitops-pipeline-templates/cd.yaml
+    - devops/gitops-pipeline-templates/library/.dynamic-pipeline-template.yaml
+  must_contain:
+    - "jellyfish.py"             # in cd.yaml's post-release script: only
+    - "dynamic-cd.yaml"          # in .delivery-job's trigger.include.artifact: only
+  must_not_contain:
+    - "unrelated"
+  notes: |
+    Spec 2 rewrite. Part A (jellyfish.py) is the post-release script
+    referenced in cd.yaml. Part B (dynamic-cd.yaml) is the artifact
+    name in dynamic-pipeline-template.yaml's .delivery-job trigger.
+    Both are highly specific strings unlikely to appear elsewhere.
+
+- id: synth_003
+  category: multi_doc_synthesis
+  query: |
+    According to the acme-notes-be celery runbook, where in the gitops-monorepo
+    is the celery-worker replicaCount baseline stored? AND according to
+    the platform-wide celery-task-high-fail-rate runbook, what severity
+    label is assigned at the 1-minute, 15-minute, and 20-minute
+    thresholds?
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/services/acme-notes-be/runbooks/celery-high-task-fail-rate.md
+    - devops/sre/sre-knowledge-base/docs/runbooks/celery/more-than-5-tasks-failed-for-the-task-the-past-10m.md
+  must_contain:
+    - "values/saas/acme-notes-be/prod.yaml"   # acme-notes-be runbook's rollback section
+    - "P1"                               # platform runbook's "Critical: ... Severity P1"
+  must_not_contain:
+    - "I don't have access"
+  notes: |
+    Spec 2 rewrite. Part A (gitops-monorepo path for replicaCount) only
+    in acme-notes-be runbook's "Rollback" section. Part B (P1 severity) only
+    in platform runbook's "Current Thresholds" block. Validates that the
+    bot doesn't conflate platform-wide and service-scoped runbooks when
+    asked about both.
+
+- id: synth_004
+  category: multi_doc_synthesis
+  query: |
+    Per the SRE architecture overview, what gateway sits between
+    istio-ingressgateway and the service pods, AND per acme-notes-be's
+    metadata.yaml, what specific terraform file paths in acme-tf-state
+    define acme-notes-be's infrastructure across staging, preprod, and prod?
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/architecture/overview.md
+    - devops/sre/sre-knowledge-base/docs/services/acme-notes-be/metadata.yaml
+  must_contain:
+    - "Kong"                             # in architecture overview's traffic ingress diagram
+    - "app-acme-notes-be.tf"                  # only in acme-notes-be metadata.yaml's terraform paths block
+  must_not_contain:
+    - "no services"
+  notes: |
+    Spec 2 rewrite. Part A: Kong API gateway only described in
+    architecture/overview.md's mermaid sequence diagram. Part B:
+    `app-acme-notes-be.tf` is the literal terraform filename listed in
+    acme-notes-be/metadata.yaml's `infrastructure_terraform.paths` field.
+
+- id: synth_005
+  category: multi_doc_synthesis
+  query: |
+    What was the data-fix mitigation step for incident INC-2226, AND
+    according to acme-notes-be's incident-profile, which Cloud SQL instance
+    is acme-notes-be's "hot dependency" whose failure cascades into write-path
+    failures and Celery task pile-up?
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/incidents/INC-2226.md
+    - devops/sre/sre-knowledge-base/docs/services/acme-notes-be/incident-profile.md
+  must_contain:
+    - "TAG_PENDING"                      # specific to INC-2226's mitigation
+    - "acme-notes-pg16"               # specific to acme-notes-be incident-profile's Hot Dependencies table
+  must_not_contain:
+    - "no incidents"
+  notes: |
+    Spec 2 rewrite. Replaces the broken `INDEX.md` reference with the
+    real `acme-notes-be/incident-profile.md` which cross-references INC-2226.
+    Part A (TAG_PENDING DELETE) is the mitigation step in INC-2226.
+    Part B (acme-notes-pg16 Cloud SQL instance) is in the Hot
+    Dependencies table of incident-profile.
+
+# -- Cross-repo plural-intent goldens (kept from prior baseline) --
+# These exercise the plural-repo-intent + path-pattern fan-out paths.
+# They're not strictly part-A/part-B 2-doc syntheses -- they ask for
+# enumeration across many repos. Kept for retrieval-coverage regression.
+
+- id: synth_006
+  category: multi_doc_synthesis
+  query: "List out all repositories related to notimanager"
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/services/notimanager/metadata.yaml
+    - devops/sre/sre-knowledge-base/docs/runbooks/deployments/onboarding-new-saas-app.md
+  must_contain:
+    - "notimanager"
+    - "gitops-monorepo"
+    - "acme-tf-state/terraform"
+    - "product-development-org"
+  must_not_contain:
+    - "only one repository"
+    - "context does not contain"
+    - "terraform/projects"
+  notes: |
+    Validated 2026-05-06 after the terraform URL fix (commit 0983e1f) and
+    the path-pattern fan-out (Task 11). Should return all four repos
+    related to a service: saas project, gitops-monorepo,
+    terraform2.0/acme-tf-state/terraform, product-development-org.
+    "terraform/projects" anti-pattern catches the OLD broken URL prefix
+    that the bulk regex fixed.
+
+- id: synth_007
+  category: multi_doc_synthesis
+  query: "All repositories that has config of acme-notes-be service"
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/services/acme-notes-be/metadata.yaml
+    - devops/gitops/values/saas/acme-notes-be/prod.yaml
+    - devops/gitops/values/saas/acme-notes-be/preprod.yaml
+  must_contain:
+    - "saas/acme-notes-be"
+    - "gitops-monorepo"
+    - "values/saas/acme-notes-be"
+  must_not_contain:
+    - "only one repository"
+    - "no other repositories"
+    - "context does not contain"
+  notes: |
+    Regression for session 7a2ec313: pre-fix answer named only
+    "saas/acme-notes-be" because _detect_repo hard-filtered to that one repo
+    and retrieval missed gitops-monorepo's values/saas/acme-notes-be/* files.
+    Post-fix (Tasks 10+11): plural intent ("All repositories") disables
+    repo scoping; path-pattern fan-out via MatchText on content surfaces
+    the values files; rerank wide-pass for plural intent keeps them.
+
+# -- Sprint 0 NEW genuine-2-doc goldens (Spec 2 deliverable) --
+
+- id: synth_008
+  category: multi_doc_synthesis
+  query: |
+    According to the SRE Confluence wiki's IAM Database CloudSQL Access
+    Rule, what's the maximum duration for temporary production database
+    access? AND according to incident INC-2226, which uWSGI environment
+    variable was MISSING from the PROD environment, leading to the
+    60s/300s timeout mismatch with the proxy layer?
+  expected_sources:
+    - 5355798530:iam-database-cloudsql-access-rule.md
+    - devops/sre/sre-knowledge-base/docs/incidents/INC-2226.md
+  must_contain:
+    - "Cloud SQL"                # part A -- Confluence policy doc anchor
+    - "UWSGI_HARAKIRI"            # part B -- only in INC-2226's "Contributing factor: uWSGI configuration"
+  must_not_contain:
+    - "I don't have access"
+    - "no relevant context"
+  notes: |
+    NEW 2026-05-07. Cross-source: Confluence policy + Rootly-style
+    git-side postmortem. Part A grounded in IAM CloudSQL Access Rule
+    page (Confluence), Part B in INC-2226 specifically (only this
+    incident discusses UWSGI_HARAKIRI as the missing env var).
+
+- id: synth_009
+  category: multi_doc_synthesis
+  query: |
+    Per acme-notes-be's incident-profile, which platform-wide kubernetes
+    runbook covers application pods stuck in CrashLoopBackOff, AND
+    per the platform-wide celery runbook, what is the warning-threshold
+    failure-rate percentage and time window for the celery-task-high-fail-rate
+    alert?
+  expected_sources:
+    - devops/sre/sre-knowledge-base/docs/services/acme-notes-be/incident-profile.md
+    - devops/sre/sre-knowledge-base/docs/runbooks/celery/more-than-5-tasks-failed-for-the-task-the-past-10m.md
+  must_contain:
+    - "application-pod-is-under-crashloopbackoff"   # acme-notes-be incident-profile's Linked Runbooks
+    - "5%"                                            # platform celery runbook's threshold
+  must_not_contain:
+    - "no relevant"
+  notes: |
+    NEW 2026-05-07. Service incident-profile cross-references platform
+    runbooks. Part A: the literal runbook filename appears ONLY in
+    acme-notes-be's incident-profile (the Linked Runbooks list). Part B: the
+    "5%" threshold appears in the celery runbook's Why/Thresholds block.
+
+- id: synth_010
+  category: multi_doc_synthesis
+  query: |
+    What does generic-pipeline.yaml's include block say about the
+    `$CI_BYPASS` variable's role in deciding whether to include cd.yaml?
+    AND in dynamic-pipeline-template.yaml, what is the `image:` value
+    used for the .generate-config job?
+  expected_sources:
+    - devops/gitops-pipeline-templates/generic-pipeline.yaml
+    - devops/gitops-pipeline-templates/library/.dynamic-pipeline-template.yaml
+  must_contain:
+    - "CI_BYPASS"                                 # generic-pipeline.yaml include rules only
+    - "python:3.12-alpine"                         # only in .generate-config's image directive
+  must_not_contain:
+    - "context does not contain"
+  notes: |
+    NEW 2026-05-07. Sibling-file synthesis within gitops-pipeline-templates.
+    Part A: $CI_BYPASS is a unique-named variable in generic-pipeline.yaml's
+    cd.yaml inclusion rule. Part B: python:3.12-alpine is the specific
+    image string in dynamic-pipeline-template.yaml's .generate-config job.

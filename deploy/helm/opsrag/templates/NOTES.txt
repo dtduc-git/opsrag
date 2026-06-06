@@ -1,0 +1,24 @@
+opsrag {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}".
+
+1. Check readiness:
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "opsrag.fullname" . }}
+
+2. Port-forward the API and probe health:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "opsrag.fullname" . }} 8080:{{ .Values.api.service.port }}
+   curl -sf http://localhost:8080/healthz
+
+3. MCP integrations enabled in this release:
+{{- $any := false }}
+{{- range $name, $cfg := .Values.mcp }}
+{{- if $cfg.enabled }}
+   - {{ $name }}
+{{- $any = true }}
+{{- end }}
+{{- end }}
+{{- if not $any }}
+   (none - all integrations are disabled; the agent answers from the indexed corpus only)
+{{- end }}
+
+   To enable one, set mcp.<name>.enabled=true and provide its credentials via
+   api.envFromSecret or mcp.<name>.secretRef. Missing credentials cause a
+   fail-fast startup error (MCP_MISCONFIGURED:<name>:<env>).

@@ -1,0 +1,159 @@
+# =============================================================================
+# opsrag on GCP (GKE + Vertex AI) -- production example overlay
+# =============================================================================
+# Usage:
+#   helm upgrade --install opsrag deploy/helm/opsrag \
+#     --namespace opsrag --create-namespace \
+#     -f deploy/helm/opsrag/values-gcp.yaml \
+#     --set image.repository=<region>-docker.pkg.dev/<project>/opsrag/opsrag \
+#     --set image.tag=<tag>
+#
+# This overlay assumes:
+#   * A GKE cluster with Workload Identity ENABLED
+#     (gcloud container clusters update <c> --workload-pool=<project>.svc.id.goog).
+#   * Qdrant and Postgres reachable in-cluster (adjust URLs/DSN below).
+#   * Vertex AI API enabled in the project (aiplatform.googleapis.com).
+#
+# Credentials model: Workload Identity. NO static service-account JSON keys in
+# the pod -- the GKE metadata server vends tokens for the bound GCP service
+# account when the KSA carries the iam.gke.io/gcp-service-account annotation.
+# -----------------------------------------------------------------------------
+
+image:
+  repository: us-central1-docker.pkg.dev/<PROJECT_ID>/opsrag/opsrag
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# --- OIDC (your IdP) ---------------------------------------------------------
+auth:
+  issuer: https://your-idp.example.com
+  audience: opsrag
+
+# --- App config: select the GCP/Vertex model bundle --------------------------
+# cloud_provider=gcp fills the model slots with the Vertex bundle:
+#   reason/tool/summarize/extract = gemini-2.5-flash
+#   pro (escalation)              = gemini-2.5-pro
+#   embed                         = gemini-embedding-001 (3072-dim native)
+#   rerank                        = semantic-ranker-default-004
+# Override any slot below or via OPSRAG_* env (precedence: env > config > bundle).
+config:
+  cloudProvider: gcp
+  llm:
+    # Defaults left at Anthropic so the gcp bundle fills them with Vertex
+    # Gemini 2.5 Flash. project + location target Vertex AI.
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    apiKeyEnv: ANTHROPIC_API_KEY   # unused on Vertex (WI), kept for schema
+    project: <PROJECT_ID>
+    location: us-central1
+  embedding:
+    # Defaults left at fastembed so the gcp bundle promotes them to Vertex
+    # gemini-embedding-001. dimension filled to 3072 by the bundle; pinned here
+    # to make the Qdrant collection guard explicit. (gemini-embedding-001 is
+    # Matryoshka -- you may reduce to 1536/768, but the value MUST match the
+    # collection you create.)
+    provider: fastembed
+    model: BAAI/bge-small-en-v1.5
+    dimension: 3072               # MUST match gemini-embedding-001 + collection
+    project: <PROJECT_ID>
+    location: us-central1
+  reranker:
+    # Vertex ranking config location is typically "global".
+    project: <PROJECT_ID>
+    location: global
+  vectorStore:
+    provider: qdrant
+    url: http://qdrant:6333       # adjust to your Qdrant service / managed URL
+    collection: opsrag
+    # allowDimensionChange: true  # ONLY when re-indexing after an embed switch
+  # POSTGRES_DSN is delivered via the envFromSecret below (sessions/usage/memory).
+
+# --- API workload ------------------------------------------------------------
+api:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 2Gi }
+  # Existing Secret injected as env (created out-of-band, see README).
+  # Expected keys (placeholders -- never commit real values):
+  #   POSTGRES_DSN, OPSRAG_SESSION_SIGNING_KEY, OPSRAG_ADMIN_PASSWORD,
+  #   GITLAB_TOKEN, CONFLUENCE_API_TOKEN, and any SSO client secrets.
+  envFromSecret: opsrag-secrets
+  # Vertex SDK reads the project/region from these; credentials come from
+  # Workload Identity (the metadata server), NOT from env/secret.
+  extraEnv:
+    - name: GOOGLE_CLOUD_PROJECT
+      value: <PROJECT_ID>
+    - name: GOOGLE_CLOUD_REGION
+      value: us-central1
+  service:
+    type: ClusterIP
+    port: 80
+
+# --- ServiceAccount + Workload Identity --------------------------------------
+# The annotation binds this KSA to a GCP service account. NO JSON keys anywhere.
+#
+# Setup (GSA must have roles/aiplatform.user on the project):
+#   gcloud iam service-accounts create opsrag-vertex --project <PROJECT_ID>
+#   gcloud projects add-iam-policy-binding <PROJECT_ID> \
+#     --member "serviceAccount:opsrag-vertex@<PROJECT_ID>.iam.gserviceaccount.com" \
+#     --role roles/aiplatform.user
+#   gcloud iam service-accounts add-iam-policy-binding \
+#     opsrag-vertex@<PROJECT_ID>.iam.gserviceaccount.com \
+#     --role roles/iam.workloadIdentityUser \
+#     --member "serviceAccount:<PROJECT_ID>.svc.id.goog[opsrag/opsrag]"
+serviceAccount:
+  create: true
+  name: opsrag
+  annotations:
+    iam.gke.io/gcp-service-account: opsrag-vertex@<PROJECT_ID>.iam.gserviceaccount.com
+
+# --- Ingress (GKE Ingress + Google-managed cert) -----------------------------
+# Requires a ManagedCertificate object + a reserved global static IP. The
+# FrontendConfig (HTTP->HTTPS redirect) is optional and created out-of-band.
+ingress:
+  enabled: true
+  className: gce
+  annotations:
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: opsrag-ip
+    networking.gke.io/managed-certificates: opsrag-cert
+    # networking.gke.io/v1beta1.FrontendConfig: opsrag-fe   # optional HTTPS redirect
+  hosts:
+    - host: opsrag.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # GKE managed cert handles TLS; no tls secret needed.
+  tls: []
+
+# --- Indexing Job ------------------------------------------------------------
+# Inherits the config volume (cloud_provider=gcp) + envFromSecret + WI SA, so
+# scheduled and ad-hoc index Jobs reach Vertex with the same credentials.
+indexJob:
+  enabled: true
+  mode: auto
+  schedule: "0 3 * * *"
+  extraEnv:
+    - name: GOOGLE_CLOUD_PROJECT
+      value: <PROJECT_ID>
+    - name: GOOGLE_CLOUD_REGION
+      value: us-central1
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { memory: 4Gi }
+
+# --- Reliability -------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# --- MCP integrations (enable what you use; creds via mcp.<name>.secretRef) ---
+mcp:
+  gitlab:     { enabled: true,  secretRef: opsrag-secrets }
+  kubernetes: { enabled: false, secretRef: "" }

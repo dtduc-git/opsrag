@@ -1,0 +1,64 @@
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+.uv-cache/
+
+# Build artefacts
+build/
+dist/
+*.egg-info/
+
+# Node / UI
+ui/node_modules/
+ui/dist/
+ui/build/
+node_modules/
+
+# Local secrets / config
+.env
+.env.*
+!.env.example
+config-local.yaml
+config-local.*.yaml
+*.pem
+*.key
+*.crt
+*-key.json
+
+# Spec Kit & project management
+.specify/
+specs/
+docs/
+# NB: samples/ is intentionally NOT ignored - the runtime image ships the
+# sample corpus so scripts/seed-sample-corpus.sh can index it in-container.
+
+# Helm chart sources (not needed inside the runtime image)
+deploy/
+
+# Tests (image is runtime, not test runner)
+tests/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log
+*.tmp
+*.bak
+audit-baseline.txt

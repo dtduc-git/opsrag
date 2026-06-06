@@ -1,0 +1,78 @@
+# =============================================================================
+# opsrag - LOCAL DEMO config for the docker-compose stack
+# =============================================================================
+# Mounted into the api container at /app/config.yaml (see docker-compose.yaml),
+# overriding the image's shipped default. This is the SSO-skipped demo profile:
+#
+#   NO `auth:` block  ->  the OIDC Bearer middleware runs in OPEN mode, so the
+#   bundled React UI (which does not implement an OIDC/PKCE client yet) can call
+#   the API without a token. DO NOT use this profile on a network-exposed
+#   deployment - add an `auth:` block (see config-example.yaml) for any real use.
+#
+# Secrets (ANTHROPIC_API_KEY, POSTGRES_DSN override, MCP creds) come from
+# deploy/compose/.env (git-ignored). Connection strings to the sibling compose
+# services are injected via `environment:` in docker-compose.yaml.
+# =============================================================================
+
+llm:
+  provider: anthropic            # ANTHROPIC_API_KEY supplied via .env
+  model: claude-sonnet-4-20250514
+  api_key_env: ANTHROPIC_API_KEY
+  max_tokens: 4096
+
+embedding:
+  provider: fastembed            # local, no API key
+  model: BAAI/bge-small-en-v1.5
+
+vector_store:
+  provider: qdrant
+  url: http://qdrant:6333
+  collection: opsrag
+
+knowledge_graph:
+  provider: none                 # null backend (FR-019)
+
+session:
+  provider: postgres
+  dsn_env: POSTGRES_DSN
+
+memory:
+  provider: memory
+
+observability:
+  provider: console
+  project_name: opsrag
+
+entity_extraction:
+  method: rule_based
+
+agent:
+  mode: full                     # full | minimal  (legacy 'hybrid' lane removed)
+  top_k: 10
+  rerank_top_k: 5
+  max_retries: 3
+
+# All 14 MCP integrations disabled for the baseline demo (corpus-only answers).
+# Real credentials are present in .env, so you can flip any of these to true and
+# restart to exercise that integration.
+mcp:
+  aws:           { enabled: false }
+  azure:         { enabled: false }
+  cloudflare:    { enabled: false }
+  code:          { enabled: false }
+  datadog:       { enabled: false }
+  elasticsearch: { enabled: false }
+  gcp:           { enabled: false }
+  github:        { enabled: false }
+  gitlab:        { enabled: false }
+  grafana:       { enabled: false }
+  knowledge:     { enabled: false }
+  kubernetes:    { enabled: false }
+  loki:          { enabled: false }
+  prometheus:    { enabled: false }
+  rootly:        { enabled: false }
+  runbooks:      { enabled: false }
+  sentry:        { enabled: false }
+  slack:         { enabled: false }
+  splunk:        { enabled: false }
+  tool_cache:    { enabled: false }

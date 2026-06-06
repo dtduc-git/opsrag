@@ -1,0 +1,90 @@
+{{- if .Values.indexJob.enabled }}
+# Ephemeral indexing CronJob. Replaces the always-on `indexer` deployment:
+#   - On a schedule it runs a full reindex (`--all`).
+#   - Its `jobTemplate` is ALSO the source of truth the API clones (via the
+#     JobLauncher) when POST /index/repo triggers an ad-hoc Job -- the API only
+#     overrides the container args, so ad-hoc Jobs match the scheduled pod spec
+#     byte-for-byte (image, config volume, secret env, SA, ttl).
+# Set indexJob.suspendSchedule=true to keep the template for ad-hoc use without
+# running on a timer.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "opsrag.fullname" . }}-indexer
+  labels:
+    {{- include "opsrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: index-job
+spec:
+  schedule: {{ .Values.indexJob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  suspend: {{ .Values.indexJob.suspendSchedule }}
+  successfulJobsHistoryLimit: {{ .Values.indexJob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.indexJob.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "opsrag.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: index-job
+    spec:
+      backoffLimit: {{ .Values.indexJob.backoffLimit }}
+      ttlSecondsAfterFinished: {{ .Values.indexJob.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            {{- include "opsrag.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: index-job
+        spec:
+          serviceAccountName: {{ include "opsrag.serviceAccountName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          restartPolicy: Never
+          containers:
+            - name: indexer
+              image: {{ include "opsrag.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              # Default args: scheduled full reindex. The API's JobLauncher
+              # overrides these for ad-hoc per-repo/source Jobs.
+              args: ["job-indexer", "--all"]
+              env:
+                - name: OPSRAG_ROLE
+                  value: job-indexer
+                - name: OPSRAG_CONFIG
+                  value: /etc/opsrag/config.yaml
+                {{- include "opsrag.mcpEnv" . | nindent 16 }}
+                {{- with .Values.indexJob.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              {{- if .Values.api.envFromSecret }}
+              envFrom:
+                - secretRef:
+                    name: {{ .Values.api.envFromSecret }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.indexJob.resources | nindent 16 }}
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/opsrag
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: config
+              configMap:
+                name: {{ include "opsrag.fullname" . }}-config
+            - name: tmp
+              emptyDir: {}
+          {{- with .Values.indexJob.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
