@@ -689,6 +689,13 @@ def vector_retrieve_node(
 
         return {
             "retrieved_chunks": chunks,
+            # Reset merged_results EVERY call. The reranker/grader read
+            # `merged_results or retrieved_chunks`; without this reset, a CRAG
+            # rewrite -> re-retrieve leaves the previous pass's merged_results
+            # (~5 already-failed chunks) in state, so rerank/grade re-evaluate
+            # the STALE set and the rewritten query's fresh retrieval is silently
+            # discarded -- CRAG correction does nothing on the path it exists for.
+            "merged_results": [],
             "sources_searched": (
                 ["vector", "bm25"]
                 + (["code"] if code_embedding is not None else [])

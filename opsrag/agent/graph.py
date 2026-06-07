@@ -394,6 +394,7 @@ def build_tool_calling_graph(
     model_router=None,
     code_embedder: EmbeddingProvider | None = None,
     code_store: VectorStore | None = None,
+    light_graph=None,
 ):
     """Phase 03 Pillar 2 -- agent with live MCP tool-calling.
 
@@ -425,6 +426,12 @@ def build_tool_calling_graph(
     if reranker:
         graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
+    if light_graph is not None:
+        from opsrag.agent.nodes.entity_expand import entity_expand_node
+        graph.add_node(
+            "entity_expand",
+            entity_expand_node(vector_store, light_graph, embedder),
+        )
 
     graph.add_edge(START, "tool_decide")
 
@@ -447,11 +454,15 @@ def build_tool_calling_graph(
 
     # Retrieval path mirrors build_minimal_graph (no NLI, no CRAG --
     # tool-calling is opt-in and we keep the retrieval branch simple).
+    # Retrieval branch, with optional entity_expand between retrieve and rerank.
+    _post_retrieve = "entity_expand" if light_graph is not None else None
+    if _post_retrieve:
+        graph.add_edge("vector_retrieve", "entity_expand")
     if reranker:
-        graph.add_edge("vector_retrieve", "rerank")
+        graph.add_edge(_post_retrieve or "vector_retrieve", "rerank")
         graph.add_edge("rerank", "generate")
     else:
-        graph.add_edge("vector_retrieve", "generate")
+        graph.add_edge(_post_retrieve or "vector_retrieve", "generate")
     graph.add_edge("generate", END)
 
     return graph.compile(checkpointer=checkpointer)
@@ -470,6 +481,7 @@ def build_multi_agent_graph(
     model_router=None,
     code_embedder: EmbeddingProvider | None = None,
     code_store: VectorStore | None = None,
+    light_graph=None,
 ):
     """Sub-sprint 1 -- multi-agent graph: triage -> tool_caller <-> reasoner -> generator,
     with retrieval fall-through.
@@ -501,6 +513,16 @@ def build_multi_agent_graph(
     if reranker:
         graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
+    # Light-graph 1-hop entity augmentation on the retrieval branch -- was wired
+    # ONLY into build_full_graph, so in multi_agent mode (config-local default)
+    # the lane was dead: edges still computed at index time + entity_ids still
+    # bloated every payload, but nothing read them. Mirror the full-graph wiring.
+    if light_graph is not None:
+        from opsrag.agent.nodes.entity_expand import entity_expand_node
+        graph.add_node(
+            "entity_expand",
+            entity_expand_node(vector_store, light_graph, embedder),
+        )
 
     # Pre-triage branch: CASUAL -> friendly_generator (terminal); else -> triage.
     graph.add_conditional_edges(
@@ -529,11 +551,15 @@ def build_multi_agent_graph(
     )
     graph.add_edge("generator", END)
 
+    # Retrieval branch, with optional entity_expand between retrieve and rerank.
+    _post_retrieve = "entity_expand" if light_graph is not None else None
+    if _post_retrieve:
+        graph.add_edge("vector_retrieve", "entity_expand")
     if reranker:
-        graph.add_edge("vector_retrieve", "rerank")
+        graph.add_edge(_post_retrieve or "vector_retrieve", "rerank")
         graph.add_edge("rerank", "generate")
     else:
-        graph.add_edge("vector_retrieve", "generate")
+        graph.add_edge(_post_retrieve or "vector_retrieve", "generate")
     graph.add_edge("generate", END)
 
     return graph.compile(checkpointer=checkpointer)
@@ -859,8 +885,23 @@ async def query_with_session(
         "query": query,
         "user_id": user_id,
         "thread_id": thread_id,
+        # Loop budgets + per-turn scratch. ALL must reset every turn -- the
+        # Postgres checkpointer is keyed by thread_id and TypedDict is
+        # last-write-wins, so any field not reset here leaks from the prior turn:
+        # spent regen/rewrite budgets (ungrounded answers ship with no
+        # correction), rewrite_history[0] re-injecting last turn's anchors, a
+        # stale best_rerank_score mis-driving the grader's trust gate, etc.
         "retry_count": 0,
         "max_retries": 3,
+        "regen_count": 0,
+        "max_regens": 3,
+        "rewrite_history": [],
+        "best_rerank_score": 0.0,
+        "verification_result": {},
+        "anchors": [],
+        "anchors_matched_in_results": False,
+        "hyde_text": None,
+        "sub_queries": [],
         # Retrieval / chunks
         "retrieved_chunks": [],
         "merged_results": [],
@@ -979,7 +1020,14 @@ async def query_with_session(
     # hallucination_check explicitly flagged the answer as not grounded.
     # In minimal mode there's no hallucination check, so we treat absent
     # field as "no objection raised" -> cache it.
-    grounded_explicitly_failed = result.get("generation_grounded") is False and "hallucination_decision" in result
+    # `hallucination_decision` is a ROUTING function, never a state key -- the
+    # old `"hallucination_decision" in result` was always False, so an ungrounded
+    # answer that shipped via max_retries_hit got cached as grounded (forensic TTL
+    # = 90 days) and re-served. Gate on the node's actual outputs instead.
+    grounded_explicitly_failed = (
+        result.get("generation_grounded") is False
+        and result.get("current_step") == "hallucination_checked"
+    )
     tool_path_answer = bool(result.get("tool_path_active"))
     if (
         qa_cache is not None
@@ -1206,8 +1254,19 @@ async def query_with_session_events(
         "query": query,
         "user_id": user_id,
         "thread_id": thread_id,
+        # Per-turn budgets + scratch -- ALL reset (checkpointer leaks otherwise;
+        # see the non-streaming path).
         "retry_count": 0,
         "max_retries": 3,
+        "regen_count": 0,
+        "max_regens": 3,
+        "rewrite_history": [],
+        "best_rerank_score": 0.0,
+        "verification_result": {},
+        "anchors": [],
+        "anchors_matched_in_results": False,
+        "hyde_text": None,
+        "sub_queries": [],
         "retrieved_chunks": [],
         "merged_results": [],
         "graded_chunks": [],
@@ -1332,9 +1391,12 @@ async def query_with_session_events(
             _src_to_url[s] = _src_url(c, bases)
     source_urls_list: list[str | None] = [_src_to_url.get(s) for s in sources_list]
 
+    # See the non-streaming path: `hallucination_decision` is a routing fn, not a
+    # state key -- gate on the node's actual output so ungrounded answers aren't
+    # cached as grounded.
     grounded_explicitly_failed = (
         result.get("generation_grounded") is False
-        and "hallucination_decision" in result
+        and result.get("current_step") == "hallucination_checked"
     )
     tool_path_answer = bool(result.get("tool_path_active"))
     if (

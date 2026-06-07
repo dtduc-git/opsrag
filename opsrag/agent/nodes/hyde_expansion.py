@@ -108,10 +108,13 @@ def hyde_expansion_node(
                 "current_step": "hyde_empty",
             }
 
-        # Anchor the embedding with the original query keywords too so
-        # we don't drift entirely into the hypothetical's vocabulary.
-        # This is a small but consistent win in HyDE replications.
-        embed_text = f"{query}\n\n{hypothetical}"
+        # Embed ONLY the hypothetical. It's now embedded in DOCUMENT space
+        # (embed_texts, see vector_retriever) where the point is a clean doc-to-
+        # doc match; folding the raw query back in re-injects query-space prose
+        # and dilutes exactly the match HyDE-as-document exists to get right.
+        # Lexical anchoring on the user's literal terms comes free via the BM25
+        # lane, which always runs on the raw query.
+        embed_text = hypothetical
 
         _log.info(
             "hyde: applied (query_words=%d, hyde_chars=%d)",

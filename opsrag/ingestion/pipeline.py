@@ -671,6 +671,19 @@ class IngestionPipeline:
             _log.warning("parse failed repo=%s path=%s: %s", file.repo, file.path, exc)
             return 0
 
+        # Provenance (updated_at/service/url) CENTRALLY so every doc type gets it
+        # -- only markdown/helm parsers called apply_provenance, so the bulk of
+        # the corpus (code, k8s, terraform, alert, generic) could never be
+        # recency-ranked. Applied to doc.metadata before chunking so it
+        # propagates onto every chunk. Idempotent (markdown/helm re-apply same
+        # values). Non-fatal.
+        try:
+            from opsrag.ingestion.metadata import apply_provenance
+            doc.metadata = doc.metadata or {}
+            apply_provenance(doc.metadata, file, source_type=self._source_type_for(file))
+        except Exception as exc:
+            _log.debug("apply_provenance failed repo=%s path=%s: %s", file.repo, file.path, exc)
+
         chunks = await asyncio.to_thread(self.chunker.chunk, doc)
         if not chunks:
             return 0
