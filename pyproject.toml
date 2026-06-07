@@ -135,6 +135,12 @@ include = ["opsrag*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "opsrag/eval"]
+# Put the repo root on sys.path so `from tests.conftest import ...` resolves
+# regardless of how pytest is launched. Locally `python -m pytest` adds the CWD;
+# CI runs the `pytest` SCRIPT which does NOT -- so without this, the contract /
+# integration tests that import tests.conftest fail with "No module named
+# 'tests'". (`tests/` is an implicit namespace package, no __init__.py needed.)
+pythonpath = ["."]
 markers = [
     "requires_cloudsql: integration test needs a live CloudSQL fixture; skipped by default in CI",
     "slow: integration test that exceeds 10 seconds wall time",
