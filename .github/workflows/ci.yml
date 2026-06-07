@@ -204,30 +204,62 @@ jobs:
   eval-regression:
     name: eval-regression
     runs-on: ubuntu-24.04
-    if: |
-      contains(github.event.head_commit.modified, 'opsrag/agent/') ||
-      contains(github.event.head_commit.modified, 'opsrag/agents/') ||
-      contains(github.event.head_commit.modified, 'opsrag/mcp/') ||
-      contains(github.event.head_commit.modified, 'opsrag/eval/')
+    # NB: the old job-level `if: contains(github.event.head_commit.modified, ...)`
+    # was DEAD. `contains()` over an ARRAY does an exact-element match, so it was
+    # true only if a changed path equalled the literal string `opsrag/agent/`
+    # (never -- elements are full paths like `opsrag/agent/graph.py`). And
+    # `head_commit` is null on pull_request events / misses non-HEAD PR commits.
+    # The gate therefore never ran. We now diff explicitly below with correct
+    # prefix semantics, covering pushes AND the full PR range.
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history to diff against the base
+      - name: Detect eval-relevant changes
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}" >/dev/null 2>&1 || true
+            base="$(git merge-base "origin/${{ github.base_ref }}" HEAD 2>/dev/null || true)"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git rev-parse --verify "$base" >/dev/null 2>&1; then
+            base="HEAD^"  # first push / unknown base -- diff the single commit
+          fi
+          echo "diff base: $base"
+          # `^opsrag/(agent|agents|mcp|eval)/` is the prefix match the broken
+          # contains() was trying (and failing) to express.
+          if git diff --name-only "$base" HEAD | grep -qE '^opsrag/(agent|agents|mcp|eval)/'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "eval-relevant paths changed -- gate will run."
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "No eval-relevant paths changed -- gate skipped."
+          fi
       - uses: astral-sh/setup-uv@v3
+        if: steps.changes.outputs.relevant == 'true'
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv python install ${{ env.PYTHON_VERSION }}
+        if: steps.changes.outputs.relevant == 'true'
       - run: uv sync --extra dev --extra eval
+        if: steps.changes.outputs.relevant == 'true'
       - name: eval regression gate
+        if: steps.changes.outputs.relevant == 'true'
         env:
           # The gate needs a live OpsRAG instance to query + judge creds. It
           # runs only when an eval target is configured; otherwise it skips
-          # (rather than silently passing on a wrong/no-op command).
+          # (rather than silently passing on a wrong/no-op command). Seeding that
+          # instance + corpus is the operator's to provision (the gate can't
+          # assert retrieval quality against an empty index).
           OPSRAG_URL: ${{ secrets.OPSRAG_EVAL_URL }}
         run: |
           if [ -z "$OPSRAG_URL" ]; then
             echo "OPSRAG_EVAL_URL secret not set -- no live eval target; skipping the gate."
           else
-            # Correct invocation: the gate lives on the `run` subcommand and
-            # needs --tag. --gate exits 1 if any gated metric is below threshold.
+            # The gate lives on the `run` subcommand and needs --tag. --gate
+            # exits 1 if any gated metric is below threshold.
             uv run python -m opsrag.eval run --tag ci --gate
           fi
 
