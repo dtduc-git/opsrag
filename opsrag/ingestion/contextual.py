@@ -34,7 +34,6 @@ import logging
 import os
 import re
 
-from opsrag.ingestion.metadata import content_hash as _content_hash
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.parser import DocType, ParsedDocument
@@ -120,14 +119,6 @@ def _extract_env_from_path(path: str) -> str:
         if any(n in tokens for n in names):
             return canon
     return ""
-
-
-def _refresh_content_hash(chunk: Chunk) -> None:
-    """Re-stamp metadata.content_hash after the chunk's content was mutated by a
-    context prefix, so the dedup/idempotent-upsert hash matches the embedded
-    text. No-op if the chunker never set one (e.g. fixed-size chunker)."""
-    if isinstance(chunk.metadata, dict) and "content_hash" in chunk.metadata:
-        chunk.metadata["content_hash"] = _content_hash(chunk.content)
 
 
 def _leading_key(content: str) -> str:
@@ -272,15 +263,13 @@ async def augment_chunks(
         for child, ctx in zip(batch, contexts):
             ctx_clean = ctx.strip()
             if ctx_clean:
-                child.content = f"[Context: {ctx_clean}]\n\n{child.content}"
-                # Recompute: the prefix (40-80 tok) was added AFTER the chunker
-                # sized this piece, so the stored token_count was stale and any
-                # downstream budget/truncation logic under-counted the real
-                # embedded length. Likewise refresh the dedup content_hash so it
-                # describes the text that's actually embedded+stored, not the
-                # pre-prefix slice.
-                child.token_count = estimate_tokens(child.content, child.doc_type)
-                _refresh_content_hash(child)
+                # Prefix goes into `embed_content` (dense lane only), NOT
+                # `content`: the same string used to feed the BM25 sparse vector
+                # and FTS, so injecting "Context"/doc-type/path tokens there
+                # dilutes IDF and double-counts path slugs. content stays clean;
+                # token_count reflects what's actually embedded.
+                child.embed_content = f"[Context: {ctx_clean}]\n\n{child.content}"
+                child.token_count = estimate_tokens(child.embed_content, child.doc_type)
 
     return chunks
 
@@ -288,20 +277,21 @@ async def augment_chunks(
 def _augment_structured(chunks: list[Chunk], doc: ParsedDocument) -> None:
     """Prepend a template context to every chunk of a structured doc.
 
-    Idempotent within a single ingestion pass: a chunk that already
-    starts with `[Context:` is skipped (in case the chunker emits the
-    same chunk twice or contextual was already applied upstream).
+    Idempotent within a single ingestion pass: a chunk that already has an
+    `embed_content` prefix is skipped (in case the chunker emits the same chunk
+    twice or contextual was already applied upstream).
     """
     for chunk in chunks:
         if not chunk.content:
             continue
-        if chunk.content.startswith("[Context:"):
+        if chunk.embed_content:
             continue
         ctx = _build_structured_context(chunk, doc)
         if ctx:
-            chunk.content = f"[Context: {ctx}]\n\n{chunk.content}"
-            chunk.token_count = estimate_tokens(chunk.content, chunk.doc_type)
-            _refresh_content_hash(chunk)
+            # Dense-lane only -- see the prose path above; content stays clean
+            # so BM25/FTS index the un-prefixed config text.
+            chunk.embed_content = f"[Context: {ctx}]\n\n{chunk.content}"
+            chunk.token_count = estimate_tokens(chunk.embed_content, chunk.doc_type)
 
 
 async def _generate_contexts(

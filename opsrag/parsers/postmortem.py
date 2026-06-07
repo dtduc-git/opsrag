@@ -59,6 +59,7 @@ class PostmortemParser:
                     content=s.content,
                     level=s.level,
                     section_type=_tag_section(s.heading),
+                    breadcrumb=s.breadcrumb,  # keep H1->H2->H3 scope (was dropped)
                 )
             )
         doc.sections = tagged

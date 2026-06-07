@@ -18,9 +18,12 @@ class CohereReranker:
     # COMPRESSED LOW vs FastEmbed's sigmoid: genuinely relevant docs often score
     # ~0.1-0.4, so the FastEmbed 0.05 floor would false-trip weak-retrieval and
     # 0.65 trust would essentially never fire (burning the whole CRAG budget).
-    # Lower both. (Tune against your corpus -- these are conservative defaults.)
+    # Lower both. trust at 0.35 sits inside Cohere's typical relevant band
+    # (~0.1-0.4) so the grader actually trusts good Cohere retrieval instead of
+    # rewrite-looping; histogram your golden relevant-chunk scores and set it at
+    # ~P50 if you want it tighter. (Conservative defaults; tune per corpus.)
     score_floor = 0.02
-    trust_score = 0.5
+    trust_score = 0.35
 
     def __init__(
         self,

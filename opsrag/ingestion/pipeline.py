@@ -760,7 +760,11 @@ class IngestionPipeline:
         # store a None placeholder for parents (pgvector -> NULL embedding,
         # Qdrant -> BM25-only point), keeping the chunks/embeddings lists 1:1.
         searchable = [c for c in chunks if c.chunk_type != "parent"]
-        dense = await self.embedder.embed_texts([c.content for c in searchable])
+        # Embed `embed_content` when set (contextual prefix -> dense lane only),
+        # else `content`. BM25/FTS/payload below always use the clean `content`.
+        dense = await self.embedder.embed_texts(
+            [c.embed_content or c.content for c in searchable]
+        )
         _dense_iter = iter(dense)
         embeddings: list[list[float] | None] = [
             None if c.chunk_type == "parent" else next(_dense_iter)
@@ -852,7 +856,7 @@ class IngestionPipeline:
             # code search, so don't spend the code embedder on them.
             _code_searchable = [c for c in code_chunks if c.chunk_type != "parent"]
             _code_dense = await self.code_embedder.embed_texts(
-                [c.content for c in _code_searchable]
+                [c.embed_content or c.content for c in _code_searchable]
             )
             _code_iter = iter(_code_dense)
             code_embeddings: list[list[float] | None] = [

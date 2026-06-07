@@ -67,6 +67,13 @@ class GenericMarkdownParser:
             return [DocSection(heading="", content=content.strip(), level=0)]
 
         sections: list[DocSection] = []
+        # Preamble before the FIRST heading (TL;DR / summary intros, top-of-file
+        # Terraform comment blocks) was silently dropped -- the loop below starts
+        # each section at a heading's end, so content[:first_heading] never got
+        # chunked/embedded/indexed. Emit it as a leading headingless section.
+        preamble = content[: matches[0].start()].strip()
+        if preamble:
+            sections.append(DocSection(heading="", content=preamble, level=0))
         # Stack of (level, heading) ancestors so each section carries its full
         # H1 -> H2 -> H3 breadcrumb (was flattened: H2/H3 became sibling parents
         # and the H1 scope never reached the embedding).

@@ -12,6 +12,11 @@ def rewrite_query_node(llm: LLMProvider, observability: ObservabilityProvider):
         original = state["query"]
         retries = state.get("retry_count", 0)
         history = state.get("rewrite_history") or []
+        # The TRUE original query (turn-0). state["query"] drifts: by retry 2 it
+        # is rewrite-1, so anchoring on it loses the user's literal identifiers as
+        # drift compounds. rewrite_history[0] is recorded on the first rewrite and
+        # never changes -> use it as the immutable anchor/identifier source.
+        true_original = history[0] if history else original
 
         # Diversify across retries. CRAG fires the rewrite precisely because
         # retrieval failed; a temperature-0 paraphrase of the SAME prompt tends
@@ -49,13 +54,11 @@ def rewrite_query_node(llm: LLMProvider, observability: ObservabilityProvider):
             rewritten = original
 
         rewritten = rewritten or original
-        # Re-inject the original's exact identifiers (service slugs, filenames,
-        # error strings like CrashLoopBackOff, ticket IDs) that the LLM rewrite
-        # may have paraphrased away. The rewrite fires precisely when retrieval
-        # already failed, so losing the literal tokens the BM25 lexical lane
-        # depends on would make the retry strictly worse. Append any anchor not
-        # already present so the lexical lane still matches.
-        anchors = extract_anchors(original)
+        # Re-inject the TRUE original's exact identifiers (service slugs,
+        # filenames, error strings like CrashLoopBackOff, ticket IDs) that the LLM
+        # rewrite may have paraphrased away -- sourced from true_original, not the
+        # drifted state["query"], so they survive every retry.
+        anchors = extract_anchors(true_original)
         low = rewritten.lower()
         missing = [a for a in anchors if a.lower() not in low]
         if missing:

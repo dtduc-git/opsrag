@@ -210,18 +210,23 @@ async def maybe_rewrite_query(
         # silently dropping the token the BM25/anchor lanes need. extract_anchors
         # only grabs identifier-shaped tokens so this stays focused; cap the
         # re-injection so a multi-entity history can't flood the query.
-        prior_tail = prior_messages[-4:] if prior_messages else []
-        candidates = list(extract_anchors(query))
-        for m in prior_tail:
-            candidates.extend(extract_anchors(m.get("content") or ""))
+        # Current-follow-up anchors are always relevant. Prior-turn anchors
+        # resolve "it"/"its" but risk dragging in a stale sub-topic ("and the
+        # secrets?" shouldn't re-pull last turn's unrelated entities), so take
+        # them only from the IMMEDIATELY prior turn and cap the total tight,
+        # current-query anchors first.
+        own = list(extract_anchors(query))
+        prior_anchors: list[str] = []
+        for m in (prior_messages[-2:] if prior_messages else []):
+            prior_anchors.extend(extract_anchors(m.get("content") or ""))
         seen_a: set[str] = set()
         anchors: list[str] = []
-        for a in candidates:
+        for a in own + prior_anchors:
             if a.lower() not in seen_a:
                 seen_a.add(a.lower())
                 anchors.append(a)
         low = rewritten.lower()
-        missing = [a for a in anchors if a.lower() not in low][:4]
+        missing = [a for a in anchors if a.lower() not in low][:2]
         if missing:
             rewritten = f"{rewritten} {' '.join(missing)}"
         _log.info(

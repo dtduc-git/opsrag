@@ -28,12 +28,14 @@ def check_hallucination_node(llm: LLMProvider, observability: ObservabilityProvi
             or []
         )
         if not answer:
-            # No answer -> not grounded; count the attempt so the regenerate
-            # loop (check_hallucination -> generate) is bounded by max_retries.
+            # No answer -> not grounded; count the attempt on the REGENERATE
+            # counter (separate from the CRAG rewrite's retry_count) so the two
+            # loops don't cannibalize one budget -- 2 rewrites then a grounding
+            # failure used to hit max_retries with ZERO regenerate attempts.
             return {
                 "generation_grounded": False,
                 "current_step": "hallucination_checked",
-                "retry_count": state.get("retry_count", 0) + 1,
+                "regen_count": state.get("regen_count", 0) + 1,
             }
 
         context = "\n\n---\n\n".join(
@@ -60,13 +62,11 @@ def check_hallucination_node(llm: LLMProvider, observability: ObservabilityProvi
             "generation_grounded": grounded,
             "current_step": "hallucination_checked",
         }
-        # Bound the regenerate loop: each not-grounded verdict counts as a
-        # retry so `hallucination_decision` hits `max_retries_hit` instead of
-        # looping generate -> verify -> check forever (the loop never
-        # incremented retry_count before, so a persistently-strict grounding
-        # check spun indefinitely).
+        # Bound the regenerate loop on its OWN counter (regen_count), not the
+        # shared retry_count -- otherwise CRAG rewrites spend the same budget and
+        # a grounding failure after them ships ungrounded with no regen attempt.
         if not grounded:
-            out["retry_count"] = state.get("retry_count", 0) + 1
+            out["regen_count"] = state.get("regen_count", 0) + 1
         return out
 
     return _check
@@ -75,8 +75,10 @@ def check_hallucination_node(llm: LLMProvider, observability: ObservabilityProvi
 def hallucination_decision(state: dict) -> str:
     if state.get("generation_grounded", True):
         return "grounded"
-    retries = state.get("retry_count", 0)
-    max_retries = state.get("max_retries", 3)
-    if retries >= max_retries:
+    # Regenerate loop budget, independent of the CRAG rewrite budget. Defaults to
+    # max_retries (the prod-seeded value) when max_regens isn't set explicitly.
+    regens = state.get("regen_count", 0)
+    max_regens = state.get("max_regens", state.get("max_retries", 3))
+    if regens >= max_regens:
         return "max_retries_hit"
     return "not_grounded"
