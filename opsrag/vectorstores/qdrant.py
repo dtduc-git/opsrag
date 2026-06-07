@@ -195,8 +195,10 @@ class QdrantVectorStore:
         self._ensured = True
 
     async def upsert(
-        self, chunks: list[Chunk], embeddings: list[list[float]]
+        self, chunks: list[Chunk], embeddings: list[list[float] | None]
     ) -> int:
+        # `embeddings[i]` may be None when the caller skipped the dense vector
+        # for a non-searchable chunk (parents) -> that point gets BM25 only.
         if not chunks:
             return 0
         if len(chunks) != len(embeddings):
@@ -217,10 +219,13 @@ class QdrantVectorStore:
         points = [
             qm.PointStruct(
                 id=_chunk_point_id(c.id),
-                vector={
-                    _DENSE: v,
-                    _BM25: sv,
-                },
+                # `v is None` -> the caller skipped the dense embedding for this
+                # chunk (parents: stored for parent-substitution but excluded
+                # from every search lane, so a dense vector is dead weight). Emit
+                # a BM25-only point; Qdrant allows a subset of named vectors and
+                # a Cosine collection rejects a zero placeholder, so omitting is
+                # the correct way to say "no dense vector here".
+                vector=({_DENSE: v, _BM25: sv} if v is not None else {_BM25: sv}),
                 payload={
                     "chunk_id": c.id,
                     "content": c.content,

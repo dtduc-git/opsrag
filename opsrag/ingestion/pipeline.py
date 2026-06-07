@@ -753,11 +753,19 @@ class IngestionPipeline:
                     file.repo, file.path, exc,
                 )
 
-        # Embed all chunks in a single call -- embedder batches internally
-        # (Vertex defaults to 128/request, supports up to 250). The previous
-        # batch=10 cap dated to the FastEmbed/ONNX era to limit native memory
-        # leaks; obsolete since the Vertex migration.
-        embeddings = await self.embedder.embed_texts([c.content for c in chunks])
+        # Embed only the SEARCHABLE chunks. Parents are stored for parent-
+        # substitution but are filtered out of every search lane (chunk_type=
+        # 'parent'), so paying the embedding API for them spends tokens on
+        # vectors no query can ever match. Embed children/standalones; hand the
+        # store a None placeholder for parents (pgvector -> NULL embedding,
+        # Qdrant -> BM25-only point), keeping the chunks/embeddings lists 1:1.
+        searchable = [c for c in chunks if c.chunk_type != "parent"]
+        dense = await self.embedder.embed_texts([c.content for c in searchable])
+        _dense_iter = iter(dense)
+        embeddings: list[list[float] | None] = [
+            None if c.chunk_type == "parent" else next(_dense_iter)
+            for c in chunks
+        ]
 
         # Cap upsert payload size; Qdrant accepts large batches but smaller
         # ones surface partial-failure isolation more cleanly.
@@ -840,9 +848,17 @@ class IngestionPipeline:
                 file.repo, file.path, exc,
             )
         try:
-            code_embeddings = await self.code_embedder.embed_texts(
-                [c.content for c in code_chunks]
+            # Same parent-skip as the main lane: code parents are excluded from
+            # code search, so don't spend the code embedder on them.
+            _code_searchable = [c for c in code_chunks if c.chunk_type != "parent"]
+            _code_dense = await self.code_embedder.embed_texts(
+                [c.content for c in _code_searchable]
             )
+            _code_iter = iter(_code_dense)
+            code_embeddings: list[list[float] | None] = [
+                None if c.chunk_type == "parent" else next(_code_iter)
+                for c in code_chunks
+            ]
         except Exception as exc:
             _log.warning(
                 "code embedder failed repo=%s path=%s: %s -- skipping code lane for this file",
