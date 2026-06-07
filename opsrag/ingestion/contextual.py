@@ -113,6 +113,27 @@ def _extract_env_from_path(path: str) -> str:
     return ""
 
 
+def _leading_key(content: str) -> str:
+    """First config key / identifier line of a chunk.
+
+    Structured docs (values.yaml, *.tf) frequently have NO section heading, so
+    without this every sibling chunk of the same file gets a byte-identical
+    `[Context: ... in repo/path]` prefix -- pure boilerplate that the lexical
+    lane has to wade through and that gives each chunk zero distinguishing
+    signal. The leading YAML/HCL key (`replicas`, `image`, `resources`) is a
+    cheap per-chunk discriminator that differs between siblings.
+    """
+    for line in content.splitlines():
+        s = line.strip()
+        if not s or s.startswith(("#", "//", "[Context:")):
+            continue
+        m = re.match(r"([A-Za-z_][\w.-]{1,40})\s*[:=]", s)
+        if m:
+            return m.group(1)
+        return s[:40]
+    return ""
+
+
 def _build_structured_context(chunk: Chunk, doc: ParsedDocument) -> str:
     """Build a one-sentence context for a structured-doc chunk.
 
@@ -150,6 +171,13 @@ def _build_structured_context(chunk: Chunk, doc: ParsedDocument) -> str:
     if section:
         section_display = section if len(section) <= 120 else section[:119] + "..."
         parts.append(f"section '{section_display}'")
+    else:
+        # No section heading (typical for YAML/HCL): use the chunk's leading
+        # key so sibling chunks of the same file don't share an identical
+        # prefix. Skip when it would just echo the filename.
+        key = _leading_key(chunk.content)
+        if key and key.lower() not in loc.lower():
+            parts.append(f"key '{key}'")
 
     return " -- ".join(parts)
 

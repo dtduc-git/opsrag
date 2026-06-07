@@ -68,6 +68,16 @@ class OpsRAGState(TypedDict, total=False):
     max_retries: int
     current_step: str
     error: str | None
+    # Classifier verdict ("forensic"/"live"/"procedural"/"mixed"/"casual"/...)
+    # piped in before invoke; read by hyde_expansion (live-skip) and entry_route
+    # (casual -> friendly lane).
+    query_category: str
+    # Best (un-boosted) cross-encoder score from the reranker; the grader trusts
+    # the rerank top-1 over a CRAG rewrite when this clears _TRUST_RERANK_SCORE.
+    best_rerank_score: float
+    # Queries already tried by the rewriter this turn -- fed back into the
+    # rewrite prompt so each CRAG retry explores a different reformulation.
+    rewrite_history: list[str]
 
     # Tool use
     tool_calls: list[dict]

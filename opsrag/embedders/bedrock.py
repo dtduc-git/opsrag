@@ -15,8 +15,9 @@ import json
 import time
 
 import boto3
+from botocore.config import Config as _BotoConfig
 
-from opsrag.tokenization import estimate_tokens
+from opsrag.tokenization import CHARS_PER_TOKEN, estimate_tokens
 from opsrag.usage import tracker as _usage_tracker
 
 _MODEL_DIMENSIONS: dict[str, int] = {
@@ -30,6 +31,22 @@ _MODEL_DIMENSIONS: dict[str, int] = {
     "global.cohere.embed-v4:0": 1536,
     "cohere.embed-v4:0": 1536,
 }
+
+# Per-model INPUT token ceilings. Titan has no server-side truncate flag, so an
+# over-long input is REJECTED -- we must trim client-side before invoking. (A
+# contextual-prefixed code parent can exceed Titan v1/v2's window.) Cohere is
+# trimmed server-side via `truncate=END`, so this map is only consulted for the
+# Titan family; the Cohere entries are documentation.
+_INPUT_TOKEN_LIMIT: dict[str, int] = {
+    "amazon.titan-embed-text-v2:0": 8192,
+    "amazon.titan-embed-text-v1": 8192,
+    "cohere.embed-english-v3": 512,
+    "cohere.embed-multilingual-v3": 512,
+    "us.cohere.embed-v4:0": 128_000,
+    "global.cohere.embed-v4:0": 128_000,
+    "cohere.embed-v4:0": 128_000,
+}
+_DEFAULT_INPUT_TOKEN_LIMIT = 8192
 
 
 class BedrockEmbeddings:
@@ -45,9 +62,20 @@ class BedrockEmbeddings:
             region_name=region,
             profile_name=profile,
         )
-        self._client = session.client("bedrock-runtime")
+        # Adaptive retries: a full re-index fires thousands of invoke_model
+        # calls and Bedrock throttles aggressively (ThrottlingException). The
+        # adaptive mode adds client-side rate-limiting + exponential backoff so
+        # transient throttles/5xx self-heal instead of aborting the index job.
+        self._client = session.client(
+            "bedrock-runtime",
+            config=_BotoConfig(retries={"max_attempts": 6, "mode": "adaptive"}),
+        )
         self._model = model
         self._batch_size = batch_size
+        # Titan rejects over-long inputs (no server-side truncate); cap chars.
+        _tok_limit = _INPUT_TOKEN_LIMIT.get(model, _DEFAULT_INPUT_TOKEN_LIMIT)
+        # 0.9 margin -- estimate_tokens is approximate; stay clear of the wall.
+        self._max_input_chars = int(_tok_limit * CHARS_PER_TOKEN * 0.9)
         _known_dim = _MODEL_DIMENSIONS.get(model)
         if dimension is None and _known_dim is None:
             # Fail closed -- see vertex.py: a silent 1024 fallback for an
@@ -82,7 +110,7 @@ class BedrockEmbeddings:
         fall back to our estimate so usage/cost telemetry still populates."""
         if self._is_titan:
             body = json.dumps({
-                "inputText": text,
+                "inputText": text[: self._max_input_chars],
                 "dimensions": self._dimension,
             })
         elif self._is_cohere_v4:
@@ -91,11 +119,13 @@ class BedrockEmbeddings:
                 "input_type": input_type,
                 "output_dimension": self._dimension,
                 "embedding_types": ["float"],
+                "truncate": "END",  # server-side trim instead of a hard error
             })
         else:  # Cohere Embed v3
             body = json.dumps({
                 "texts": [text],
                 "input_type": input_type,
+                "truncate": "END",
             })
 
         resp = self._client.invoke_model(
@@ -128,9 +158,12 @@ class BedrockEmbeddings:
                 "input_type": input_type,
                 "output_dimension": self._dimension,
                 "embedding_types": ["float"],
+                "truncate": "END",
             })
         else:  # Cohere Embed v3
-            body = json.dumps({"texts": texts, "input_type": input_type})
+            body = json.dumps(
+                {"texts": texts, "input_type": input_type, "truncate": "END"}
+            )
         resp = self._client.invoke_model(
             modelId=self._model, body=body,
             contentType="application/json", accept="application/json",
