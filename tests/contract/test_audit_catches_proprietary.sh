@@ -9,7 +9,9 @@ trap cleanup EXIT
 # Assemble the denylisted company-name placeholder so this script stays clean itself.
 tok="Example-""Corp"
 printf '# vendor reference: %s internal\n' "$tok" > "$probe"
-git add -N "$probe"
+# -f: `_audit_probe_*` is gitignored, so a plain `git add -N` is rejected and the
+# probe is invisible to the audit's `git ls-files` scan -> force the intent-to-add.
+git add -f -N "$probe"
 scripts/audit-vendor-neutrality.sh >/dev/null 2>&1
 rc=$?
 [[ $rc -ne 0 ]] || { echo "FAIL: proprietary token not caught"; exit 1; }
