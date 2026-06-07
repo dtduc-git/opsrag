@@ -295,12 +295,34 @@ class NDCGAtKMetric(BaseMetric):
             self.reason = "skipped: golden has no expected/acceptable sources"
             return self.score
         top = retrieved[: self.k]
-        gains = [1 if _is_relevant(r, expected, acceptable) else 0 for r in top]
+        # Credit each relevant document at most ONCE, and treat `acceptable` as
+        # an OR-set that contributes a single relevant slot. Counting every
+        # acceptable match as its own gain (the old behaviour) sized IDCG as if
+        # all of [A,B,C] should appear, so a perfect retrieval (A at rank 1)
+        # scored dcg=1.0 / idcg=2.13 = 0.47 -- the metric capped below 1.0 on
+        # CORRECT behaviour. Mirror the relevant-set accounting in DCG and IDCG.
+        expected_hit: set[str] = set()
+        acceptable_used = False
+        gains: list[int] = []
+        for r in top:
+            matched_e = next(
+                (e for e in expected if e not in expected_hit and match_path(e, r)),
+                None,
+            )
+            if matched_e is not None:
+                expected_hit.add(matched_e)
+                gains.append(1)
+            elif not acceptable_used and any(match_path(a, r) for a in acceptable):
+                acceptable_used = True
+                gains.append(1)
+            else:
+                gains.append(0)
         dcg = sum(g / math.log2(i + 1) for i, g in enumerate(gains, start=1))
-        # Ideal: as many relevant docs as exist, packed at the top of the window.
-        # The relevant universe is bounded by the distinct expected+acceptable
-        # set; cap the ideal run at K so NDCG stays in [0, 1].
-        ideal_n = min(self.k, len(set(expected) | set(acceptable)))
+        # Relevant universe: each expected source + (the whole acceptable OR-set
+        # counts once). Cap the ideal run at K so NDCG stays in [0, 1]; DCG can
+        # never exceed this IDCG because each relevant doc is credited once.
+        relevant_n = len(expected) + (1 if acceptable else 0)
+        ideal_n = min(self.k, relevant_n)
         idcg = sum(1 / math.log2(i + 1) for i in range(1, ideal_n + 1))
         self.score = (dcg / idcg) if idcg > 0 else 0.0
         self.success = self.score >= self.threshold

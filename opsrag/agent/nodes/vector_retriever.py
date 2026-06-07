@@ -36,7 +36,7 @@ from opsrag.interfaces.embedder import EmbeddingProvider
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.parser import DocType
 from opsrag.interfaces.vectorstore import SearchResult, VectorStore
-from opsrag.vectorstores.priority import priority_multiplier
+from opsrag.vectorstores.priority import priority_rrf_bonus
 from opsrag.vectorstores.rrf import rrf_merge_pools
 
 # Minimum candidate pool handed to the reranker, independent of the answer
@@ -589,13 +589,16 @@ def vector_retrieve_node(
             # authoritative-content priority boost the vector store applied
             # (SRE-KB / architecture / user-correction). Re-apply it here so a
             # fanout query doesn't silently lose the boost. The priority tag was
-            # carried onto chunk.metadata by the store's _hit_to_result.
+            # carried onto chunk.metadata by the store's _hit_to_result /
+            # _scroll_hit_to_result. ADDITIVE in RRF units (not a multiplier):
+            # these are fresh rrf_merge_pools scores in the compressed ~0.01-0.016
+            # band, where a x2.0 steamrolls. See vectorstores/priority.py.
             reboosted: list = []
             for sr in results:
-                mult = priority_multiplier((sr.chunk.metadata or {}).get("priority"))
+                bonus = priority_rrf_bonus((sr.chunk.metadata or {}).get("priority"))
                 reboosted.append(
-                    sr if mult == 1.0
-                    else SearchResult(chunk=sr.chunk, score=sr.score * mult,
+                    sr if bonus == 0.0
+                    else SearchResult(chunk=sr.chunk, score=sr.score + bonus,
                                       distance_metric=sr.distance_metric)
                 )
             reboosted.sort(key=lambda s: s.score, reverse=True)

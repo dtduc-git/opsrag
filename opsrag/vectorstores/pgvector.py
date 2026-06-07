@@ -16,7 +16,7 @@ from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.parser import DocType
 from opsrag.interfaces.vectorstore import SearchResult
 from opsrag.vectorstores.lane_weights import compute_lane_weights
-from opsrag.vectorstores.priority import chunk_priority, priority_multiplier
+from opsrag.vectorstores.priority import chunk_priority, priority_rrf_bonus
 from opsrag.vectorstores.rrf import rrf_merge_pools
 
 _CREATE_TABLE = """
@@ -377,14 +377,16 @@ class PgVectorStore:
         # tag STORED at upsert (carried into chunk.metadata by _row_to_chunk) so
         # user-correction / explicit tiers are honored; fall back to deriving
         # from repo/source_path for rows indexed before the priority column.
+        # ADDITIVE in RRF units (not a multiplier): rrf_merge_pools scores live
+        # in the same compressed ~0.01-0.016 band as Qdrant's, where a x2.0 would
+        # vault a weakly-ranked SRE-KB chunk past a genuine #1. See priority.py.
         boosted: list[SearchResult] = []
         for sr in fused:
             tag = (sr.chunk.metadata or {}).get("priority") or chunk_priority(
                 sr.chunk.repo, sr.chunk.source_path
             )
-            mult = priority_multiplier(tag)
             boosted.append(
-                SearchResult(chunk=sr.chunk, score=sr.score * mult,
+                SearchResult(chunk=sr.chunk, score=sr.score + priority_rrf_bonus(tag),
                              distance_metric="rrf+priority")
             )
         boosted.sort(key=lambda s: s.score, reverse=True)

@@ -145,7 +145,12 @@ def build_minimal_graph(
     reranker: Reranker | None = None,
     checkpointer=None,
     top_k: int = 5,
-    rerank_top_k: int = 3,
+    # 5, not 3: the reranker writes only the top rerank_top_k to merged_results,
+    # and the CRAG grader can only judge that truncated set -- so this is both
+    # the generation budget AND the entire universe the grader sees. 3 caps
+    # recall below where multi-fact / synthesis answers break down; align with
+    # the other graphs' default of 5.
+    rerank_top_k: int = 5,
     known_repos: list[str] | None = None,
     code_embedder: EmbeddingProvider | None = None,
     code_store: VectorStore | None = None,

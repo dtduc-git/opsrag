@@ -22,8 +22,16 @@ REPORT_DIR = Path(__file__).resolve().parent.parent.parent / "tests" / "eval" / 
 DEFAULT_GATE_THRESHOLDS: dict[str, float] = {
     "SourceRecall": 0.80,
     "Precision@5": 0.40,
+    # Recall@5 (top-of-list recall the generator actually reads) gates alongside
+    # Recall@10: a doc slipping from rank 4->8 tanks Recall@5 while Recall@10
+    # stays flat. Without this the exact regression these metrics exist to catch
+    # passed green (the metrics were computed + reported but never gated).
+    "Recall@5": 0.60,
     "Recall@10": 0.70,
+    "NDCG@5": 0.50,
     "MRR": 0.50,
+    # Negative-set retrieval restraint: any golden whose cap is exceeded fails.
+    "RetrievalRestraint": 1.0,
     "Faithfulness": 0.70,
 }
 
