@@ -31,9 +31,16 @@ CREATE TABLE IF NOT EXISTS opsrag_chunks (
     chunk_type TEXT NOT NULL DEFAULT 'child',
     token_count INT NOT NULL DEFAULT 0,
     metadata JSONB NOT NULL DEFAULT '{}',
+    priority TEXT,
     embedding vector({dim})
 );
 """
+
+# Bring pre-priority tables up to schema (CREATE TABLE IF NOT EXISTS won't add a
+# column to an existing table). Idempotent.
+_ALTER_ADD_PRIORITY = (
+    "ALTER TABLE opsrag_chunks ADD COLUMN IF NOT EXISTS priority TEXT"
+)
 
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_chunks_repo ON opsrag_chunks (repo)",
@@ -134,6 +141,7 @@ class PgVectorStore:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             await self._assert_dimension_compatible(conn)
             await conn.execute(_CREATE_TABLE.format(dim=self._dimension))
+            await conn.execute(_ALTER_ADD_PRIORITY)
             for idx in _CREATE_INDEXES:
                 await conn.execute(idx)
             try:
@@ -144,8 +152,10 @@ class PgVectorStore:
         self._ensured = True
 
     async def upsert(
-        self, chunks: list[Chunk], embeddings: list[list[float]]
+        self, chunks: list[Chunk], embeddings: list[list[float] | None]
     ) -> int:
+        # `embeddings[i]` may be None for non-searchable chunks (parents) -> the
+        # embedding column is stored NULL (search filters embedding IS NOT NULL).
         if not chunks:
             return 0
         if len(chunks) != len(embeddings):
@@ -164,7 +174,12 @@ class PgVectorStore:
                 c.chunk_type,
                 c.token_count,
                 json.dumps(c.metadata),
-                str(v),  # pgvector accepts text representation
+                self._priority_for(c),
+                # `v is None` -> caller skipped the dense embedding (parents are
+                # stored for parent-substitution but never searched, so the
+                # column is left NULL; search/HNSW already filter on
+                # `embedding IS NOT NULL`).
+                str(v) if v is not None else None,
             )
             for c, v in zip(chunks, embeddings)
         ]
@@ -174,17 +189,34 @@ class PgVectorStore:
                 f"""
                 INSERT INTO {self._table}
                     (id, chunk_id, content, doc_type, source_path, repo,
-                     parent_chunk_id, chunk_type, token_count, metadata, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::vector)
+                     parent_chunk_id, chunk_type, token_count, metadata,
+                     priority, embedding)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+                        $11, $12::vector)
                 ON CONFLICT (chunk_id) DO UPDATE SET
                     content = EXCLUDED.content,
                     doc_type = EXCLUDED.doc_type,
                     metadata = EXCLUDED.metadata,
+                    priority = EXCLUDED.priority,
                     embedding = EXCLUDED.embedding
                 """,
                 records,
             )
         return len(records)
+
+    @staticmethod
+    def _priority_for(c: Chunk) -> str | None:
+        """Priority tier stamped at upsert (parity with the Qdrant payload tag).
+
+        A chunk may carry an explicit ``priority`` in its metadata (e.g. an
+        operator-approved ``user-correction``); honor that first. Otherwise
+        derive the SRE-KB / architecture tier from repo + source_path.
+        """
+        if isinstance(c.metadata, dict):
+            tag = c.metadata.get("priority")
+            if tag:
+                return str(tag)
+        return chunk_priority(c.repo, c.source_path)
 
     async def search(
         self,
@@ -201,7 +233,7 @@ class PgVectorStore:
 
         query = f"""
         SELECT chunk_id, content, doc_type, source_path, repo,
-               parent_chunk_id, chunk_type, token_count, metadata,
+               parent_chunk_id, chunk_type, token_count, metadata, priority,
                1 - (embedding <=> $1::vector) AS score
         FROM {self._table}
         WHERE embedding IS NOT NULL
@@ -229,7 +261,7 @@ class PgVectorStore:
             rows = await conn.fetch(
                 f"""
                 SELECT chunk_id, content, doc_type, source_path, repo,
-                       parent_chunk_id, chunk_type, token_count, metadata
+                       parent_chunk_id, chunk_type, token_count, metadata, priority
                 FROM {self._table}
                 WHERE chunk_id = ANY($1)
                 """,
@@ -298,7 +330,7 @@ class PgVectorStore:
         dwhere, dparams = self._build_where(filters, start_idx=2)
         dense_sql = f"""
         SELECT chunk_id, content, doc_type, source_path, repo,
-               parent_chunk_id, chunk_type, token_count, metadata,
+               parent_chunk_id, chunk_type, token_count, metadata, priority,
                1 - (embedding <=> $1::vector) AS score
         FROM {self._table}
         WHERE embedding IS NOT NULL
@@ -312,7 +344,7 @@ class PgVectorStore:
         lwhere, lparams = self._build_where(filters, start_idx=2)
         lex_sql = f"""
         SELECT chunk_id, content, doc_type, source_path, repo,
-               parent_chunk_id, chunk_type, token_count, metadata,
+               parent_chunk_id, chunk_type, token_count, metadata, priority,
                ts_rank(to_tsvector('simple', content),
                        websearch_to_tsquery('simple', $1), 32) AS score
         FROM {self._table}
@@ -341,17 +373,164 @@ class PgVectorStore:
             top_k=max(candidate_k, top_k),
             pool_weights=[lw["dense"], lw["sparse"]],
         )
-        # Authoritative-content priority boost (parity with Qdrant). pgvector
-        # has no `priority` column, so derive the tier from repo/source_path.
+        # Authoritative-content priority boost (parity with Qdrant). Prefer the
+        # tag STORED at upsert (carried into chunk.metadata by _row_to_chunk) so
+        # user-correction / explicit tiers are honored; fall back to deriving
+        # from repo/source_path for rows indexed before the priority column.
         boosted: list[SearchResult] = []
         for sr in fused:
-            mult = priority_multiplier(chunk_priority(sr.chunk.repo, sr.chunk.source_path))
+            tag = (sr.chunk.metadata or {}).get("priority") or chunk_priority(
+                sr.chunk.repo, sr.chunk.source_path
+            )
+            mult = priority_multiplier(tag)
             boosted.append(
                 SearchResult(chunk=sr.chunk, score=sr.score * mult,
                              distance_metric="rrf+priority")
             )
         boosted.sort(key=lambda s: s.score, reverse=True)
         return boosted[:top_k]
+
+    # ---------------- Fanout / listing parity with the Qdrant store ----------
+    # The retriever feature-detects these via hasattr(); without them pgvector
+    # silently loses cross-repo slug fanout, filename fanout, repo-slug
+    # resolution, directory enumeration, and listing-intent answers -- a real
+    # capability gap vs Qdrant, not just a perf difference.
+
+    @staticmethod
+    def _ilike_escape(s: str) -> str:
+        """Escape LIKE/ILIKE wildcards so user text matches literally."""
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    async def search_by_text(
+        self, text: str, top_k: int = 10, filters: dict | None = None,
+    ) -> list[SearchResult]:
+        """Lexical keyword search (parity with Qdrant.search_by_text). Surfaces
+        chunks mentioning a term/slug across repos. FTS over the GIN index;
+        parents excluded."""
+        await self.ensure_table()
+        if not text:
+            return []
+        where, params = self._build_where(filters, start_idx=2)
+        sql = f"""
+        SELECT chunk_id, content, doc_type, source_path, repo,
+               parent_chunk_id, chunk_type, token_count, metadata, priority,
+               ts_rank(to_tsvector('simple', content),
+                       websearch_to_tsquery('simple', $1), 32) AS score
+        FROM {self._table}
+        WHERE to_tsvector('simple', content)
+              @@ websearch_to_tsquery('simple', $1)
+          AND chunk_type IS DISTINCT FROM 'parent'{where}
+        ORDER BY score DESC
+        LIMIT {int(top_k)}
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(sql, text, *params)
+            return [self._row_to_result(r) for r in rows]
+        except Exception:
+            return []
+
+    async def search_by_path(
+        self, path_text: str, top_k: int = 10, filters: dict | None = None,
+    ) -> list[SearchResult]:
+        """Filename / path / repo substring search (parity with Qdrant). Matches
+        `path_text` against source_path OR repo -- the repo arm catches slugs
+        whose files live under paths that don't contain the slug."""
+        await self.ensure_table()
+        if not path_text:
+            return []
+        pat = f"%{self._ilike_escape(path_text)}%"
+        where, params = self._build_where(filters, start_idx=2)
+        sql = f"""
+        SELECT chunk_id, content, doc_type, source_path, repo,
+               parent_chunk_id, chunk_type, token_count, metadata, priority,
+               1.0 AS score
+        FROM {self._table}
+        WHERE (source_path ILIKE $1 ESCAPE '\\' OR repo ILIKE $1 ESCAPE '\\')
+          AND chunk_type IS DISTINCT FROM 'parent'{where}
+        LIMIT {int(top_k)}
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(sql, pat, *params)
+            return [self._row_to_result(r) for r in rows]
+        except Exception:
+            return []
+
+    async def find_repo_by_substring(self, needle: str) -> str | None:
+        """Resolve an anchor entity to a concrete indexed repo whose name
+        contains `needle` (parity with Qdrant). None when nothing matches."""
+        if not needle:
+            return None
+        await self.ensure_table()
+        pat = f"%{self._ilike_escape(needle)}%"
+        try:
+            async with self._pool.acquire() as conn:
+                return await conn.fetchval(
+                    f"SELECT repo FROM {self._table} "
+                    f"WHERE repo ILIKE $1 ESCAPE '\\' LIMIT 1",
+                    pat,
+                )
+        except Exception:
+            return None
+
+    async def enumerate_paths(
+        self, repo: str, path_prefix: str | None = None, max_paths: int = 5000,
+    ) -> list[str]:
+        """Distinct source_path values for a repo (parity with Qdrant), used by
+        the directory-tree summarizer. `path_prefix` is a substring filter."""
+        await self.ensure_table()
+        params: list = [repo]
+        extra = ""
+        if path_prefix:
+            params.append(f"%{self._ilike_escape(path_prefix)}%")
+            extra = " AND source_path ILIKE $2 ESCAPE '\\'"
+        sql = (
+            f"SELECT DISTINCT source_path FROM {self._table} "
+            f"WHERE repo = $1{extra} LIMIT {int(max_paths)}"
+        )
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(sql, *params)
+            return [r["source_path"] for r in rows if r["source_path"]]
+        except Exception:
+            return []
+
+    async def list_files(
+        self,
+        repo: str | None = None,
+        path_prefix: str | None = None,
+        limit: int = 200,
+    ) -> tuple[list[str], int]:
+        """(paths_capped_at_limit, total_distinct_count) in scope (parity with
+        Qdrant.list_files). `path_prefix` is a PREFIX match (like Qdrant's)."""
+        await self.ensure_table()
+        clauses: list[str] = []
+        params: list = []
+        idx = 1
+        if repo:
+            clauses.append(f"repo = ${idx}")
+            params.append(repo)
+            idx += 1
+        if path_prefix:
+            clauses.append(f"source_path LIKE ${idx} ESCAPE '\\'")
+            params.append(f"{self._ilike_escape(path_prefix)}%")
+            idx += 1
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        try:
+            async with self._pool.acquire() as conn:
+                total = await conn.fetchval(
+                    f"SELECT count(DISTINCT source_path) FROM {self._table}{where}",
+                    *params,
+                )
+                rows = await conn.fetch(
+                    f"SELECT DISTINCT source_path FROM {self._table}{where} "
+                    f"ORDER BY source_path LIMIT {int(limit)}",
+                    *params,
+                )
+            return [r["source_path"] for r in rows if r["source_path"]], int(total or 0)
+        except Exception:
+            return [], 0
 
     @staticmethod
     def _build_where(
@@ -377,6 +556,14 @@ class PgVectorStore:
         metadata = row["metadata"]
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
+        metadata = metadata or {}
+        # Carry the stored priority tag onto the chunk (parity with Qdrant), so
+        # the fanout RRF re-merge in the agent can re-apply the boost too. Only
+        # when the SELECT projected it and it isn't already in metadata.
+        # asyncpg Record (and the test fakes) support .get().
+        row_priority = row.get("priority") if hasattr(row, "get") else None
+        if row_priority and "priority" not in metadata:
+            metadata = {**metadata, "priority": row_priority}
         return Chunk(
             id=row["chunk_id"],
             content=row["content"],

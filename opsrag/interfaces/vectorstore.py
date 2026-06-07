@@ -17,7 +17,7 @@ class SearchResult:
 @runtime_checkable
 class VectorStore(Protocol):
     async def upsert(
-        self, chunks: list[Chunk], embeddings: list[list[float]]
+        self, chunks: list[Chunk], embeddings: list[list[float] | None]
     ) -> int: ...
 
     async def search(
