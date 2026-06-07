@@ -34,18 +34,33 @@ _PATH_ANCHOR_BONUS = 0.15
 # `semantic-ranker-default-004` returns 0..1; scores below this are
 # typically noise. Configurable via state["min_rerank_score"] for evals.
 _DEFAULT_MIN_RERANK_SCORE = 0.05
+# Fallback grader trust floor when a reranker doesn't declare trust_score.
+_DEFAULT_TRUST_RERANK_SCORE = 0.65
 
 
 def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k: int = 5):
     async def _rerank(state: dict) -> dict:
         query = state["query"]
         chunks: list[Chunk] = state.get("merged_results") or state.get("retrieved_chunks") or []
+        # Per-reranker calibration: the weak-retrieval floor and the grader's
+        # trust-rerank floor are scale-dependent (FastEmbed sigmoid vs Cohere's
+        # compressed-low [0,1]). Surface the active reranker's values into state
+        # so rerank_decision + the grader use the right thresholds for THIS
+        # provider instead of one hard-coded constant. An explicit eval override
+        # of min_rerank_score still wins.
+        rerank_floor = state.get(
+            "min_rerank_score",
+            getattr(reranker, "score_floor", _DEFAULT_MIN_RERANK_SCORE),
+        )
+        rerank_trust = getattr(reranker, "trust_score", _DEFAULT_TRUST_RERANK_SCORE)
         if not chunks:
             return {
                 "merged_results": [],
                 "best_rerank_score": 0.0,
                 "anchors": [],
                 "anchors_matched_in_results": False,
+                "min_rerank_score": rerank_floor,
+                "rerank_trust_score": rerank_trust,
                 "current_step": "reranked",
             }
 
@@ -67,6 +82,8 @@ def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k:
                 "best_rerank_score": 1.0,  # bypass min-gate for listing-intent
                 "anchors": anchors,
                 "anchors_matched_in_results": anchors_in_kept,
+                "min_rerank_score": rerank_floor,
+                "rerank_trust_score": rerank_trust,
                 "current_step": "reranked",
             }
 
@@ -126,6 +143,8 @@ def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k:
             "best_rerank_score": best_base_score,
             "anchors": anchors,
             "anchors_matched_in_results": anchors_in_kept,
+            "min_rerank_score": rerank_floor,
+            "rerank_trust_score": rerank_trust,
             "current_step": "reranked",
         }
 

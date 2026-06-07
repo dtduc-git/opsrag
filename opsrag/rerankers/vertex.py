@@ -68,6 +68,12 @@ def _split_windows(content: str, max_windows: int) -> list[str]:
 
 
 class VertexReranker:
+    # semantic-ranker-default-004 returns calibrated [0,1] scores -- this is the
+    # model the 0.05 noise floor was originally tuned against, so keep it; trust
+    # at 0.65 matches the same 0..1 scale.
+    score_floor = 0.05
+    trust_score = 0.65
+
     def __init__(
         self,
         project: str,

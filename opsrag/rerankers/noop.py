@@ -10,6 +10,12 @@ from opsrag.interfaces.vectorstore import SearchResult
 
 
 class NoOpReranker:
+    # Emits a neutral 1.0 for every chunk, so there is no real score signal:
+    # never trip the weak-retrieval floor, and the "trust" path is moot (best is
+    # always 1.0 -> the grader floor's confident-rerank branch always holds).
+    score_floor = 0.0
+    trust_score = 0.0
+
     async def rerank(
         self,
         query: str,

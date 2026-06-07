@@ -73,8 +73,13 @@ class OpsRAGState(TypedDict, total=False):
     # (casual -> friendly lane).
     query_category: str
     # Best (un-boosted) cross-encoder score from the reranker; the grader trusts
-    # the rerank top-1 over a CRAG rewrite when this clears _TRUST_RERANK_SCORE.
+    # the rerank top-1 over a CRAG rewrite when this clears the trust floor.
     best_rerank_score: float
+    # Per-reranker calibration surfaced by the rerank node (weak-retrieval floor
+    # + grader trust floor), so scale-dependent thresholds match the active
+    # provider (FastEmbed sigmoid vs Cohere compressed-low).
+    min_rerank_score: float
+    rerank_trust_score: float
     # Queries already tried by the rewriter this turn -- fed back into the
     # rewrite prompt so each CRAG retry explores a different reformulation.
     rewrite_history: list[str]

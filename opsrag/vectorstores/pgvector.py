@@ -8,6 +8,7 @@ Requires: asyncpg, pgvector (pip install asyncpg pgvector)
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
 import asyncpg
@@ -70,6 +71,8 @@ WITH (m = 16, ef_construction = 200);
 # Per-session recall knob for HNSW search (higher = better recall, slower).
 # Matches the Qdrant store's hnsw_ef so the two backends have comparable recall.
 _HNSW_EF_SEARCH = 192
+
+_log = logging.getLogger("opsrag.vectorstores.pgvector")
 
 
 def _deterministic_uuid(chunk_id: str) -> str:
@@ -163,8 +166,20 @@ class PgVectorStore:
                     "ON opsrag_chunks USING gin (content gin_trgm_ops)"
                 )
                 self._trgm_available = True
-            except Exception:
+            except Exception as exc:
+                # Loud, not silent: without pg_trgm the substring identifier lane
+                # can't fire, so exact-symbol recall quietly collapses to
+                # dense-only -- an env-dependent cliff on managed Postgres where
+                # CREATE EXTENSION isn't grantable. Surface it so operators know
+                # symbol queries are degraded rather than discovering it via
+                # missing results.
                 self._trgm_available = False
+                _log.warning(
+                    "pg_trgm unavailable (%s) -- the trigram identifier lane is "
+                    "DISABLED; exact-symbol recall falls back to FTS + dense only. "
+                    "Grant `CREATE EXTENSION pg_trgm` for full symbol parity.",
+                    exc,
+                )
         self._ensured = True
 
     async def upsert(
@@ -327,16 +342,28 @@ class PgVectorStore:
         alpha: float = 0.7,  # kept for interface compat; RRF replaces the blend
         filters: dict | None = None,
     ) -> list[SearchResult]:
-        """Two-lane hybrid with RRF fusion -- parity with the Qdrant path.
+        """Hybrid RRF fusion. Lanes: dense ANN (HNSW), lexical FTS (GIN,
+        ts_rank_cd), and -- when the query has identifiers + pg_trgm is present --
+        a trigram substring lane.
 
         The previous single-query `ORDER BY (alpha*cosine + (1-alpha)*ts_rank)`
         ordered on a COMPUTED column, so Postgres could not use the HNSW index
-        and scanned the whole table per query (an O(N) recall/latency cliff at
-        scale). Instead we run TWO index-using queries -- a dense ANN lane
-        (`ORDER BY embedding <=> $1`, HNSW) and a lexical FTS lane (GIN) -- and
-        fuse them with Reciprocal Rank Fusion, the same algorithm the Qdrant
-        store uses. The authoritative-content priority boost (SRE-KB /
-        architecture tiers) is then applied so it takes effect on pgvector too.
+        and scanned the whole table per query. Each lane now runs as its own
+        index-using query and they're fused with the same RRF the Qdrant store
+        uses; the authoritative-content priority boost is then applied.
+
+        PARITY CAVEAT -- this is NOT full Qdrant parity:
+          * No CODE lane. The retriever's 4th lane (code-specific embedder over
+            the code collection) is Qdrant-only; the retriever feature-detects
+            and does NOT pass code_embedding/code_store here. Symbol *recall* is
+            partly recovered by the trgm lane, but code-semantic ranking is absent.
+          * Sparse math differs. Qdrant = subword BM25 (true IDF); here = ts_rank_cd
+            over `simple` FTS + a trgm substring lane. This recovers exact-symbol
+            recall, not BM25-ranked lexical relevance.
+          * The trgm lane is best-effort and silently absent without pg_trgm (a
+            WARNING is logged at ensure_table time).
+        Treat pgvector as "strong dense + recall of exact symbols", not a
+        drop-in lexical-ranking equivalent of Qdrant.
         """
         await self.ensure_table()
         candidate_k = max(top_k * 8, 50)
@@ -361,8 +388,8 @@ class PgVectorStore:
         lex_sql = f"""
         SELECT chunk_id, content, doc_type, source_path, repo,
                parent_chunk_id, chunk_type, token_count, metadata, priority,
-               ts_rank(to_tsvector('simple', content),
-                       websearch_to_tsquery('simple', $1), 32) AS score
+               ts_rank_cd(to_tsvector('simple', content),
+                          websearch_to_tsquery('simple', $1), 32) AS score
         FROM {self._table}
         WHERE to_tsvector('simple', content)
               @@ websearch_to_tsquery('simple', $1)
