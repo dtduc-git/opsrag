@@ -52,7 +52,11 @@ class K8sManifestParser:
             namespace = meta.get("namespace", "default")
             heading = f"{kind}/{namespace}/{name}"
 
-            body = yaml.dump(manifest, default_flow_style=False).strip()
+            # sort_keys=False: keep the manifest's authored key order so the
+            # chunk text tracks the source for BM25 exact-match (sorting reorders
+            # `replicas`/`image`/`env` away from how operators wrote/grep them).
+            # Comments are still lost -- PyYAML can't round-trip them.
+            body = yaml.dump(manifest, default_flow_style=False, sort_keys=False).strip()
 
             section_type = self._classify_kind(kind)
             sections.append(DocSection(
