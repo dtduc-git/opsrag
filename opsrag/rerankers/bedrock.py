@@ -8,8 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-import boto3
-
+# boto3 is OPTIONAL (the `bedrock` extra) -- imported lazily in __init__.
 from opsrag.interfaces.reranker import RerankResult
 from opsrag.interfaces.vectorstore import SearchResult
 from opsrag.usage import tracker as _usage_tracker
@@ -28,6 +27,7 @@ class BedrockReranker:
         region: str | None = None,
         profile: str | None = None,
     ):
+        import boto3
         session = boto3.Session(region_name=region, profile_name=profile)
         # The Rerank API lives on the bedrock-agent-runtime client.
         self._client = session.client("bedrock-agent-runtime")

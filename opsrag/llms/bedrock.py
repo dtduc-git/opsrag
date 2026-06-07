@@ -18,10 +18,14 @@ import json
 import time
 from typing import Any
 
-import boto3
 from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
+
+# boto3 is an OPTIONAL dependency (the `bedrock` extra). Importing it lazily in
+# __init__ keeps this module -- and everything that imports it transitively, e.g.
+# opsrag.api.server -- importable on a build WITHOUT boto3 (the default dev/CI
+# install). It's only needed when a Bedrock provider is actually constructed.
 
 
 class BedrockLLM:
@@ -37,6 +41,7 @@ class BedrockLLM:
         profile: str | None = None,
         default_max_tokens: int = 4096,
     ):
+        import boto3
         session = boto3.Session(
             region_name=region,
             profile_name=profile,

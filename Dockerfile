@@ -91,8 +91,12 @@ FROM python:3.11-slim-bookworm AS runtime
 # openssh-client so `git clone` over SSH works (use_ssh=true, e.g. when the
 # HTTPS path is behind an SSO/Pomerium proxy).
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends git ca-certificates curl openssh-client \
     && rm -rf /var/lib/apt/lists/*
+# `apt-get upgrade` pulls the latest security patches for the base image (e.g.
+# libgnutls30 deb12u6 -> deb12u7, which fixes CVE-2026-33845 + CVE-2026-42010 the
+# Trivy CRITICAL gate flags). Keeps the image current without a base-image bump.
 
 # Create a non-root user/group with a fixed UID/GID of 1000.
 RUN groupadd --gid 1000 opsrag \
