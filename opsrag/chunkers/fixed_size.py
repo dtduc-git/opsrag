@@ -1,6 +1,8 @@
 """Fixed-size chunker with character-based windows and overlap.
 
-Uses the project-canonical chars-per-token estimate (opsrag.tokenization).
+Window char budget is the per-content-type chars/token ratio
+(opsrag.tokenization.chars_per_token_for) times the token target, so a window
+is sized in tokens of THAT content type rather than "average" text.
 """
 from __future__ import annotations
 
@@ -9,10 +11,10 @@ import hashlib
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.parser import ParsedDocument
 
-# Canonical project-wide values (was a local =4, ~33% larger than the canonical
-# 3 -> oversized windows + over-counted token_count vs the parent-child chunker).
-from opsrag.tokenization import CHARS_PER_TOKEN as _CHARS_PER_TOKEN
-from opsrag.tokenization import estimate_tokens
+# Char budget is per-doc-type (config ~2.5, code ~3.5, prose ~4.0) so a window
+# is sized in tokens of THAT content type, not "average" text. See
+# opsrag.tokenization (+ the re-index caveat).
+from opsrag.tokenization import chars_per_token_for, estimate_tokens
 
 
 class FixedSizeChunker:
@@ -21,20 +23,22 @@ class FixedSizeChunker:
             raise ValueError("overlap must be smaller than chunk_size")
         self.chunk_size = chunk_size
         self.overlap = overlap
-        self._char_size = chunk_size * _CHARS_PER_TOKEN
-        self._char_overlap = overlap * _CHARS_PER_TOKEN
 
     def chunk(self, doc: ParsedDocument) -> list[Chunk]:
         text = doc.content
         if not text.strip():
             return []
 
+        cpt = chars_per_token_for(doc.doc_type)
+        char_size = int(self.chunk_size * cpt)
+        char_overlap = int(self.overlap * cpt)
+
         chunks: list[Chunk] = []
         start = 0
         idx = 0
-        step = self._char_size - self._char_overlap
+        step = char_size - char_overlap
         while start < len(text):
-            end = min(start + self._char_size, len(text))
+            end = min(start + char_size, len(text))
             piece = text[start:end].strip()
             if piece:
                 chunk_id = self._make_id(doc, idx, piece)
@@ -52,7 +56,7 @@ class FixedSizeChunker:
                         },
                         parent_chunk_id=None,
                         chunk_type="child",
-                        token_count=estimate_tokens(piece),
+                        token_count=estimate_tokens(piece, doc.doc_type),
                     )
                 )
                 idx += 1

@@ -14,13 +14,13 @@ import hashlib
 from opsrag.ingestion.metadata import content_hash as _content_hash
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.parser import DocType, ParsedDocument
-from opsrag.tokenization import CHARS_PER_TOKEN, estimate_tokens
+from opsrag.tokenization import chars_per_token_for, estimate_tokens
 
-# Sizing target -- `child_size` / `parent_max_tokens` are expressed in tokens;
-# we multiply by this to get a char budget for the slicer. Using the same
-# constant the embedder uses keeps the two layers' notion of "256 tokens" the
-# same so the embedder's batch budget matches the chunker's emitted size.
-_CHARS_PER_TOKEN = CHARS_PER_TOKEN
+# Sizing targets (`child_size` / `parent_max_tokens`) are expressed in tokens;
+# the char budget for the slicer is `tokens * chars_per_token_for(doc.doc_type)`,
+# computed PER-DOC (config ~2.5, code ~3.5, prose ~4.0) so a 256-token child is
+# actually ~256 tokens of THAT content type rather than 256 tokens of "average"
+# text. See opsrag.tokenization for the ratios + the re-index caveat.
 
 # Source-code doc types. These get (a) a larger parent budget so a whole
 # function/class (the AST parser emits one section per def) stays in a single
@@ -57,24 +57,31 @@ class ParentChildChunker:
         self.parent_max_tokens = parent_max_tokens
         # Code parents get a bigger budget so most functions/classes fit whole.
         self.code_parent_max_tokens = code_parent_max_tokens
-        self._child_chars = child_size * _CHARS_PER_TOKEN
-        self._child_overlap_chars = child_overlap * _CHARS_PER_TOKEN
-        self._parent_max_chars = parent_max_tokens * _CHARS_PER_TOKEN
-        self._code_parent_max_chars = code_parent_max_tokens * _CHARS_PER_TOKEN
+
+    def _child_chars_for(self, doc: ParsedDocument) -> tuple[int, int]:
+        """(child_char_budget, child_overlap_chars) for this doc's content type."""
+        cpt = chars_per_token_for(doc.doc_type)
+        return int(self.child_size * cpt), int(self.child_overlap * cpt)
 
     def _parent_max_chars_for(self, doc: ParsedDocument) -> int:
-        """Char budget for a parent piece -- larger for source code."""
-        if doc.doc_type in _CODE_DOC_TYPES:
-            return self._code_parent_max_chars
-        return self._parent_max_chars
+        """Char budget for a parent piece -- larger for source code, scaled by
+        the doc's content-type chars/token ratio."""
+        cpt = chars_per_token_for(doc.doc_type)
+        tokens = (
+            self.code_parent_max_tokens
+            if doc.doc_type in _CODE_DOC_TYPES
+            else self.parent_max_tokens
+        )
+        return int(tokens * cpt)
 
     def _split_parent_text(self, text: str, max_chars: int, doc: ParsedDocument) -> list[str]:
         """Split a section body into parent-sized pieces.
 
-        Prose keeps the original fixed char-slice (byte-identical output, so
-        existing chunk IDs / vectors are unchanged). Code splits on line
-        boundaries so a def that overflows the budget breaks between lines
-        rather than mid-line.
+        Prose uses a fixed char-slice; code splits on line boundaries so a def
+        that overflows the budget breaks between lines rather than mid-line.
+        ``max_chars`` is the per-doc-type budget (see _parent_max_chars_for), so
+        output is NOT byte-identical to the old flat-3 sizing -- a re-index is
+        required for the new boundaries to take effect.
         """
         if doc.doc_type in _CODE_DOC_TYPES:
             return self._split_by_lines(text, max_chars)
@@ -146,7 +153,7 @@ class ParentChildChunker:
                         },
                         parent_chunk_id=None,
                         chunk_type="parent",
-                        token_count=estimate_tokens(piece),
+                        token_count=estimate_tokens(piece, doc.doc_type),
                     )
                 )
         return parents or self._wrap_whole_doc(doc)
@@ -173,7 +180,7 @@ class ParentChildChunker:
                     },
                     parent_chunk_id=None,
                     chunk_type="parent",
-                    token_count=max(1, len(piece) // _CHARS_PER_TOKEN),
+                    token_count=estimate_tokens(piece, doc.doc_type),
                 )
             )
         return chunks
@@ -183,10 +190,11 @@ class ParentChildChunker:
         out: list[Chunk] = []
         start = 0
         idx = 0
-        step = self._child_chars - self._child_overlap_chars
+        child_chars, child_overlap_chars = self._child_chars_for(doc)
+        step = child_chars - child_overlap_chars
         is_code = doc.doc_type in _CODE_DOC_TYPES
         while start < len(text):
-            end = min(start + self._child_chars, len(text))
+            end = min(start + child_chars, len(text))
             # For code/config, snap the window end back to a newline so a child
             # never cuts through an identifier (`handle_web|hook`) or a YAML
             # key:value pair -- mid-symbol slices poison the BM25 lexical lane
@@ -201,7 +209,7 @@ class ParentChildChunker:
                 # sentence end, so a child doesn't cut mid-sentence (which
                 # weakens the child embedding). Only snap if it doesn't shrink
                 # the window below ~60% -- otherwise keep the char boundary.
-                floor = start + int(self._child_chars * 0.6)
+                floor = start + int(child_chars * 0.6)
                 para = text.rfind("\n\n", floor, end)
                 if para > start:
                     end = para + 2
@@ -227,7 +235,7 @@ class ParentChildChunker:
                         metadata={**parent.metadata, "child_index": idx},
                         parent_chunk_id=parent.id,
                         chunk_type="child",
-                        token_count=estimate_tokens(piece),
+                        token_count=estimate_tokens(piece, doc.doc_type),
                     )
                 )
                 idx += 1
@@ -236,7 +244,7 @@ class ParentChildChunker:
             # Advance with overlap measured from the (possibly snapped) end, so
             # newline-snapping never leaves a gap. For prose (no snap) this is
             # exactly `start += step` -- byte-identical output, stable chunk IDs.
-            nxt = end - self._child_overlap_chars
+            nxt = end - child_overlap_chars
             start = nxt if nxt > start else start + step
         return out
 

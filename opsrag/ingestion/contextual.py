@@ -279,7 +279,7 @@ async def augment_chunks(
                 # embedded length. Likewise refresh the dedup content_hash so it
                 # describes the text that's actually embedded+stored, not the
                 # pre-prefix slice.
-                child.token_count = estimate_tokens(child.content)
+                child.token_count = estimate_tokens(child.content, child.doc_type)
                 _refresh_content_hash(child)
 
     return chunks
@@ -300,7 +300,7 @@ def _augment_structured(chunks: list[Chunk], doc: ParsedDocument) -> None:
         ctx = _build_structured_context(chunk, doc)
         if ctx:
             chunk.content = f"[Context: {ctx}]\n\n{chunk.content}"
-            chunk.token_count = estimate_tokens(chunk.content)
+            chunk.token_count = estimate_tokens(chunk.content, chunk.doc_type)
             _refresh_content_hash(chunk)
 
 

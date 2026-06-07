@@ -2,8 +2,9 @@
 
 Source-code doc types get a larger parent budget (so a whole function/class
 stays in one parent) and line-aware splitting (so overflow breaks on newlines,
-never mid-identifier -- which would poison the BM25 lane). Prose paths must be
-byte-identical to before, so prose chunk IDs / vectors don't churn.
+never mid-identifier -- which would poison the BM25 lane). Char budgets are
+per-content-type (config ~2.5, code ~3.5, prose ~4.0 chars/token), so a 256-tok
+child is sized in tokens of THAT content type.
 """
 from __future__ import annotations
 
@@ -29,20 +30,20 @@ def _parents(chunks):
     return [c for c in chunks if c.chunk_type == "parent"]
 
 
-def test_prose_char_slice_unchanged():
-    # Prose budget = 1024 tok * 3 chars = 3072. Hard char-slice, unchanged.
+def test_prose_char_slice():
+    # Prose budget = 1024 tok * 4.0 chars = 4096. Hard char-slice.
     content = "a" * 7000
     parents = _parents(ParentChildChunker().chunk(_doc(content, DocType.GENERIC_MARKDOWN)))
-    assert len(parents[0].content) == 3072
-    assert len(parents) == 3  # ceil(7000 / 3072)
+    assert len(parents[0].content) == 4096
+    assert len(parents) == 2  # ceil(7000 / 4096)
 
 
 def test_code_function_stays_whole():
-    # ~4.4k chars: over the prose budget (3072) but under the code budget
-    # (2048 tok * 3 = 6144). Code keeps it whole; prose would split it.
+    # ~4.4k chars: over the prose budget (1024*4.0=4096) but under the code
+    # budget (2048 tok * 3.5 = 7168). Code keeps it whole; prose would split it.
     line = "    result = compute_value_for_index(idx) + base\n"
     body = (line * 90).strip()
-    assert 3072 < len(body) < 6144, f"fixture out of range: {len(body)}"
+    assert 4096 < len(body) < 7168, f"fixture out of range: {len(body)}"
 
     code_parents = _parents(ParentChildChunker().chunk(_doc(body, DocType.PYTHON)))
     prose_parents = _parents(ParentChildChunker().chunk(_doc(body, DocType.GENERIC_MARKDOWN)))
