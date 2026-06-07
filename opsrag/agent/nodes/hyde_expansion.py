@@ -45,12 +45,15 @@ def hyde_expansion_node(
 
     async def _expand(state: dict) -> dict:
         query = (state.get("query") or "").strip()
-        query_type = state.get("query_type")
 
-        # Skip on live queries -- paraphrasing erases the temporal/ID
-        # signal we need for retrieval scoping.
-        if query_type == "live":
-            _log.debug("hyde: skipped (query_type=live)")
+        # Skip on live queries -- paraphrasing erases the temporal/ID signal we
+        # need for retrieval scoping. The live verdict is the CLASSIFIER's, which
+        # lands in `query_category` ("live"/"mixed"); the router's `query_type`
+        # has no "live" member, so the old `query_type=="live"` check was dead.
+        # "mixed" (live + forensic) is treated as live, matching the classifier.
+        query_category = (state.get("query_category") or "").lower()
+        if query_category in ("live", "mixed"):
+            _log.debug("hyde: skipped (query_category=%s)", query_category)
             return {
                 "hyde_text": None,
                 "current_step": "hyde_skipped_live",

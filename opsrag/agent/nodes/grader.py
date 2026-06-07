@@ -11,8 +11,12 @@ _log = logging.getLogger("opsrag.agent.grader")
 # If the cross-encoder's best (un-boosted) score is at least this, we trust the
 # reranker's top hit even when the binary relevance grader rejects everything --
 # rather than burn a CRAG rewrite on retrieval the reranker was confident about.
-# Scores are sigmoid-normalized [0,1]; 0.5 = a genuinely relevant match.
-_TRUST_RERANK_SCORE = 0.5
+# Default-reranker scores are sigmoid(logit): 0.5 is the NEUTRAL midpoint
+# (logit 0 = "no opinion"), so trusting at 0.5 defeated CRAG. Require a genuine
+# positive lean (~logit +0.6). NOTE: this is calibrated for the FastEmbed
+# default; Cohere/Vertex have different scales -- make it per-reranker if those
+# become the default.
+_TRUST_RERANK_SCORE = 0.65
 
 from opsrag.agent.prompts import GRADER_SYSTEM
 from opsrag.interfaces.chunker import Chunk

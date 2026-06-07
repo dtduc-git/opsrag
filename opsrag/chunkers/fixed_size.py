@@ -1,6 +1,6 @@
 """Fixed-size chunker with character-based windows and overlap.
 
-Uses a rough 4-chars-per-token estimate to avoid tokenizer dependencies.
+Uses the project-canonical chars-per-token estimate (opsrag.tokenization).
 """
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import hashlib
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.parser import ParsedDocument
 
-_CHARS_PER_TOKEN = 4
+# Canonical project-wide values (was a local =4, ~33% larger than the canonical
+# 3 -> oversized windows + over-counted token_count vs the parent-child chunker).
+from opsrag.tokenization import CHARS_PER_TOKEN as _CHARS_PER_TOKEN
+from opsrag.tokenization import estimate_tokens
 
 
 class FixedSizeChunker:
@@ -49,7 +52,7 @@ class FixedSizeChunker:
                         },
                         parent_chunk_id=None,
                         chunk_type="child",
-                        token_count=max(1, len(piece) // _CHARS_PER_TOKEN),
+                        token_count=estimate_tokens(piece),
                     )
                 )
                 idx += 1
