@@ -28,6 +28,8 @@ Conventions
 """
 from __future__ import annotations
 
+import math
+
 from deepeval.metrics import BaseMetric
 from deepeval.test_case import LLMTestCase
 
@@ -205,6 +207,117 @@ class RankRecallAtKMetric(BaseMetric):
     @property
     def __name__(self) -> str:
         return f"Recall@{self.k}"
+
+
+class RetrievalRestraintMetric(BaseMetric):
+    """Retrieval-side assertion for negative goldens.
+
+    The negative set previously only checked the ANSWER (must_not_contain) -- it
+    never asserted anything about what the retriever SURFACED. But the failure
+    mode for a "doesn't exist in the corpus" query is the retriever dragging in
+    loosely-related chunks that then tempt the generator to hallucinate; the
+    weak-retrieval gate is supposed to trim those to (near) nothing. This metric
+    asserts `len(retrieved) <= max_retrieved_sources` when a golden sets that
+    cap, catching a regression that disables the gate even when the answer text
+    happens to still look fine.
+
+    Skipped (no opinion) when the golden doesn't set `max_retrieved_sources`.
+    """
+
+    def __init__(self, threshold: float = 1.0):
+        self.threshold = threshold
+        self.score: float = 0.0
+        self.success: bool = False
+        self.reason: str = ""
+        self.error: str | None = None
+        self.skipped: bool = False
+
+    def measure(self, test_case: LLMTestCase) -> float:
+        meta = test_case.metadata or {}
+        cap = meta.get("max_retrieved_sources")
+        if cap is None:
+            self.skipped = True
+            self.score = 1.0
+            self.success = True
+            self.reason = "skipped: golden sets no max_retrieved_sources"
+            return self.score
+        _, _, retrieved = _meta_lists(test_case)
+        n = len(retrieved)
+        self.success = n <= int(cap)
+        self.score = 1.0 if self.success else 0.0
+        self.reason = (
+            f"retrieved {n} source(s); cap is {cap} "
+            f"({'within' if self.success else 'OVER'} restraint budget)"
+        )
+        return self.score
+
+    async def a_measure(self, test_case: LLMTestCase) -> float:
+        return self.measure(test_case)
+
+    def is_successful(self) -> bool:
+        return self.success
+
+    @property
+    def __name__(self) -> str:
+        return "RetrievalRestraint"
+
+
+class NDCGAtKMetric(BaseMetric):
+    """Normalized Discounted Cumulative Gain over the top-K retrieved sources.
+
+    Where Recall@K asks "did the relevant docs appear in top-K?" and MRR only
+    looks at the FIRST hit, NDCG@K is position-aware over ALL relevant docs in
+    the window: a relevant doc at rank 1 is worth more than the same doc at
+    rank 5, and surfacing TWO relevant docs beats one. This catches re-ranking
+    regressions that Recall@K (a set test) and MRR (first-hit only) both miss.
+
+    Binary relevance gain (1 if the retrieved doc matches any expected OR
+    acceptable source, else 0). DCG = sum gain_i / log2(i+1), 1-indexed.
+    IDCG = the DCG of the ideal ordering (all relevant docs packed at the top,
+    capped at K and at the size of the relevant set). NDCG = DCG / IDCG.
+    """
+
+    def __init__(self, k: int = 5, threshold: float = 0.5):
+        self.k = k
+        self.threshold = threshold
+        self.score: float = 0.0
+        self.success: bool = False
+        self.reason: str = ""
+        self.error: str | None = None
+        self.skipped: bool = False
+
+    def measure(self, test_case: LLMTestCase) -> float:
+        expected, acceptable, retrieved = _meta_lists(test_case)
+        if not expected and not acceptable:
+            self.skipped = True
+            self.score = 1.0
+            self.success = True
+            self.reason = "skipped: golden has no expected/acceptable sources"
+            return self.score
+        top = retrieved[: self.k]
+        gains = [1 if _is_relevant(r, expected, acceptable) else 0 for r in top]
+        dcg = sum(g / math.log2(i + 1) for i, g in enumerate(gains, start=1))
+        # Ideal: as many relevant docs as exist, packed at the top of the window.
+        # The relevant universe is bounded by the distinct expected+acceptable
+        # set; cap the ideal run at K so NDCG stays in [0, 1].
+        ideal_n = min(self.k, len(set(expected) | set(acceptable)))
+        idcg = sum(1 / math.log2(i + 1) for i in range(1, ideal_n + 1))
+        self.score = (dcg / idcg) if idcg > 0 else 0.0
+        self.success = self.score >= self.threshold
+        self.reason = (
+            f"NDCG@{self.k}={self.score:.2f} ({sum(gains)} relevant in top-{self.k})"
+        )
+        return self.score
+
+    async def a_measure(self, test_case: LLMTestCase) -> float:
+        return self.measure(test_case)
+
+    def is_successful(self) -> bool:
+        return self.success
+
+    @property
+    def __name__(self) -> str:
+        return f"NDCG@{self.k}"
 
 
 class MRRMetric(BaseMetric):

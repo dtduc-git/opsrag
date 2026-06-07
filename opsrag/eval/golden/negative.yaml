@@ -1,6 +1,14 @@
 # negative -- queries about things that don't exist in the corpus.
 # Tests refusal behavior: model must NOT hallucinate confident answers.
 # expected_sources is empty; success means the answer doesn't fabricate.
+#
+# `max_retrieved_sources` (optional) adds a RETRIEVAL-side assertion on top of
+# the answer-side must_not_contain: for a query naming a purely fabricated
+# entity, the weak-retrieval gate should surface (near) nothing. It's set only
+# on cases whose query has no real-tech term that would legitimately retrieve;
+# the value is permissive (tolerates a floored top-1 + rewrite residue) but
+# still trips if the gate regresses and dumps the full top-k. Operators with a
+# different corpus should tune or drop it.
 
 - id: neg_001
   category: negative
@@ -11,6 +19,7 @@
     - "FrobnicatorTeam is on-call"
     - "rotates every"
     - "FrobnicatorTeam handles"
+  max_retrieved_sources: 3
   notes: "Fabricated team name -- model must refuse."
 
 - id: neg_002
@@ -22,6 +31,7 @@
     - "nonexistent-microservice-42 deploys"
     - "is deployed to"
     - "manifest for nonexistent-microservice-42"
+  max_retrieved_sources: 3
   notes: "Fabricated service name."
 
 - id: neg_003
@@ -77,6 +87,7 @@
   must_not_contain:
     - "Frobnicator team discussed"
     - "April 1st"
+  max_retrieved_sources: 3
   notes: |
     Slack-side fabrication trap. There's no Frobnicator team. Bot
     must NOT invent a thread or name participants -- should refuse

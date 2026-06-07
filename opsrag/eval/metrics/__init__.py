@@ -17,8 +17,10 @@ from opsrag.eval.metrics.faithfulness import FaithfulnessJudgeMetric
 from opsrag.eval.metrics.must_contain import MustContainMetric, MustNotContainMetric
 from opsrag.eval.metrics.ranking import (
     MRRMetric,
+    NDCGAtKMetric,
     RankPrecisionAtKMetric,
     RankRecallAtKMetric,
+    RetrievalRestraintMetric,
 )
 from opsrag.eval.metrics.source_recall import SourceRecallMetric
 
@@ -29,5 +31,7 @@ __all__ = [
     "FaithfulnessJudgeMetric",
     "RankPrecisionAtKMetric",
     "RankRecallAtKMetric",
+    "NDCGAtKMetric",
+    "RetrievalRestraintMetric",
     "MRRMetric",
 ]
