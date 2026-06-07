@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 import boto3
 from botocore.config import Config as _BotoConfig
 
 from opsrag.tokenization import CHARS_PER_TOKEN, estimate_tokens
+
+_log = logging.getLogger("opsrag.embedders.bedrock")
 from opsrag.usage import tracker as _usage_tracker
 
 _MODEL_DIMENSIONS: dict[str, int] = {
@@ -109,6 +112,20 @@ class BedrockEmbeddings:
         token count via ``inputTextTokenCount``; Cohere embed doesn't, so we
         fall back to our estimate so usage/cost telemetry still populates."""
         if self._is_titan:
+            # Titan has no server-side truncate flag, so we cap client-side.
+            # Warn when it actually bites -- a silently dropped tail is lost
+            # content (the chunk's end never gets embedded). The char cap uses
+            # the scalar CHARS_PER_TOKEN, not the per-content-type ratio, since
+            # the document type isn't threaded into the embedder; it's a
+            # conservative bound, but dense YAML can still approach it.
+            if len(text) > self._max_input_chars:
+                _log.warning(
+                    "Titan input truncated %d -> %d chars (~%d-token cap); the "
+                    "chunk tail is not embedded. Consider smaller chunks for "
+                    "dense content.",
+                    len(text), self._max_input_chars,
+                    int(self._max_input_chars / CHARS_PER_TOKEN),
+                )
             body = json.dumps({
                 "inputText": text[: self._max_input_chars],
                 "dimensions": self._dimension,

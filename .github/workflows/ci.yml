@@ -254,8 +254,16 @@ jobs:
           # instance + corpus is the operator's to provision (the gate can't
           # assert retrieval quality against an empty index).
           OPSRAG_URL: ${{ secrets.OPSRAG_EVAL_URL }}
+          # Set OPSRAG_EVAL_REQUIRED=1 (repo/org variable) once you have a seeded
+          # eval target, to turn the "no URL -> skip" silent no-op into a hard
+          # failure -- so a dropped secret can't make the gate pass green.
+          OPSRAG_EVAL_REQUIRED: ${{ vars.OPSRAG_EVAL_REQUIRED }}
         run: |
           if [ -z "$OPSRAG_URL" ]; then
+            if [ "$OPSRAG_EVAL_REQUIRED" = "1" ]; then
+              echo "OPSRAG_EVAL_REQUIRED=1 but OPSRAG_EVAL_URL is unset -- failing the gate (refusing to pass green with no eval target)." >&2
+              exit 1
+            fi
             echo "OPSRAG_EVAL_URL secret not set -- no live eval target; skipping the gate."
           else
             # The gate lives on the `run` subcommand and needs --tag. --gate
