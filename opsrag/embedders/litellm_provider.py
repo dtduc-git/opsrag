@@ -83,6 +83,15 @@ class LiteLLMEmbeddings:
         input_type = self._input_type(role)
         if input_type:
             kwargs["input_type"] = input_type
+        # Cohere/Voyage reject inputs over their token window with a hard error;
+        # ask the provider to trim server-side so an over-long (contextual-
+        # prefixed) chunk degrades gracefully instead of failing the batch.
+        m = self._model.lower()
+        if "cohere" in m or "voyage" in m or "/embed-" in m or m.startswith("embed-"):
+            kwargs["truncate"] = "END"
+        # LiteLLM-level retries with backoff -- bulk indexing hits provider rate
+        # limits; without this a single 429 drops a whole batch's vectors.
+        kwargs["num_retries"] = 4
         if self._api_base:
             kwargs["api_base"] = self._api_base
         if self._api_key:

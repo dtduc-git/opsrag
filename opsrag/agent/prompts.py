@@ -30,11 +30,18 @@ relevant to answering the question -- not just tangentially related."""
 
 REWRITER_SYSTEM = """You rewrite failed operational search queries.
 
-The previous query did not return relevant results. Produce a SINGLE
-improved query that:
-- Adds likely technical synonyms (e.g., 'pod' <-> 'container', 'db' <-> 'database')
-- Removes conversational filler
-- Keeps specific identifiers (service names, error codes) verbatim
+The previous query (and any earlier reformulations listed) did NOT return
+relevant results. Produce a SINGLE improved query that takes a DIFFERENT
+angle from what already failed -- do not merely paraphrase it with synonyms.
+Change the retrieval surface by one of:
+- Broadening an over-specific query (drop a narrowing qualifier), or
+- Narrowing a vague one (add the concrete subsystem / resource type), or
+- Pivoting to a different key term the docs are more likely to use.
+
+Also:
+- Add likely technical synonyms (e.g., 'pod' <-> 'container', 'db' <-> 'database')
+- Remove conversational filler
+- Keep specific identifiers (service names, error codes, ticket IDs) verbatim
 
 Return only the rewritten query text, nothing else."""
 

@@ -205,10 +205,13 @@ _CASUAL_PATTERNS = [
         r"(sources?|tools?|integrations?|capabilit(y|ies)|features?|connectors?|systems?)\b",
         re.IGNORECASE,
     ),
-    re.compile(
-        r"\bdescribe\s+(a|the|your)?\s*(flow|process|workflow|architecture|design|pipeline)\s+(end\s+to\s+end|e2e)\b",
-        re.IGNORECASE,
-    ),
+    # NB: a generic "describe the <flow|architecture|process> end to end" used
+    # to land here, but that is far more often a real architecture question
+    # ("describe the deployment flow end to end") than a meta-bot one -- and a
+    # CASUAL false positive skips retrieval entirely. The genuine meta intent
+    # ("describe how YOU operate end to end") is caught by the "how ... work"
+    # pattern below + the semantic anchors, so the over-broad rule is dropped.
+    re.compile(r"\bdescribe\s+how\s+(you|opsrag)\s+(work|operate)", re.IGNORECASE),
     re.compile(r"\bhow\s+(do|does)\s+(you|opsrag|this)\s+work\b", re.IGNORECASE),
     re.compile(r"\bhow\s+are\s+you\s+built\b", re.IGNORECASE),
     re.compile(
@@ -378,7 +381,6 @@ _GENERIC_REFERENCE_EXAMPLES: dict[QueryCategory, list[str]] = {
         "list out all your integrations",
         "list all your tools",
         "what tools are available to you",
-        "describe a flow end to end",
         "how do you work internally",
         "can you describe how you operate end to end",
         "besides those examples what else can you do",
@@ -476,6 +478,16 @@ def build_reference_examples() -> dict[QueryCategory, list[str]]:
 
 LLM_FALLBACK_MARGIN = 0.05  # If top-1 - top-2 < margin, call LLM judge.
 ABSTAIN_TOP_THRESHOLD = 0.55  # Below this, top-1 too weak -- abstain.
+
+# CASUAL is the one verdict that SKIPS retrieval entirely (entry_route -> the
+# friendly lane). A false positive there answers a real ops question from the
+# persona prompt alone, which reads as "the bot ignored my question" -- a much
+# worse failure than over-retrieving. So the semantic router must clear a higher
+# bar to call CASUAL: a borderline cosine that happens to land on a chitchat
+# anchor ("describe the flow", "what systems...") falls through to the LLM judge
+# or, failing that, to UNKNOWN (the safe full-RAG path) rather than to CASUAL.
+CASUAL_SEMANTIC_MIN_SCORE = 0.72
+CASUAL_SEMANTIC_MIN_MARGIN = 0.10
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -621,7 +633,18 @@ async def classify_query(
     if semantic_router is not None and query_embedding is not None:
         cat, top1, top2 = semantic_router.classify(query_embedding)
         margin = top1 - top2
-        if cat != QueryCategory.UNKNOWN and margin >= LLM_FALLBACK_MARGIN:
+        # A CASUAL verdict needs a stricter score+margin than other categories,
+        # because accepting it skips retrieval (see CASUAL_SEMANTIC_MIN_*). When
+        # it doesn't clear that bar we treat the router as unconfident and fall
+        # through to the LLM judge / safe default instead of going no-RAG.
+        casual_underconfident = cat is QueryCategory.CASUAL and (
+            top1 < CASUAL_SEMANTIC_MIN_SCORE or margin < CASUAL_SEMANTIC_MIN_MARGIN
+        )
+        if (
+            cat != QueryCategory.UNKNOWN
+            and margin >= LLM_FALLBACK_MARGIN
+            and not casual_underconfident
+        ):
             return ClassificationResult(
                 category=cat, layer="semantic",
                 top1_score=top1, top2_score=top2, margin=margin,
@@ -634,8 +657,10 @@ async def classify_query(
                     category=llm_cat, layer="llm",
                     top1_score=top1, top2_score=top2, margin=margin,
                 )
-        # Best effort -- return semantic top-1 even if margin small
-        if cat != QueryCategory.UNKNOWN:
+        # Best effort -- return semantic top-1 even if margin small, EXCEPT an
+        # under-confident CASUAL: never silently skip retrieval on a weak chitchat
+        # match. Downgrade to UNKNOWN so the full RAG path runs.
+        if cat != QueryCategory.UNKNOWN and not casual_underconfident:
             return ClassificationResult(
                 category=cat, layer="semantic-low-conf",
                 top1_score=top1, top2_score=top2, margin=margin,
