@@ -41,6 +41,24 @@ _CODE_DOC_TYPES = frozenset(
     }
 )
 
+# Doc types that must split on LINE boundaries, never on prose sentences. This
+# is CODE plus structured CONFIG (YAML/HCL/k8s/Dockerfile/alert): config has no
+# sentences, so the prose snapper would cut `replicas: 3` from its key on a `. `
+# inside a value and poison both the dense vector and the BM25 lexical lane --
+# exactly the exact-match-sensitive content. (Separate from _CODE_DOC_TYPES,
+# which ALSO grants the larger parent budget so a whole function stays intact;
+# config keeps the normal budget but still wants newline-aware splitting.)
+_LINE_AWARE_DOC_TYPES = _CODE_DOC_TYPES | frozenset(
+    {
+        DocType.KUBERNETES,
+        DocType.TERRAFORM,
+        DocType.HELM,
+        DocType.YAML_CONFIG,
+        DocType.DOCKERFILE,
+        DocType.ALERT_DEFINITION,
+    }
+)
+
 
 class ParentChildChunker:
     def __init__(
@@ -77,13 +95,13 @@ class ParentChildChunker:
     def _split_parent_text(self, text: str, max_chars: int, doc: ParsedDocument) -> list[str]:
         """Split a section body into parent-sized pieces.
 
-        Prose uses a fixed char-slice; code splits on line boundaries so a def
-        that overflows the budget breaks between lines rather than mid-line.
-        ``max_chars`` is the per-doc-type budget (see _parent_max_chars_for), so
-        output is NOT byte-identical to the old flat-3 sizing -- a re-index is
-        required for the new boundaries to take effect.
+        Prose uses a fixed char-slice; code AND config split on line boundaries
+        so an overflow breaks between lines rather than mid-line (a YAML key:value
+        pair must not be cut). ``max_chars`` is the per-doc-type budget (see
+        _parent_max_chars_for), so output is NOT byte-identical to the old flat-3
+        sizing -- a re-index is required for the new boundaries to take effect.
         """
-        if doc.doc_type in _CODE_DOC_TYPES:
+        if doc.doc_type in _LINE_AWARE_DOC_TYPES:
             return self._split_by_lines(text, max_chars)
         return self._split_by_char_size(text, max_chars)
 
@@ -192,7 +210,7 @@ class ParentChildChunker:
         idx = 0
         child_chars, child_overlap_chars = self._child_chars_for(doc)
         step = child_chars - child_overlap_chars
-        is_code = doc.doc_type in _CODE_DOC_TYPES
+        is_line_aware = doc.doc_type in _LINE_AWARE_DOC_TYPES
         while start < len(text):
             end = min(start + child_chars, len(text))
             # For code/config, snap the window end back to a newline so a child
@@ -200,7 +218,7 @@ class ParentChildChunker:
             # key:value pair -- mid-symbol slices poison the BM25 lexical lane
             # that exact-symbol queries depend on. Parents are already
             # line-aware; this brings the embedded+indexed child layer in line.
-            if is_code and end < len(text):
+            if is_line_aware and end < len(text):
                 nl = text.rfind("\n", start + 1, end + 1)
                 if nl > start:
                     end = nl + 1  # keep the trailing newline with the piece

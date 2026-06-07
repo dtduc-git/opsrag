@@ -131,7 +131,7 @@ class AlertParser:
             mtype = mon.get("type", "")
             query = mon.get("query", "")
             msg = mon.get("message", "")
-            body = yaml.dump(mon, default_flow_style=False).strip()
+            body = yaml.dump(mon, default_flow_style=False, sort_keys=False).strip()
             sections.append(DocSection(
                 heading=f"monitor: {name}",
                 content=body,
@@ -145,7 +145,7 @@ class AlertParser:
         sections: list[DocSection] = []
         if "alert" in data:
             name = data["alert"]
-            body = yaml.dump(data, default_flow_style=False).strip()
+            body = yaml.dump(data, default_flow_style=False, sort_keys=False).strip()
             sections.append(DocSection(
                 heading=f"alert: {name}",
                 content=body,

@@ -117,9 +117,9 @@ class HelmParser:
         sections: list[DocSection] = []
         for key, value in data.items():
             if isinstance(value, dict):
-                content = yaml.dump(value, default_flow_style=False).strip()
+                content = yaml.dump(value, default_flow_style=False, sort_keys=False).strip()
             elif isinstance(value, list):
-                content = yaml.dump(value, default_flow_style=False).strip()
+                content = yaml.dump(value, default_flow_style=False, sort_keys=False).strip()
             else:
                 content = f"{key}: {value}"
 
