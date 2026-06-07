@@ -10,7 +10,7 @@ Two boost forms, because the two score spaces are different:
 * ``priority_multiplier`` -- a MULTIPLIER, correct only on the raw COSINE band
   ([0, 1]) used by the dense-only ``search()`` path.
 * ``priority_rrf_bonus`` -- an ADDITIVE bonus in RRF units, for the fused
-  hybrid/​fanout path. RRF scores live in a tiny compressed band (rank 1 of one
+  hybrid/fanout path. RRF scores live in a tiny compressed band (rank 1 of one
   lane = 1/(60+1) ~= 0.0164, rank 40 ~= 0.0100), so a x2.0 multiplier there is a
   landslide: it lifts a weakly-ranked SRE-KB chunk at rank 40 (0.0100 -> 0.0200)
   above a genuine single-lane #1 (0.0164). An additive bonus sized to a fraction
