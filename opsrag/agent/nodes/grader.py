@@ -86,12 +86,18 @@ def grade_documents_node(
             # the rewrite loop only when the rerank was weak (genuinely-bad
             # retrieval, what CRAG is for) OR the retry budget is spent.
             best_rr = float(state.get("best_rerank_score", 0.0))
-            if best_rr >= _TRUST_RERANK_SCORE or retries >= max_retries:
+            # Per-reranker trust floor (set by the rerank node from the active
+            # reranker's trust_score); falls back to the FastEmbed-calibrated
+            # default. A hard-coded 0.65 was wrong for Cohere/Bedrock, whose
+            # relevant scores cluster low -- it never fired, so CRAG always
+            # rewrote even on good retrieval.
+            trust_floor = float(state.get("rerank_trust_score", _TRUST_RERANK_SCORE))
+            if best_rr >= trust_floor or retries >= max_retries:
                 kept = candidates[:min_relevant]
                 _log.info(
                     "grader floor (%s): kept top %d of %d candidates "
                     "(all failed strict grade)",
-                    "confident rerank" if best_rr >= _TRUST_RERANK_SCORE else "retries exhausted",
+                    "confident rerank" if best_rr >= trust_floor else "retries exhausted",
                     len(kept), len(candidates),
                 )
 

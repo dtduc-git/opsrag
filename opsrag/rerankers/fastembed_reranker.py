@@ -30,6 +30,12 @@ def _sigmoid(x: float) -> float:
 
 class FastEmbedReranker:
     _DEFAULT_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+    # Per-reranker calibration (sigmoid-normalized logits, centered ~0.5). Read
+    # by the rerank weak-retrieval gate (score_floor) and the grader's
+    # trust-rerank-over-CRAG floor (trust_score). NOT shareable across providers
+    # -- see rerankers/cohere.py.
+    score_floor = 0.05
+    trust_score = 0.65
 
     def __init__(self, model: str | None = None):
         # The shared config default `reranker.model` is "rerank-v3.5" (a Cohere

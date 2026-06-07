@@ -14,6 +14,14 @@ _ENDPOINT = "https://api.cohere.com/v2/rerank"
 
 
 class CohereReranker:
+    # Cohere rerank-v3.5 returns [0,1] relevance, but the distribution is
+    # COMPRESSED LOW vs FastEmbed's sigmoid: genuinely relevant docs often score
+    # ~0.1-0.4, so the FastEmbed 0.05 floor would false-trip weak-retrieval and
+    # 0.65 trust would essentially never fire (burning the whole CRAG budget).
+    # Lower both. (Tune against your corpus -- these are conservative defaults.)
+    score_floor = 0.02
+    trust_score = 0.5
+
     def __init__(
         self,
         api_key: str,
