@@ -8,7 +8,9 @@ cleanup() { git reset -q -- "$probe" 2>/dev/null || true; rm -f "$probe"; }
 trap cleanup EXIT
 # Build a Vietnamese sentence at runtime so this .sh source stays ASCII.
 python3 -c "open('$probe','w',encoding='utf-8').write('# '+'Ti'+chr(0x1EBF)+'ng Vi'+chr(0x1EC7)+'t test\n')"
-git add -N "$probe"
+# -f: `_audit_probe_*` is gitignored, so a plain `git add -N` is rejected and the
+# probe is invisible to the audit's `git ls-files` scan -> force the intent-to-add.
+git add -f -N "$probe"
 scripts/audit-vendor-neutrality.sh >/dev/null 2>&1
 rc=$?
 [[ $rc -ne 0 ]] || { echo "FAIL: non-English text not caught"; exit 1; }
