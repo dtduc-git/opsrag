@@ -207,11 +207,25 @@ def generate_node(
         if mem_block:
             system_prompt = f"{system_prompt}\n\n{mem_block}"
 
+        # Regenerate loop (grounding failed -> generate again): re-running at
+        # temperature 0.0 with identical context is deterministic, so it re-emits
+        # the same ungrounded answer and just burns the regen budget. Warm the
+        # temperature and tell the model the prior attempt failed grounding so it
+        # actually changes, sticking strictly to the evidence.
+        regen = int(state.get("regen_count", 0))
+        gen_temp = min(0.5, 0.2 * regen)
+        if regen:
+            system_prompt = (
+                f"{system_prompt}\n\nNOTE: a previous answer FAILED the "
+                "groundedness check -- some claim was not supported by the "
+                "context. Answer again using ONLY facts present in the context "
+                "above; omit anything you cannot cite."
+            )
         response = await gen_llm.generate(
             purpose="generation",
             messages=messages,
             system_prompt=system_prompt,
-            temperature=0.0,
+            temperature=gen_temp,
         )
 
         await observability.log_llm_call(

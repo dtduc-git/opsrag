@@ -193,21 +193,32 @@ class BedrockEmbeddings:
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        # boto3 invoke is sync -> run off the event loop, in parallel.
+        # boto3 invoke is sync -> run off the event loop. BOUND concurrency with
+        # a semaphore: an unbounded gather over thousands of chunks (Titan = one
+        # call per chunk) fans out the whole corpus at once -> a Bedrock throttle
+        # storm, and a ThrottlingException past the 6 adaptive retries drops a
+        # whole batch's vectors. batch_size was previously dead for Titan; this
+        # makes it the in-flight cap.
         t0 = time.perf_counter()
+        sem = asyncio.Semaphore(max(1, self._batch_size))
+
+        async def _bounded(fn, *a):
+            async with sem:
+                return await asyncio.to_thread(fn, *a)
+
         if self._is_titan:
-            # Titan: one inputText per call -> parallel single invokes.
+            # Titan: one inputText per call -> bounded parallel single invokes.
             results = await asyncio.gather(
-                *(asyncio.to_thread(self._invoke, t, "search_document") for t in texts)
+                *(_bounded(self._invoke, t, "search_document") for t in texts)
             )
             vecs = [v for v, _ in results]
             total_tokens = sum(tok for _, tok in results)
         else:
-            # Cohere: batch many texts per request, batches run concurrently.
+            # Cohere: batch many texts per request; bounded concurrent batches.
             bs = self._cohere_batch
             batches = [texts[i:i + bs] for i in range(0, len(texts), bs)]
             batch_vecs = await asyncio.gather(
-                *(asyncio.to_thread(self._invoke_cohere_batch, b, "search_document")
+                *(_bounded(self._invoke_cohere_batch, b, "search_document")
                   for b in batches)
             )
             vecs = [v for bv in batch_vecs for v in bv]

@@ -702,6 +702,16 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         # a query names a specific repo and scope the search.
         known_repos = cfg.scm.repo_names()
 
+        # Loud warning if the light-graph lane is enabled but the active mode
+        # can't run it -- this is the "silently-dead graph for months" failure
+        # the Neo4j fail-fast guard was written to prevent, one layer up.
+        if providers.light_graph is not None and cfg.agent.mode == "minimal":
+            _log.warning(
+                "light_graph is ENABLED but agent.mode=minimal has no "
+                "entity_expand node -- the graph lane is DEAD (edges + entity_ids "
+                "are still computed at index time but nothing reads them). Use "
+                "mode=full/multi_agent/tool_calling, or disable light_graph."
+            )
         if cfg.agent.mode == "multi_agent":
             agent_graph = build_multi_agent_graph(
                 llm=providers.llm,
@@ -716,6 +726,7 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 model_router=model_router,
                 code_embedder=providers.code_embedder,
                 code_store=providers.code_vector_store,
+                light_graph=providers.light_graph,
             )
         elif cfg.agent.mode == "tool_calling":
             agent_graph = build_tool_calling_graph(
@@ -731,6 +742,7 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 model_router=model_router,
                 code_embedder=providers.code_embedder,
                 code_store=providers.code_vector_store,
+                light_graph=providers.light_graph,
             )
         elif cfg.agent.mode == "minimal":
             agent_graph = build_minimal_graph(

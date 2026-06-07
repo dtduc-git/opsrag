@@ -5,22 +5,39 @@ Each alert group / monitor becomes a section.
 """
 from __future__ import annotations
 
+import re
+
 import yaml
 
 from opsrag.interfaces.parser import DocSection, DocType, ParsedDocument
 from opsrag.interfaces.scm import RepoFile
 
-_ALERT_PATH_HINTS = ("alert", "monitor", "prometheus", "rules/")
+# Actual alert SHAPE markers. A PATH hint alone ("alert"/"monitor" substring)
+# hijacked ordinary k8s/helm manifests -- apps/monitoring-service/deployment.yaml,
+# charts/alertmanager/values.yaml -- which then failed to parse as alerts and
+# collapsed into one un-split chunk, destroying per-resource retrieval. Gate on
+# content shape instead so AlertParser only claims files that ARE alerts.
+_PROM_GROUPS_RE = re.compile(r"^\s*groups\s*:", re.M)
+_RULES_RE = re.compile(r"^\s*rules\s*:", re.M)
+_MONITORS_RE = re.compile(r"^\s*monitors?\s*:", re.M)
+_ALERT_KEY_RE = re.compile(r"^\s*alert\s*:\s*\S", re.M)  # `alert: <name>`
 
 
 class AlertParser:
     def supports(self, file_path: str, content: str) -> bool:
         if not file_path.lower().endswith((".yaml", ".yml")):
             return False
-        low = file_path.lower()
-        if any(h in low for h in _ALERT_PATH_HINTS):
+        # Content must genuinely look like an alert definition -- NOT just live
+        # at a path containing "monitor"/"alert". PrometheusRule CRD, a Prometheus
+        # `groups:` with `rules:`, a Datadog `monitors:`, or an `alert: <name>`
+        # block. (A k8s Deployment under monitoring-service/ has none of these.)
+        if "PrometheusRule" in content:
             return True
-        return "PrometheusRule" in content or "alert:" in content
+        if _PROM_GROUPS_RE.search(content) and _RULES_RE.search(content):
+            return True
+        if _MONITORS_RE.search(content):
+            return True
+        return bool(_ALERT_KEY_RE.search(content))
 
     def detect_doc_type(self, file: RepoFile) -> DocType:
         return DocType.ALERT_DEFINITION
