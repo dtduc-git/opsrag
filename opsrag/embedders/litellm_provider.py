@@ -74,6 +74,12 @@ class LiteLLMEmbeddings:
 
     def _call_kwargs(self, inputs: list[str], role: str = "document") -> dict:
         kwargs: dict = {"model": self._model, "input": inputs}
+        # Request the CONFIGURED output dimension. Without it, a Matryoshka model
+        # (Cohere v4, OpenAI-3) returns its NATIVE dim, which can diverge from the
+        # collection's dim -> a wrong-dim upsert. LiteLLM maps `dimensions` to the
+        # provider-specific param (output_dimension for Cohere/Voyage).
+        if self._dimension:
+            kwargs["dimensions"] = self._dimension
         input_type = self._input_type(role)
         if input_type:
             kwargs["input_type"] = input_type

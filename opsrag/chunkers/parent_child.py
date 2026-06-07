@@ -196,6 +196,24 @@ class ParentChildChunker:
                 nl = text.rfind("\n", start + 1, end + 1)
                 if nl > start:
                     end = nl + 1  # keep the trailing newline with the piece
+            elif end < len(text):
+                # Prose: snap the window end back to a paragraph break, then a
+                # sentence end, so a child doesn't cut mid-sentence (which
+                # weakens the child embedding). Only snap if it doesn't shrink
+                # the window below ~60% -- otherwise keep the char boundary.
+                floor = start + int(self._child_chars * 0.6)
+                para = text.rfind("\n\n", floor, end)
+                if para > start:
+                    end = para + 2
+                else:
+                    sent = max(
+                        text.rfind(". ", floor, end),
+                        text.rfind("! ", floor, end),
+                        text.rfind("? ", floor, end),
+                        text.rfind(".\n", floor, end),
+                    )
+                    if sent > start:
+                        end = sent + 1
             piece = text[start:end].strip()
             if piece:
                 cid = self._make_id(doc, f"child-{parent.id}-{idx}", piece)
