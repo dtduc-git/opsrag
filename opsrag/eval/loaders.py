@@ -17,12 +17,15 @@ policy and the anti-pattern guard rules enforced at load time.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 from deepeval.test_case import LLMTestCase
+
+_log = logging.getLogger("opsrag.eval.loaders")
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -97,7 +100,14 @@ def match_path(expected: str, retrieved: str) -> bool:
         return False
     if e == r:
         return True
-    if r.endswith("/" + e) or r.endswith(":" + e):
+    # Skip the "/"-suffix arm for a BARE filename (no path separator AND no
+    # `:`-page-id): `config.yaml` / `values.yaml` would otherwise match ANY
+    # retrieved path ending in it -- silently inflating recall/precision in a
+    # corpus with many duplicate filenames (e.g. 41K vendored chart copies, all
+    # `values.yaml`). A qualified path (`apps/auth/values.yaml`) or a
+    # discriminating `<page_id>:<slug>` form still uses both arms.
+    e_is_bare_leaf = "/" not in e and ":" not in e
+    if (not e_is_bare_leaf and r.endswith("/" + e)) or r.endswith(":" + e):
         return True
 
     # Stem-only fallback. Both sides must have the same page_id
@@ -224,6 +234,29 @@ def _validate_golden(g: GoldenQuery, source_file: Path) -> None:
                     f"factual content instead. "
                     f"See opsrag/eval/golden/README.md."
                 )
+
+    # Soft hygiene warnings (don't fail the load -- just surface a risk):
+    # (a) Bare-leaf expected_sources (no path separator, no `:`-page-id) match
+    #     ANY retrieved path ending in that filename, so in a duplicate-filename
+    #     corpus they over-credit recall. match_path now ignores the "/"-arm for
+    #     them, so a bare leaf will simply never match -- qualify the path.
+    for src in g.expected_sources:
+        if "/" not in src and ":" not in src:
+            _log.warning(
+                "%s: expected_sources entry %r is a bare filename -- qualify it "
+                "with its repo/dir path (config.yaml -> apps/foo/config.yaml), "
+                "else it won't match (and previously over-matched duplicates).",
+                where, src,
+            )
+    # (b) A negative golden with a retrieval cap but no answer-side guard only
+    #     checks source COUNT, not that the answer refused -- pair them.
+    if g.max_retrieved_sources is not None and not g.must_not_contain:
+        _log.warning(
+            "%s: max_retrieved_sources set without must_not_contain -- the "
+            "retrieval cap alone doesn't assert the answer refused; add an "
+            "answer-side guard for belt-and-suspenders.",
+            where,
+        )
 
 
 def load_golden(category: str | None = None) -> list[GoldenQuery]:

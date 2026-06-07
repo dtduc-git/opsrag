@@ -260,6 +260,13 @@ jobs:
           else
             # The gate lives on the `run` subcommand and needs --tag. --gate
             # exits 1 if any gated metric is below threshold.
+            #
+            # NB: the eval target server must run with OPSRAG_DISABLE_QA_CACHE=1
+            # so the QA cache can't serve a stored answer/sources for a golden --
+            # otherwise a retrieval regression is masked by a cache hit and the
+            # ranking metrics measure the cache, not retrieval. Set it where the
+            # OPSRAG_EVAL_URL instance is launched, not here (this job only hits
+            # the URL).
             uv run python -m opsrag.eval run --tag ci --gate
           fi
 

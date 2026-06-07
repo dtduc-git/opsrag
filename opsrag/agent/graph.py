@@ -20,6 +20,18 @@ from uuid import uuid4
 
 _log = logging.getLogger("opsrag.graph")
 
+
+def _qa_cache_globally_disabled() -> bool:
+    """True when OPSRAG_DISABLE_QA_CACHE is set. The eval harness runs the target
+    server with this on so the QA cache can't serve a stored answer (and stored
+    sources) for a golden -- otherwise a retrieval regression is masked by a cache
+    hit and the ranking metrics measure the cache, not retrieval. See
+    eval/golden/README.md."""
+    import os
+    return os.environ.get("OPSRAG_DISABLE_QA_CACHE", "").lower() in (
+        "1", "true", "yes", "on",
+    )
+
 # Retry meta-command: one-word user inputs that mean "re-run my previous
 # question" rather than literal investigation topics. Anchored to whole-
 # query so "retry the acme-analytics-v3 pipeline" still routes to investigation.
@@ -759,8 +771,8 @@ async def query_with_session(
                     llm=llm,
                 )
                 policy = policy_for(_classification.category)
-                if policy["skip_cache"]:
-                    hit = None  # bypass cache for live queries
+                if policy["skip_cache"] or _qa_cache_globally_disabled():
+                    hit = None  # bypass cache for live queries / eval runs
                 else:
                     # SWR: serve a recently-expired entry tagged stale,
                     # so the user gets an instant response. Caller marks
@@ -1102,7 +1114,7 @@ async def query_with_session_events(
                     llm=llm,
                 )
                 policy = policy_for(_classification.category)
-                if policy["skip_cache"]:
+                if policy["skip_cache"] or _qa_cache_globally_disabled():
                     hit = None
                 else:
                     import os
