@@ -15,9 +15,8 @@ import json
 import logging
 import time
 
-import boto3
-from botocore.config import Config as _BotoConfig
-
+# boto3/botocore are OPTIONAL (the `bedrock` extra) -- imported lazily in
+# __init__ so this module stays importable without them on the default install.
 from opsrag.tokenization import CHARS_PER_TOKEN, estimate_tokens
 
 _log = logging.getLogger("opsrag.embedders.bedrock")
@@ -61,6 +60,8 @@ class BedrockEmbeddings:
         dimension: int | None = None,
         batch_size: int = 25,
     ):
+        import boto3
+        from botocore.config import Config as _BotoConfig
         session = boto3.Session(
             region_name=region,
             profile_name=profile,
