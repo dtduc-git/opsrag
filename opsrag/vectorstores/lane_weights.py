@@ -38,3 +38,23 @@ def compute_lane_weights(query_text: str | None) -> dict[str, float]:
     if _IDENT_PATTERN.search(query_text):
         return {"dense": 1.0, "sparse": _IDENT_BM25_BOOST, "graph": 1.0, "code": _CODE_LANE_BOOST}
     return {"dense": 1.0, "sparse": 1.0, "graph": 1.0, "code": 1.0}
+
+
+def extract_identifiers(query_text: str | None) -> list[str]:
+    """Distinct identifier-shaped tokens in the query (snake_case, CamelCase,
+    kebab slugs, dotted paths, backticked symbols, routes, glob/digit suffixes).
+
+    The pgvector trigram lane uses these to recover exact-symbol recall the FTS
+    'simple' lexer misses: it keys on whole tokens, so a partial / camelCase /
+    dotted identifier can ``@@``-match zero rows even when the symbol is indexed.
+    Order-preserving, deduped case-insensitively, min length 3 (trigram floor)."""
+    if not query_text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _IDENT_PATTERN.finditer(query_text):
+        tok = m.group(0).strip("`").strip().lstrip("/")
+        if len(tok) >= 3 and tok.lower() not in seen:
+            seen.add(tok.lower())
+            out.append(tok)
+    return out

@@ -15,7 +15,7 @@ import asyncpg
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.parser import DocType
 from opsrag.interfaces.vectorstore import SearchResult
-from opsrag.vectorstores.lane_weights import compute_lane_weights
+from opsrag.vectorstores.lane_weights import compute_lane_weights, extract_identifiers
 from opsrag.vectorstores.priority import chunk_priority, priority_rrf_bonus
 from opsrag.vectorstores.rrf import rrf_merge_pools
 
@@ -94,6 +94,9 @@ class PgVectorStore:
         self._allow_dimension_change = allow_dimension_change
         self._pool: asyncpg.Pool | None = None
         self._ensured = False
+        # Set by ensure_table: True if pg_trgm + the trgm index are available,
+        # gating the substring identifier lane in hybrid_search.
+        self._trgm_available = False
 
     async def _assert_dimension_compatible(self, conn) -> None:
         """Fail closed if an existing table's vector dimension differs from the
@@ -149,6 +152,19 @@ class PgVectorStore:
             except Exception:
                 pass  # best-effort; HNSW builds on an empty table but tolerate
                       # races / older pgvector without HNSW support
+            # Best-effort trigram lane: pg_trgm + a GIN trgm index make the
+            # substring identifier lane (in hybrid_search) fast. Skipped silently
+            # if the extension isn't available (managed PG without it / no
+            # privilege) -- the lane then just doesn't fire, no error.
+            try:
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_content_trgm "
+                    "ON opsrag_chunks USING gin (content gin_trgm_ops)"
+                )
+                self._trgm_available = True
+            except Exception:
+                self._trgm_available = False
         self._ensured = True
 
     async def upsert(
@@ -355,23 +371,63 @@ class PgVectorStore:
         LIMIT {candidate_k}
         """
 
+        # Lane 3 (optional, identifier queries only) -- trigram substring lane.
+        # The 'simple' FTS lexer keys on whole tokens, so a partial / camelCase /
+        # dotted identifier query can @@-match ZERO rows even when the symbol is
+        # in the corpus -- the exact case the Qdrant subword-BM25 lane handles
+        # and pgvector previously could not. A pg_trgm GIN index makes an ILIKE
+        # substring per identifier fast, recovering that exact-symbol recall.
+        # Fires only when the query has identifier tokens AND pg_trgm is present,
+        # so prose queries are byte-identical to the two-lane path.
+        idents = extract_identifiers(query_text) if self._trgm_available else []
+        trgm_sql = ""
+        trgm_params: list = []
+        if idents:
+            iwhere, iparams = self._build_where(filters, start_idx=len(idents) + 1)
+            ilike_clauses = " OR ".join(
+                f"content ILIKE ${i + 1} ESCAPE '\\'" for i in range(len(idents))
+            )
+            trgm_params = [f"%{self._ilike_escape(t)}%" for t in idents]
+            trgm_sql = f"""
+            SELECT chunk_id, content, doc_type, source_path, repo,
+                   parent_chunk_id, chunk_type, token_count, metadata, priority,
+                   1.0 AS score
+            FROM {self._table}
+            WHERE ({ilike_clauses})
+              AND chunk_type IS DISTINCT FROM 'parent'{iwhere}
+            LIMIT {candidate_k}
+            """
+
         async with self._pool.acquire() as conn:
             await conn.execute(f"SET hnsw.ef_search = {_HNSW_EF_SEARCH}")
             dense_rows = await conn.fetch(dense_sql, str(embedding), *dparams)
             lex_rows = await conn.fetch(lex_sql, query_text, *lparams)
+            trgm_rows = []
+            if trgm_sql:
+                try:
+                    trgm_rows = await conn.fetch(trgm_sql, *trgm_params, *iparams)
+                except Exception:
+                    trgm_rows = []  # best-effort -- degrade to the two-lane path
 
         dense_results = [self._row_to_result(r) for r in dense_rows]
         lex_results = [self._row_to_result(r) for r in lex_rows]
+        trgm_results = [self._row_to_result(r) for r in trgm_rows]
 
         # Identifier-aware lane weighting (parity with Qdrant): boost the lexical
         # lane on symbol queries (handle_webhook_callback, acme-notes-be-api) so
         # pgvector doesn't retrieve measurably worse than Qdrant on exact-symbol
-        # queries. dense=1.0, lexical=sparse weight.
+        # queries. dense=1.0, lexical=sparse weight; the trgm lane (exact symbol
+        # substring) rides the same sparse weight.
         lw = compute_lane_weights(query_text)
+        pools = [dense_results, lex_results]
+        pool_weights = [lw["dense"], lw["sparse"]]
+        if trgm_results:
+            pools.append(trgm_results)
+            pool_weights.append(lw["sparse"])
         fused = rrf_merge_pools(
-            [dense_results, lex_results],
+            pools,
             top_k=max(candidate_k, top_k),
-            pool_weights=[lw["dense"], lw["sparse"]],
+            pool_weights=pool_weights,
         )
         # Authoritative-content priority boost (parity with Qdrant). Prefer the
         # tag STORED at upsert (carried into chunk.metadata by _row_to_chunk) so
