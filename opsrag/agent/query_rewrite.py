@@ -21,6 +21,8 @@ import logging
 import re
 from typing import Any
 
+from opsrag.agent.anchors import extract_anchors
+
 _log = logging.getLogger("opsrag.query_rewrite")
 
 # Pronouns and bare referential phrases that almost always need a
@@ -200,6 +202,15 @@ async def maybe_rewrite_query(
             return query
         if rewritten.lower() == query.strip().lower():
             return query
+        # Re-inject any exact identifier the user typed in THIS follow-up that
+        # the LLM paraphrased away (acme-notes-be -> "the notes service",
+        # dropping CrashLoopBackOff). The BM25 + anchor-boost lanes depend on the
+        # literal tokens; same fix the CRAG rewriter (rewriter.py) already uses.
+        anchors = extract_anchors(query)
+        low = rewritten.lower()
+        missing = [a for a in anchors if a.lower() not in low]
+        if missing:
+            rewritten = f"{rewritten} {' '.join(missing)}"
         _log.info(
             "query rewritten: %r -> %r", query.strip()[:80], rewritten[:160]
         )

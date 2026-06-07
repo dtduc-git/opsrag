@@ -448,8 +448,19 @@ def vector_retrieve_node(
         # heuristics, and listing intent above -- HyDE only changes
         # the embedding fed to the vector index.
         hyde_text = state.get("hyde_text")
-        embed_target = hyde_text if hyde_text else query
-        embedding = await embedder.embed_query(embed_target)
+        if hyde_text:
+            # HyDE's hypothetical is a DOCUMENT (a fake answer), so embed it in
+            # DOCUMENT space -- not query space. On asymmetric embedders (Cohere
+            # v4 / Vertex / Voyage, incl. this deployment's gemini-embedding-001)
+            # query and document subspaces differ; embedding the hypothetical via
+            # embed_query (search_query) lands it in the wrong space, so HyDE goes
+            # neutral-to-harmful on exactly the prod models. embed_texts uses the
+            # document input_type AND bypasses the query-only cache (cached.py
+            # warns that cache must never see document text). Doc-space hypo vs
+            # doc-space corpus is the apples-to-apples comparison HyDE intends.
+            embedding = (await embedder.embed_texts([hyde_text]))[0]
+        else:
+            embedding = await embedder.embed_query(query)
 
         # Code lane: embed the query with the code-specific embedder so
         # hybrid_search can fuse a 4th RRF lane over the `opsrag_code`

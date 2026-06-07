@@ -221,6 +221,18 @@ _CASUAL_PATTERNS = [
     re.compile(r"\bwho\s+(made|created|built|trained|developed)\s+(you|opsrag)\b", re.IGNORECASE),
 ]
 
+# Split for confidence handling. The ANCHORED greeting/thanks/closing pattern
+# (family 1) is `^...$`-anchored and high-precision -> safe to return CASUAL
+# terminally and skip retrieval. The META-bot shapes (family 2) are UNANCHORED
+# substrings that can match inside a real ops question -- e.g. "how does this
+# work" matches "how does this work when the gateway times out", and "what are
+# you" matches "what are you supposed to do when pods OOM". Skipping retrieval on
+# those is the one fail-closed hole in an otherwise fail-open classifier, so they
+# are treated as CANDIDATES that must clear the semantic CASUAL bar (see
+# classify_query) before the no-retrieval friendly lane is taken.
+_CASUAL_ANCHORED_PATTERNS = _CASUAL_PATTERNS[:1]
+_CASUAL_META_PATTERNS = _CASUAL_PATTERNS[1:]
+
 # Procedural markers -- "how do I", "what does X mean", policy/runbook.
 _PROCEDURAL_PATTERNS = [
     re.compile(
@@ -239,16 +251,13 @@ def _matches_any(query: str, patterns: Sequence[re.Pattern]) -> bool:
 
 
 def _classify_by_regex(query: str) -> QueryCategory:
-    """Fast first-pass. Returns UNKNOWN when no strong signal so the
-    caller can fall through to layer 2."""
-    # CASUAL gets checked FIRST: greetings/thanks/meta-bot Qs are
-    # high-precision anchored matches that should bypass the heavier
-    # forensic/live regex set. If the query also somehow matches a
-    # forensic pattern (e.g. someone wrote "hi, what about pipeline
-    # 12345?"), the anchored ^...$ won't fire -- only standalone
-    # greetings count, so investigations always win.
-    if _matches_any(query, _CASUAL_PATTERNS):
-        return QueryCategory.CASUAL
+    """Fast first-pass for live/forensic/procedural. Returns UNKNOWN when no
+    strong signal so the caller can fall through to layer 2.
+
+    CASUAL is intentionally NOT decided here -- the caller (classify_query)
+    handles it: anchored greetings are terminal, meta-bot shapes are gated on
+    the semantic CASUAL bar so an unanchored substring can't silently skip
+    retrieval on a real ops question."""
     has_live = bool(_LIVE_PATTERNS.search(query))
     has_forensic = (
         _matches_any(query, _FORENSIC_PATTERNS)
@@ -624,7 +633,33 @@ async def classify_query(
     The caller passes the already-computed `query_embedding` from the
     retrieval path so layer 2 doesn't re-embed.
     """
-    # Layer 1
+    # Layer 1a -- anchored casual (greetings/thanks/closing): high precision,
+    # terminal, safe to skip retrieval.
+    if _matches_any(query, _CASUAL_ANCHORED_PATTERNS):
+        return ClassificationResult(category=QueryCategory.CASUAL, layer="regex")
+
+    # Layer 1b -- unanchored meta-bot shapes are a CANDIDATE only (they substring-
+    # match inside real ops questions). Skip retrieval ONLY if the semantic router
+    # confirms CASUAL above the strict bar; otherwise fall through to normal
+    # classification (full RAG) -- never silently no-RAG on an unanchored match.
+    if (
+        _matches_any(query, _CASUAL_META_PATTERNS)
+        and semantic_router is not None
+        and query_embedding is not None
+    ):
+        c_cat, c_top1, c_top2 = semantic_router.classify(query_embedding)
+        if (
+            c_cat is QueryCategory.CASUAL
+            and c_top1 >= CASUAL_SEMANTIC_MIN_SCORE
+            and (c_top1 - c_top2) >= CASUAL_SEMANTIC_MIN_MARGIN
+        ):
+            return ClassificationResult(
+                category=QueryCategory.CASUAL, layer="regex+semantic",
+                top1_score=c_top1, top2_score=c_top2, margin=c_top1 - c_top2,
+            )
+        # not confirmed -> fall through to live/forensic/procedural + semantic
+
+    # Layer 1 -- live / forensic / procedural regex
     cat = _classify_by_regex(query)
     if cat != QueryCategory.UNKNOWN:
         return ClassificationResult(category=cat, layer="regex")

@@ -55,6 +55,12 @@ class _FakeEmbedder:
         self.seen.append(text)
         return [0.1, 0.2, 0.3, 0.4]
 
+    async def embed_texts(self, texts: list[str]):
+        # HyDE now embeds the hypothetical as a DOCUMENT (embed_texts), not a
+        # query -- record it the same way so assertions on `seen` still hold.
+        self.seen.extend(texts)
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
 
 class _FakeObs:
     async def log_retrieval(self, **kwargs):
