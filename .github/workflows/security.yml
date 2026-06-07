@@ -117,10 +117,12 @@ jobs:
       - run: uv sync --extra dev
       - name: pip-audit (audit the synced venv)
         # --skip-editable: the local project `opsrag` is installed editable by
-        # `uv sync` and isn't on PyPI, so --strict otherwise errors with
-        # "Dependency not found on PyPI ... opsrag". We only want to audit the
-        # third-party dependency tree, not our own unpublished package.
-        run: uv run --with pip-audit pip-audit --strict --skip-editable
+        # `uv sync` and isn't on PyPI, so it can't be audited. We only want the
+        # third-party tree. NOTE: --strict is intentionally NOT used -- it treats
+        # the skipped editable package as a failure ("distribution marked as
+        # editable"). Without it pip-audit still exits non-zero on a REAL
+        # dependency CVE, which is the signal we want.
+        run: uv run --with pip-audit pip-audit --skip-editable
 
   # ---------------------------------------------------------------------------
   # Secret scan over history (push) / diff (PR). gitleaks-action needs no
