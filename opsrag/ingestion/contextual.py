@@ -37,6 +37,7 @@ import re
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.parser import DocType, ParsedDocument
+from opsrag.tokenization import estimate_tokens
 
 _log = logging.getLogger("opsrag.ingestion.contextual")
 
@@ -227,6 +228,11 @@ async def augment_chunks(
             ctx_clean = ctx.strip()
             if ctx_clean:
                 child.content = f"[Context: {ctx_clean}]\n\n{child.content}"
+                # Recompute: the prefix (40-80 tok) was added AFTER the chunker
+                # sized this piece, so the stored token_count was stale and any
+                # downstream budget/truncation logic under-counted the real
+                # embedded length.
+                child.token_count = estimate_tokens(child.content)
 
     return chunks
 
@@ -246,6 +252,7 @@ def _augment_structured(chunks: list[Chunk], doc: ParsedDocument) -> None:
         ctx = _build_structured_context(chunk, doc)
         if ctx:
             chunk.content = f"[Context: {ctx}]\n\n{chunk.content}"
+            chunk.token_count = estimate_tokens(chunk.content)
 
 
 async def _generate_contexts(

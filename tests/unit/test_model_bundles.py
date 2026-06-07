@@ -98,7 +98,8 @@ def test_cloud_provider_none_is_noop():
     assert cfg.llm.model == "claude-sonnet-4-20250514"
     assert cfg.embedding.provider == "openai"
     assert cfg.embedding.dimension is None
-    assert cfg.reranker.provider == "noop"
+    # Default reranker is now the local fastembed cross-encoder (was "noop").
+    assert cfg.reranker.provider == "fastembed"
     assert cfg.models is None
     assert cfg.agent.pro_model is None
 

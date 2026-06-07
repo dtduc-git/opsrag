@@ -142,17 +142,25 @@ class FaithfulnessJudgeMetric(BaseMetric):
                 self.score = float(result.score)
                 self.reason = result.reasoning
             else:
-                results = await asyncio.gather(*[
+                raw = await asyncio.gather(*[
                     self.judge.a_generate_schema(prompt, _FaithfulnessResponse)
                     for _ in range(n)
-                ])
+                ], return_exceptions=True)
+                # Filter transient judge failures and average the SURVIVORS,
+                # mirroring the sync path -- one flaky shot shouldn't zero the
+                # whole case's score (return_exceptions keeps the others).
+                results = [r for r in raw if not isinstance(r, Exception)]
+                errors = [r for r in raw if isinstance(r, Exception)]
+                if not results:
+                    raise errors[0]
                 scores = [float(r.score) for r in results]
                 self.score = statistics.mean(scores)
                 ordered = sorted(zip(scores, results), key=lambda x: x[0])
                 median_reason = ordered[len(ordered) // 2][1].reasoning
+                err_note = f" errors={len(errors)}/{n}" if errors else ""
                 self.reason = (
-                    f"[shots={n} mean={self.score:.2f} scores={scores}] "
-                    f"{median_reason}"
+                    f"[shots={len(results)}/{n}{err_note} mean={self.score:.2f} "
+                    f"scores={scores}] {median_reason}"
                 )
         except Exception as exc:
             self.score = 0.0

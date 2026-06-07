@@ -34,7 +34,9 @@ _DEFAULT_LLM_PROVIDER = "anthropic"
 _DEFAULT_LLM_MODEL = "claude-sonnet-4-20250514"
 _DEFAULT_EMBED_PROVIDER = "openai"
 _DEFAULT_EMBED_MODEL = "text-embedding-3-large"
-_DEFAULT_RERANK_PROVIDER = "noop"
+# Keep in sync with RerankerConfig defaults: the bundle fills the reranker slot
+# only when it's still at this default pair (i.e. the operator didn't pick one).
+_DEFAULT_RERANK_PROVIDER = "fastembed"
 _DEFAULT_RERANK_MODEL = "rerank-v3.5"
 
 

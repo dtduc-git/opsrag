@@ -14,7 +14,6 @@ indices.
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from typing import Any
 
@@ -25,54 +24,23 @@ from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.parser import DocType
 from opsrag.interfaces.vectorstore import SearchResult
 from opsrag.vectorstores import bm25_sparse
+from opsrag.vectorstores.lane_weights import compute_lane_weights
 
 _log = logging.getLogger("opsrag.vectorstores.qdrant")
 
 # Named vector field constants -- keep in sync with collection schema.
 _DENSE = "dense"
 _BM25 = "bm25"
+# HNSW search-time ef. The Qdrant default (~100, tied to construction ef) caps
+# recall even when we over-fetch candidate_k; raising it lets the ANN actually
+# return the deep candidates the reranker is meant to rescue. Cost is sublinear.
+_HNSW_EF = 192
 # RRF fusion constant -- Cormack 2009 default. Don't tune without strong reason.
 _RRF_K = 60
 
-# Per-query dynamic alpha. Identifier-heavy queries (function names,
-# dotted paths, kebab service names, backticked tokens, route patterns)
-# bias the BM25 lane up. Pure dense embeddings underperform on exact-symbol
-# retrieval -- backed by industry production patterns (e.g. Sourcegraph Cody
-# dropped embeddings for symbol queries entirely).
-# We boost BM25 weight at RRF fusion rather than swapping retrieval --
-# safer evolution that composes with existing dense+graph lanes.
-_IDENT_PATTERN = re.compile(
-    r"(`[^`]+`"                          # backticked tokens
-    r"|\b[a-z][a-z0-9_]*\.[a-zA-Z_]"      # dotted paths: foo.bar / api.v1
-    r"|\b[a-z]+_[a-z]+(?:_[a-z]+)*\b"     # snake_case (>=2 segments)
-    r"|\b[A-Z][a-z]+[A-Z][a-zA-Z]+\b"     # CamelCase (>=2 capitalised words)
-    r"|\b[a-z]+-[a-z]+(?:-[a-z]+)+\b"     # kebab-case >=3 segments (e.g. acme-notes-be-api)
-    r"|(?<![A-Za-z0-9])/[a-zA-Z][a-zA-Z0-9_/.-]+"  # absolute paths or routes
-    r"|\*\.[a-z]+\b"                       # file globs (*.py)
-    r"|\b[a-z]{2,}[0-9]+\b"                # lowercase-with-digit suffix: auth2, kafka1
-    r")"
-)
-# Boost factor for the BM25 lane when the query is identifier-heavy. 1.5
-# is conservative; world-class systems (Cursor agent) use up to 2.0. Tune
-# after first eval.
-_IDENT_BM25_BOOST = 1.5
-
-
-def _compute_lane_weights(query_text: str) -> dict[str, float]:
-    """Return RRF lane multipliers based on query shape.
-
-    Default (prose-shaped query): all lanes weighted 1.0 -- identical to
-    the prior non-identifier-aware behavior.
-
-    Identifier-shaped query (function names, route paths, service names,
-    backticked tokens): BM25 lane weighted 1.5x. Dense and graph stay 1.0
-    so the boost is additive, not zero-sum.
-    """
-    if not query_text or not query_text.strip():
-        return {"dense": 1.0, "sparse": 1.0, "graph": 1.0}
-    if _IDENT_PATTERN.search(query_text):
-        return {"dense": 1.0, "sparse": _IDENT_BM25_BOOST, "graph": 1.0}
-    return {"dense": 1.0, "sparse": 1.0, "graph": 1.0}
+# Identifier-aware RRF lane weights now live in vectorstores/lane_weights.py
+# (single source, shared with pgvector so both backends boost symbol queries
+# identically). Imported as compute_lane_weights below.
 
 # -- Priority boost (Layer 3 SRE-KB authoritative ranking) -----------------
 # Chunks whose `repo` matches one of these substrings get `priority: high`
@@ -147,16 +115,10 @@ def _priority_multiplier(payload: dict | None) -> float:
       - "high"                    -> 1.5x (other SRE-KB canonical content)
       - anything else             -> 1.0x (no boost)
     """
-    if not payload:
-        return 1.0
-    p = (payload.get("priority") or "").lower()
-    if p == "user-correction":
-        return _USER_CORRECTION_BOOST
-    if p == "architecture-canonical":
-        return _ARCHITECTURE_CANONICAL_BOOST
-    if p == "high":
-        return _HIGH_PRIORITY_BOOST
-    return 1.0
+    # Single source of truth for the tier->multiplier mapping (also used by the
+    # pgvector store + the agent fanout re-merge).
+    from opsrag.vectorstores.priority import priority_multiplier
+    return priority_multiplier((payload or {}).get("priority"))
 
 
 def _chunk_point_id(chunk_id: str) -> str:
@@ -208,20 +170,28 @@ class QdrantVectorStore:
                     )
                 except Exception:
                     pass
-            try:
-                await self._client.create_payload_index(
-                    collection_name=self._collection,
-                    field_name="content",
-                    field_schema=qm.TextIndexParams(
-                        type="text",
-                        tokenizer=qm.TokenizerType.WORD,
-                        min_token_len=2,
-                        max_token_len=20,
-                        lowercase=True,
-                    ),
-                )
-            except Exception:
-                pass
+            # Full-text indexes. `content` powers BM25-style slug fanout, and
+            # `source_path` / `repo` are REQUIRED for the MatchText filters in
+            # search_by_path / find_repo_by_substring / enumerate_paths -- a
+            # field with only a KEYWORD index makes those MatchText calls raise
+            # "Index required ... text index", which the callers swallow and
+            # return []. That silently killed filename fanout + path-tree
+            # listing. A field can carry BOTH a keyword and a text index.
+            for _text_field in ("content", "source_path", "repo"):
+                try:
+                    await self._client.create_payload_index(
+                        collection_name=self._collection,
+                        field_name=_text_field,
+                        field_schema=qm.TextIndexParams(
+                            type="text",
+                            tokenizer=qm.TokenizerType.WORD,
+                            min_token_len=2,
+                            max_token_len=20,
+                            lowercase=True,
+                        ),
+                    )
+                except Exception:
+                    pass
         self._ensured = True
 
     async def upsert(
@@ -296,7 +266,7 @@ class QdrantVectorStore:
         For new code: prefer hybrid_search() which uses BM25+dense RRF fusion.
         """
         await self.ensure_collection()
-        qfilter = self._build_filter(filters)
+        qfilter = self._search_filter(filters)
         # Over-fetch so the post-boost re-rank doesn't drop relevant hits.
         # We boost high-priority chunks (SRE-KB) by ~50% which can shuffle
         # the top-K significantly -- without over-fetch, a boosted chunk at
@@ -307,16 +277,22 @@ class QdrantVectorStore:
             query=embedding,
             using=_DENSE,
             query_filter=qfilter,
+            search_params=qm.SearchParams(hnsw_ef=_HNSW_EF),
             limit=fetch_k,
-            score_threshold=score_threshold,
+            # Do NOT pass score_threshold to Qdrant: it would filter on the RAW
+            # cosine score, dropping a high-priority (SRE-KB / user-correction)
+            # chunk whose raw score is just under threshold BEFORE the boost
+            # below could lift it over. Apply the threshold post-boost instead.
             with_payload=True,
         )
-        # Apply priority boost + re-sort, then trim to top_k.
+        # Apply priority boost + re-sort, threshold on the BOOSTED score, trim.
         boosted: list[tuple[float, object]] = []
         for h in result.points:
             mult = _priority_multiplier(getattr(h, "payload", None))
             boosted.append((float(h.score) * mult, h))
         boosted.sort(key=lambda x: -x[0])
+        if score_threshold is not None:
+            boosted = [b for b in boosted if b[0] >= score_threshold]
         out: list[SearchResult] = []
         for score, h in boosted[:top_k]:
             sr = self._hit_to_result(h)
@@ -467,9 +443,11 @@ class QdrantVectorStore:
         removed (replacement Cartography integration in progress).
         """
         await self.ensure_collection()
-        qfilter = self._build_filter(filters)
-        # Fetch larger candidate pool from each side; RRF benefits from depth.
-        candidate_k = top_k * 4
+        qfilter = self._search_filter(filters)  # excludes parent chunks
+        # Fetch a larger candidate pool from each lane; RRF benefits from depth.
+        # max(top_k*8, 50) matches the pgvector backend so the two stores fuse
+        # over comparable depth and the reranker sees similar pools.
+        candidate_k = max(top_k * 8, 50)
 
         # Dense (semantic) results -- skipped if caller passed zero-vec
         # (keyword_retriever's BM25-only intent, signalled today via alpha=0
@@ -481,6 +459,7 @@ class QdrantVectorStore:
                 query=embedding,
                 using=_DENSE,
                 query_filter=qfilter,
+                search_params=qm.SearchParams(hnsw_ef=_HNSW_EF),
                 limit=candidate_k,
                 with_payload=True,
             )
@@ -521,12 +500,13 @@ class QdrantVectorStore:
         code_hits: list = []
         if code_embedding and code_store is not None and any(abs(x) > 1e-9 for x in code_embedding):
             try:
-                code_qfilter = code_store._build_filter(filters) if hasattr(code_store, "_build_filter") else None
+                code_qfilter = code_store._search_filter(filters) if hasattr(code_store, "_search_filter") else None
                 code_result = await code_store._client.query_points(
                     collection_name=code_store._collection,
                     query=code_embedding,
                     using=_DENSE,
                     query_filter=code_qfilter,
+                    search_params=qm.SearchParams(hnsw_ef=_HNSW_EF),
                     limit=candidate_k,
                     with_payload=True,
                 )
@@ -542,17 +522,16 @@ class QdrantVectorStore:
         # identifier-heavy (snake_case, dotted paths, kebab service
         # names, backticked tokens, route paths). See
         # `_compute_lane_weights` docstring above.
-        lane_weights = _compute_lane_weights(query_text)
+        lane_weights = compute_lane_weights(query_text)
         rrf_score: dict[str, float] = {}
         seen_hits: dict[str, object] = {}
         for hit_list, lane_weight in (
             (dense_hits, lane_weights["dense"]),
             (sparse_hits, lane_weights["sparse"]),
             (graph_hits, lane_weights["graph"]),
-            # Code lane uses the same identifier-aware weight as sparse
-            # (BM25). They both win on exact-symbol queries; here we give
-            # the code-specific embedder the same boost.
-            (code_hits, lane_weights["sparse"]),
+            # Code lane is a SEMANTIC lane -- its own gentler boost, not BM25's
+            # full identifier weight (which suppressed dense neighbors 3:1).
+            (code_hits, lane_weights["code"]),
         ):
             for rank, h in enumerate(hit_list, start=1):
                 key = str(h.id)
@@ -612,7 +591,14 @@ class QdrantVectorStore:
         qfilter = self._build_filter(filters)
         if qfilter and qfilter.must:
             text_filter_conditions.extend(qfilter.must)
-        text_filter = qm.Filter(must=text_filter_conditions)
+        # Exclude parents (like the main search lanes). Without this the
+        # slug/filename fanout reintroduces the parent chunks _search_filter
+        # deliberately removes, flooding the rerank pool with parent+child
+        # near-duplicates.
+        text_filter = qm.Filter(
+            must=text_filter_conditions,
+            must_not=[qm.FieldCondition(key="chunk_type", match=qm.MatchValue(value="parent"))],
+        )
         try:
             text_hits, _offset = await self._client.scroll(
                 collection_name=self._collection,
@@ -650,7 +636,11 @@ class QdrantVectorStore:
         qfilter = self._build_filter(filters)
         if qfilter and qfilter.must:
             must_conds.extend(qfilter.must)
-        f = qm.Filter(must=must_conds)
+        # Exclude parents (parity with the main lanes / search_by_text).
+        f = qm.Filter(
+            must=must_conds,
+            must_not=[qm.FieldCondition(key="chunk_type", match=qm.MatchValue(value="parent"))],
+        )
         try:
             hits, _offset = await self._client.scroll(
                 collection_name=self._collection,
@@ -751,13 +741,21 @@ class QdrantVectorStore:
     @staticmethod
     def _hit_to_result(point) -> SearchResult:
         payload = point.payload or {}
+        metadata = payload.get("metadata", {}) or {}
+        # Carry the priority tag onto the chunk so the agent's fanout RRF
+        # re-merge can RE-APPLY the authoritative-content boost. rrf_merge_pools
+        # re-derives scores from rank and discards the boosted score this store
+        # computed, so without this the SRE-KB / architecture / user-correction
+        # boost silently vanished on any query that fired a slug/filename fanout.
+        if payload.get("priority") is not None and "priority" not in metadata:
+            metadata = {**metadata, "priority": payload.get("priority")}
         chunk = Chunk(
             id=payload.get("chunk_id", str(point.id)),
             content=payload.get("content", ""),
             doc_type=DocType(payload.get("doc_type", DocType.GENERIC_MARKDOWN.value)),
             source_path=payload.get("source_path", ""),
             repo=payload.get("repo", ""),
-            metadata=payload.get("metadata", {}) or {},
+            metadata=metadata,
             parent_chunk_id=payload.get("parent_chunk_id"),
             chunk_type=payload.get("chunk_type", "child"),
             token_count=payload.get("token_count", 0),
@@ -775,3 +773,22 @@ class QdrantVectorStore:
             else:
                 conds.append(qm.FieldCondition(key=key, match=qm.MatchValue(value=value)))
         return qm.Filter(must=conds) if conds else None
+
+    @classmethod
+    def _search_filter(cls, filters: dict | None) -> qm.Filter | None:
+        """Like _build_filter but EXCLUDES parent chunks from the search lanes.
+
+        Parents and their children are both indexed with dense+sparse vectors;
+        without this, a parent and its overlapping children co-occur in top-K,
+        waste candidate slots, and inflate BM25/RRF stats (the same phrase
+        indexed 2-5x). The generator fetches parents BY ID for context
+        (get_chunks_by_chunk_ids / retrieve), which bypasses this filter, so
+        parent-substitution is unaffected -- search returns children, the LLM
+        gets parents. (Every parent has >=1 child covering its content, so no
+        content becomes unreachable.)"""
+        base = cls._build_filter(filters)
+        must = list(base.must) if base and base.must else None
+        return qm.Filter(
+            must=must,
+            must_not=[qm.FieldCondition(key="chunk_type", match=qm.MatchValue(value="parent"))],
+        )

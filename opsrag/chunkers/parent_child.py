@@ -133,11 +133,15 @@ class ParentChildChunker:
                             "section_heading": section.heading,
                             "section_type": section.section_type,
                             "section_level": section.level,
-                            # Breadcrumb: doc title -> section heading. Used
-                            # for context/dedup. Children inherit it via
-                            # parent.metadata.
+                            # Breadcrumb: doc title -> full heading ancestry
+                            # (H1 -> H2 -> H3) when the parser supplies it, else
+                            # doc title -> section heading. Children inherit it
+                            # via parent.metadata; gives an H3 chunk its H1/H2
+                            # scope for retrieval.
                             "heading_path": [
-                                h for h in (doc.title, section.heading) if h
+                                h for h in (
+                                    [doc.title] + (section.breadcrumb or [section.heading])
+                                ) if h
                             ],
                         },
                         parent_chunk_id=None,
@@ -180,8 +184,18 @@ class ParentChildChunker:
         start = 0
         idx = 0
         step = self._child_chars - self._child_overlap_chars
+        is_code = doc.doc_type in _CODE_DOC_TYPES
         while start < len(text):
             end = min(start + self._child_chars, len(text))
+            # For code/config, snap the window end back to a newline so a child
+            # never cuts through an identifier (`handle_web|hook`) or a YAML
+            # key:value pair -- mid-symbol slices poison the BM25 lexical lane
+            # that exact-symbol queries depend on. Parents are already
+            # line-aware; this brings the embedded+indexed child layer in line.
+            if is_code and end < len(text):
+                nl = text.rfind("\n", start + 1, end + 1)
+                if nl > start:
+                    end = nl + 1  # keep the trailing newline with the piece
             piece = text[start:end].strip()
             if piece:
                 cid = self._make_id(doc, f"child-{parent.id}-{idx}", piece)
@@ -201,7 +215,11 @@ class ParentChildChunker:
                 idx += 1
             if end == len(text):
                 break
-            start += step
+            # Advance with overlap measured from the (possibly snapped) end, so
+            # newline-snapping never leaves a gap. For prose (no snap) this is
+            # exactly `start += step` -- byte-identical output, stable chunk IDs.
+            nxt = end - self._child_overlap_chars
+            start = nxt if nxt > start else start + step
         return out
 
     @staticmethod

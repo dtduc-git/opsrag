@@ -8,11 +8,14 @@ pricing.
 Design notes:
 - Wraps any object satisfying `EmbeddingProvider` (Protocol). No subclass
   required; we delegate `dimension` and `model_name`.
-- Cache key = `(query.lower().strip(), embedder.model_name, embedder.dimension)`.
-  Lower-casing collapses "Redis" vs "redis"; strip drops leading/trailing
-  whitespace. Model name AND dimension are part of the key so swapping models
-  -- or changing `output_dimension` on a provider that keeps the same model id
-  (Cohere v4, OpenAI-3, Gemini) -- doesn't serve stale-dim vectors.
+- Cache key = `(query.strip(), embedder.model_name, embedder.dimension)`.
+  Case is PRESERVED: the embedder produces different vectors for "KafkaConsumer"
+  vs "kafkaconsumer", and case is semantically significant in this code/identifier
+  -heavy workload -- lower-casing the key returned the wrong cached vector for a
+  differently-cased query. Strip drops leading/trailing whitespace. Model name
+  AND dimension are part of the key so swapping models -- or changing
+  `output_dimension` on a provider that keeps the same model id (Cohere v4,
+  OpenAI-3, Gemini) -- doesn't serve stale-dim vectors.
 - LRU eviction: `OrderedDict.move_to_end` on hit, `popitem(last=False)`
   on overflow. O(1) per access.
 - TTL is per-entry -- set at insert time, checked at hit time. Expired
@@ -62,7 +65,8 @@ class CachedEmbedder:
         return self._inner.model_name
 
     def _key(self, query: str) -> tuple[str, str, int]:
-        return (query.lower().strip(), self._inner.model_name, self._inner.dimension)
+        # NB: case-preserving on purpose -- see module docstring.
+        return (query.strip(), self._inner.model_name, self._inner.dimension)
 
     async def embed_query(self, query: str) -> list[float]:
         key = self._key(query)

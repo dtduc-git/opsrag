@@ -8,6 +8,12 @@ from pydantic import BaseModel, Field
 
 _log = logging.getLogger("opsrag.agent.grader")
 
+# If the cross-encoder's best (un-boosted) score is at least this, we trust the
+# reranker's top hit even when the binary relevance grader rejects everything --
+# rather than burn a CRAG rewrite on retrieval the reranker was confident about.
+# Scores are sigmoid-normalized [0,1]; 0.5 = a genuinely relevant match.
+_TRUST_RERANK_SCORE = 0.5
+
 from opsrag.agent.prompts import GRADER_SYSTEM
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.llm import LLMProvider
@@ -56,18 +62,34 @@ def grade_documents_node(
         )
         kept = [c for c, ok in zip(candidates, verdicts) if ok]
 
-        # Floor: retrieval returned candidates but the strict grader rejected
-        # ALL of them. Rather than force an (often unproductive) CRAG rewrite
-        # cycle, keep the top `min_relevant` best-ranked candidates -- the
-        # hallucination check + answer verifier downstream still guard against
-        # ungrounded generation. When retrieval returned NOTHING (candidates
-        # empty), we exit above and the rewrite path still fires.
+        # Floor, but ONLY as a last resort once the CRAG rewrite budget is
+        # spent. The strict grader rejected everything; on the FIRST attempts we
+        # leave `graded_chunks` empty so `grade_decision` routes to
+        # `needs_rewrite` (the whole point of CRAG -- rewrite the query and
+        # re-retrieve when the retrieved docs are irrelevant). Only when retries
+        # are exhausted do we keep the top `min_relevant` best-ranked candidates
+        # rather than bail to "insufficient info" -- a best-effort answer the
+        # hallucination check + verifier still guard. (Unconditionally flooring
+        # here made graded_chunks always non-empty, which silently disabled the
+        # rewrite loop entirely.)
         if not kept and min_relevant > 0:
-            kept = candidates[:min_relevant]
-            _log.info(
-                "grader floor: kept top %d of %d candidates (all failed strict grade)",
-                len(kept), len(candidates),
-            )
+            retries = state.get("retry_count", 0)
+            max_retries = state.get("max_retries", 2)
+            # Keep the reranker's top hit when the cross-encoder was CONFIDENT
+            # about it: the binary per-chunk grader runs AFTER rerank and can
+            # only remove recall, so nuking a strong cross-encoder #1 to rewrite
+            # the query wastes the budget on already-good retrieval. Fall back to
+            # the rewrite loop only when the rerank was weak (genuinely-bad
+            # retrieval, what CRAG is for) OR the retry budget is spent.
+            best_rr = float(state.get("best_rerank_score", 0.0))
+            if best_rr >= _TRUST_RERANK_SCORE or retries >= max_retries:
+                kept = candidates[:min_relevant]
+                _log.info(
+                    "grader floor (%s): kept top %d of %d candidates "
+                    "(all failed strict grade)",
+                    "confident rerank" if best_rr >= _TRUST_RERANK_SCORE else "retries exhausted",
+                    len(kept), len(candidates),
+                )
 
         return {
             "graded_chunks": kept,

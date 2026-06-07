@@ -67,11 +67,21 @@ class GenericMarkdownParser:
             return [DocSection(heading="", content=content.strip(), level=0)]
 
         sections: list[DocSection] = []
+        # Stack of (level, heading) ancestors so each section carries its full
+        # H1 -> H2 -> H3 breadcrumb (was flattened: H2/H3 became sibling parents
+        # and the H1 scope never reached the embedding).
+        stack: list[tuple[int, str]] = []
         for i, m in enumerate(matches):
             level = len(m.group(1))
             heading = m.group(2).strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, heading))
             body_start = m.end()
             body_end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
             body = content[body_start:body_end].strip()
-            sections.append(DocSection(heading=heading, content=body, level=level))
+            sections.append(DocSection(
+                heading=heading, content=body, level=level,
+                breadcrumb=[h for _lvl, h in stack],
+            ))
         return sections

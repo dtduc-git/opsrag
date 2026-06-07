@@ -864,6 +864,11 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 # specified code_embedding + code_vector_store blocks.
                 code_embedder=providers.code_embedder,
                 code_vector_store=providers.code_vector_store,
+                # Enables LLM-driven multi-query decomposition WHEN the operator
+                # sets OPSRAG_DECOMPOSE_QUERIES=1 (no-op otherwise).
+                llm=providers.llm,
+                # Rerank the tool path too (was raw bi-encoder order before).
+                reranker=providers.reranker,
             )
             _log.info("knowledge_search MCP tool bound to corpus")
         except Exception as exc:  # noqa: BLE001
