@@ -64,8 +64,10 @@ class OpsRAGState(TypedDict, total=False):
     user_memories: list
 
     # Control flow
-    retry_count: int
+    retry_count: int          # CRAG rewrite-loop counter
     max_retries: int
+    regen_count: int          # regenerate-loop counter (separate budget from rewrites)
+    max_regens: int
     current_step: str
     error: str | None
     # Classifier verdict ("forensic"/"live"/"procedural"/"mixed"/"casual"/...)

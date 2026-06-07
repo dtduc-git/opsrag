@@ -59,6 +59,21 @@ def hyde_expansion_node(
                 "current_step": "hyde_skipped_live",
             }
 
+        # Skip on config/identifier lookups. HyDE writes a plausible-but-wrong
+        # hypothetical ("be wrong on specifics", per the prompt) -- great for
+        # vocabulary-gap prose queries, actively harmful for an exact lookup like
+        # "what replicas value for acme-notes-be in prod values.yaml": it pulls
+        # the dense lane toward INVENTED YAML keys. BM25 saves the exact match,
+        # but half the fusion is degraded. Skip when the router says config_lookup
+        # or the query carries exact identifiers/anchors.
+        if (state.get("query_type") or "") == "config_lookup":
+            _log.debug("hyde: skipped (query_type=config_lookup)")
+            return {"hyde_text": None, "current_step": "hyde_skipped_config"}
+        from opsrag.agent.anchors import extract_anchors
+        if extract_anchors(query):
+            _log.debug("hyde: skipped (query carries anchors)")
+            return {"hyde_text": None, "current_step": "hyde_skipped_anchors"}
+
         # Skip on short queries -- too narrow to expand without drift.
         if len(query.split()) < _MIN_WORDS_FOR_HYDE:
             _log.debug("hyde: skipped (query too short: %r)", query)

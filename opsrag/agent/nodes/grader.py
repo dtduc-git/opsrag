@@ -78,7 +78,7 @@ def grade_documents_node(
         # rewrite loop entirely.)
         if not kept and min_relevant > 0:
             retries = state.get("retry_count", 0)
-            max_retries = state.get("max_retries", 2)
+            max_retries = state.get("max_retries", 3)
             # Keep the reranker's top hit when the cross-encoder was CONFIDENT
             # about it: the binary per-chunk grader runs AFTER rerank and can
             # only remove recall, so nuking a strong cross-encoder #1 to rewrite
@@ -132,7 +132,7 @@ def grade_decision(state: dict) -> str:
     """
     graded = state.get("graded_chunks") or []
     retries = state.get("retry_count", 0)
-    max_retries = state.get("max_retries", 2)
+    max_retries = state.get("max_retries", 3)
 
     if graded:
         return "has_relevant"

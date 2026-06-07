@@ -748,91 +748,95 @@ async def query_with_session(
                 query=query, prior_messages=prior, llm=llm,
             )
 
-    # Step 4: Q&A semantic cache. Wrap the agent graph -- short-circuit when
-    # a similar previously-answered question lands within the threshold.
-    # Skipped for time-sensitive / user-scoped queries (handled inside the
-    # cache module's `should_skip_cache`).
+    # Classify FIRST, unconditionally (when an embedder is available): the
+    # query_category must be set even for live / user-scoped / no-cache queries,
+    # because HyDE + lane decisions read it. Nesting it under `not
+    # should_skip_cache` (or a present qa_cache) left it None for exactly the
+    # live queries HyDE must skip -> HyDE ran on "is X slow right now".
     cached_embedding: list[float] | None = None
-    if qa_cache is not None and embedder is not None:
+    from opsrag.agent.classifier import classify_query, policy_for
+    if embedder is not None:
+        try:
+            cached_embedding = await embedder.embed_query(query)
+            _classification = await classify_query(
+                query,
+                query_embedding=cached_embedding,
+                semantic_router=semantic_router,
+                llm=llm,
+            )
+        except Exception:
+            _classification = None
+
+    # Step 4: Q&A semantic cache. Short-circuit on a similar prior answer. Skip
+    # on the classifier's own LIVE verdict, the regex user-scoped guard
+    # (`should_skip_cache`: my/our/now/...), or a globally-disabled cache.
+    if qa_cache is not None and cached_embedding is not None:
         from opsrag.qa_cache import should_skip_cache
-        if not should_skip_cache(query):
+        _skip_cache = (
+            should_skip_cache(query)
+            or _qa_cache_globally_disabled()
+            or (
+                _classification is not None
+                and policy_for(_classification.category)["skip_cache"]
+            )
+        )
+        hit = None
+        if not _skip_cache:
             try:
-                cached_embedding = await embedder.embed_query(query)
-                # Classify NOW so live queries skip cache lookup entirely
-                # (saves a Qdrant round-trip + protects against false hits).
-                from opsrag.agent.classifier import (
-                    classify_query,
-                    policy_for,
+                # SWR: serve a recently-expired entry tagged stale so the user
+                # gets an instant response; a background task revalidates.
+                import os
+                swr_enabled = os.environ.get("OPSRAG_QA_CACHE_SWR", "1").lower() in ("1", "true", "yes", "on")
+                hit = await qa_cache.lookup(
+                    cached_embedding, current_query=query,
+                    user_id=user_id,
+                    serve_stale=swr_enabled,
                 )
-                _classification = await classify_query(
-                    query,
-                    query_embedding=cached_embedding,
-                    semantic_router=semantic_router,
-                    llm=llm,
-                )
-                policy = policy_for(_classification.category)
-                if policy["skip_cache"] or _qa_cache_globally_disabled():
-                    hit = None  # bypass cache for live queries / eval runs
-                else:
-                    # SWR: serve a recently-expired entry tagged stale,
-                    # so the user gets an instant response. Caller marks
-                    # the answer "updating..." and a background task
-                    # revalidates so the next user sees fresh.
-                    import os
-                    swr_enabled = os.environ.get("OPSRAG_QA_CACHE_SWR", "1").lower() in ("1", "true", "yes", "on")
-                    hit = await qa_cache.lookup(
-                        cached_embedding, current_query=query,
-                        user_id=user_id,
-                        serve_stale=swr_enabled,
-                    )
-                    # Flash judge for borderline cosine band [0.93, 0.97].
-                    # Catches paraphrase / verb-flip / env-flip cases the
-                    # discriminator regex misses. Default-allow on errors
-                    # so a Vertex hiccup doesn't lock all hits.
-                    if hit is not None:
-                        from opsrag.qa_cache_judge import judge_match
-                        if not await judge_match(
-                            current_query=query,
-                            cached_question=hit.question,
-                            cosine=float(hit.similarity),
-                            llm=llm,
-                        ):
-                            hit = None
+                # Flash judge for borderline cosine band [0.93, 0.97].
+                if hit is not None:
+                    from opsrag.qa_cache_judge import judge_match
+                    if not await judge_match(
+                        current_query=query,
+                        cached_question=hit.question,
+                        cosine=float(hit.similarity),
+                        llm=llm,
+                    ):
+                        hit = None
             except Exception:
                 hit = None
-            if hit is not None:
-                # SWR -- kick off background revalidation so the next
-                # caller gets a fresh answer. Best-effort, swallowed.
-                if hit.is_stale:
-                    asyncio.create_task(_swr_revalidate(
-                        compiled_graph=compiled_graph,
-                        query=query,
-                        user_id=user_id,
-                        thread_id=thread_id,
-                        embedder=embedder,
-                        qa_cache=qa_cache,
-                        llm=llm,
-                        session_store=session_store,
-                        investigation_cache=investigation_cache,
-                        source_url_bases=bases,
-                        semantic_router=semantic_router,
-                    ))
-                return {
-                    "answer": hit.answer,
-                    "sources": hit.sources,
-                    "source_urls": list(hit.source_urls) if hit.source_urls else [_src_url_from_string(s, bases) for s in hit.sources],
-                    "sources_content": hit.sources_content,
-                    "graph_paths": [],
-                    "grounded": True,  # cached answer already passed prior grounding check
-                    "query_type": None,
-                    "thread_id": thread_id,
-                    "session_resumable": True,
-                    "cache_hit": True,
-                    "cache_similarity": hit.similarity,
-                    "cache_age_seconds": hit.age_seconds,
-                    "cache_is_stale": bool(hit.is_stale),
-                    "query_category": _classification.category.value if _classification else None,
-                }
+        if hit is not None:
+            # SWR -- kick off background revalidation so the next
+            # caller gets a fresh answer. Best-effort, swallowed.
+            if hit.is_stale:
+                asyncio.create_task(_swr_revalidate(
+                    compiled_graph=compiled_graph,
+                    query=query,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    embedder=embedder,
+                    qa_cache=qa_cache,
+                    llm=llm,
+                    session_store=session_store,
+                    investigation_cache=investigation_cache,
+                    source_url_bases=bases,
+                    semantic_router=semantic_router,
+                ))
+            return {
+                "answer": hit.answer,
+                "sources": hit.sources,
+                "source_urls": list(hit.source_urls) if hit.source_urls else [_src_url_from_string(s, bases) for s in hit.sources],
+                "sources_content": hit.sources_content,
+                "graph_paths": [],
+                "grounded": True,  # cached answer already passed prior grounding check
+                "query_type": None,
+                "thread_id": thread_id,
+                "session_resumable": True,
+                "cache_hit": True,
+                "cache_similarity": hit.similarity,
+                "cache_age_seconds": hit.age_seconds,
+                "cache_is_stale": bool(hit.is_stale),
+                "query_category": _classification.category.value if _classification else None,
+            }
 
     # `configurable` is persisted alongside every checkpoint by langgraph
     # postgres saver. We embed the author identity here so a session
@@ -1101,79 +1105,91 @@ async def query_with_session_events(
 
     cached_embedding: list[float] | None = None
     _classification = None
-    if qa_cache is not None and embedder is not None:
+    # Classify unconditionally (see the non-streaming path) so query_category is
+    # set for live / user-scoped / no-cache queries -- HyDE + lane gates read it.
+    from opsrag.agent.classifier import classify_query, policy_for
+    if embedder is not None:
+        try:
+            cached_embedding = await embedder.embed_query(query)
+            _classification = await classify_query(
+                query,
+                query_embedding=cached_embedding,
+                semantic_router=semantic_router,
+                llm=llm,
+            )
+        except Exception:
+            _classification = None
+
+    if qa_cache is not None and cached_embedding is not None:
         from opsrag.qa_cache import should_skip_cache
-        if not should_skip_cache(query):
+        _skip_cache = (
+            should_skip_cache(query)
+            or _qa_cache_globally_disabled()
+            or (
+                _classification is not None
+                and policy_for(_classification.category)["skip_cache"]
+            )
+        )
+        hit = None
+        if not _skip_cache:
             try:
-                cached_embedding = await embedder.embed_query(query)
-                from opsrag.agent.classifier import classify_query, policy_for
-                _classification = await classify_query(
-                    query,
-                    query_embedding=cached_embedding,
-                    semantic_router=semantic_router,
-                    llm=llm,
+                import os
+                swr_enabled = os.environ.get("OPSRAG_QA_CACHE_SWR", "1").lower() in ("1", "true", "yes", "on")
+                hit = await qa_cache.lookup(
+                    cached_embedding, current_query=query,
+                    user_id=user_id,
+                    serve_stale=swr_enabled,
                 )
-                policy = policy_for(_classification.category)
-                if policy["skip_cache"] or _qa_cache_globally_disabled():
-                    hit = None
-                else:
-                    import os
-                    swr_enabled = os.environ.get("OPSRAG_QA_CACHE_SWR", "1").lower() in ("1", "true", "yes", "on")
-                    hit = await qa_cache.lookup(
-                        cached_embedding, current_query=query,
-                        user_id=user_id,
-                        serve_stale=swr_enabled,
-                    )
-                    if hit is not None:
-                        from opsrag.qa_cache_judge import judge_match
-                        if not await judge_match(
-                            current_query=query,
-                            cached_question=hit.question,
-                            cosine=float(hit.similarity),
-                            llm=llm,
-                        ):
-                            hit = None
+                if hit is not None:
+                    from opsrag.qa_cache_judge import judge_match
+                    if not await judge_match(
+                        current_query=query,
+                        cached_question=hit.question,
+                        cosine=float(hit.similarity),
+                        llm=llm,
+                    ):
+                        hit = None
             except Exception:
                 hit = None
-            if hit is not None:
-                if hit.is_stale:
-                    asyncio.create_task(_swr_revalidate(
-                        compiled_graph=compiled_graph,
-                        query=query,
-                        user_id=user_id,
-                        thread_id=thread_id,
-                        embedder=embedder,
-                        qa_cache=qa_cache,
-                        llm=llm,
-                        session_store=session_store,
-                        investigation_cache=investigation_cache,
-                        source_url_bases=bases,
-                        semantic_router=semantic_router,
-                    ))
-                yield {
-                    "type": "cache_hit",
-                    "similarity": float(hit.similarity),
-                    "age_seconds": int(hit.age_seconds),
-                    "is_stale": bool(hit.is_stale),
-                }
-                yield {
-                    "type": "final",
-                    "answer": hit.answer,
-                    "sources": hit.sources,
-                    "source_urls": list(hit.source_urls) if hit.source_urls else [_src_url_from_string(s, bases) for s in hit.sources],
-                    "sources_content": hit.sources_content,
-                    "graph_paths": [],
-                    "grounded": True,
-                    "query_type": None,
-                    "thread_id": thread_id,
-                    "session_resumable": True,
-                    "cache_hit": True,
-                    "cache_similarity": float(hit.similarity),
-                    "cache_age_seconds": int(hit.age_seconds),
-                    "cache_is_stale": bool(hit.is_stale),
-                    "query_category": _classification.category.value if _classification else None,
-                }
-                return
+        if hit is not None:
+            if hit.is_stale:
+                asyncio.create_task(_swr_revalidate(
+                    compiled_graph=compiled_graph,
+                    query=query,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    embedder=embedder,
+                    qa_cache=qa_cache,
+                    llm=llm,
+                    session_store=session_store,
+                    investigation_cache=investigation_cache,
+                    source_url_bases=bases,
+                    semantic_router=semantic_router,
+                ))
+            yield {
+                "type": "cache_hit",
+                "similarity": float(hit.similarity),
+                "age_seconds": int(hit.age_seconds),
+                "is_stale": bool(hit.is_stale),
+            }
+            yield {
+                "type": "final",
+                "answer": hit.answer,
+                "sources": hit.sources,
+                "source_urls": list(hit.source_urls) if hit.source_urls else [_src_url_from_string(s, bases) for s in hit.sources],
+                "sources_content": hit.sources_content,
+                "graph_paths": [],
+                "grounded": True,
+                "query_type": None,
+                "thread_id": thread_id,
+                "session_resumable": True,
+                "cache_hit": True,
+                "cache_similarity": float(hit.similarity),
+                "cache_age_seconds": int(hit.age_seconds),
+                "cache_is_stale": bool(hit.is_stale),
+                "query_category": _classification.category.value if _classification else None,
+            }
+            return
 
     # `configurable` is persisted alongside every checkpoint by langgraph
     # postgres saver. We embed the author identity here so a session

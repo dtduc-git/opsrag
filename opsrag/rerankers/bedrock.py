@@ -18,9 +18,9 @@ from opsrag.usage import tracker as _usage_tracker
 class BedrockReranker:
     # Default model is cohere.rerank-v3-5 under the hood -> same compressed-low
     # [0,1] distribution as CohereReranker, so it takes the same lowered floors
-    # rather than FastEmbed's sigmoid-centered 0.05/0.65.
+    # rather than FastEmbed's sigmoid-centered 0.05/0.65 (see cohere.py).
     score_floor = 0.02
-    trust_score = 0.5
+    trust_score = 0.35
 
     def __init__(
         self,
