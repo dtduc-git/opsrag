@@ -18,14 +18,41 @@ Reference: Qdrant native sparse vectors with BM25 modifier
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import Iterable
 
 from qdrant_client import models as qm
 
+from opsrag.vectorstores.lane_weights import extract_identifiers
+
 _log = logging.getLogger("opsrag.vectorstores.bm25_sparse")
 
 _MODEL_NAME = "Qdrant/bm25"
+
+# Split a compound identifier into subtokens on separators + camelCase humps.
+_SUBTOKEN_SPLIT = re.compile(
+    r"[_\-./:]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"
+)
+
+
+def _bm25_augment(text: str) -> str:
+    """Append identifier SUBTOKENS so the sparse vocab can match partial symbols.
+
+    The Qdrant/bm25 model stems English and splits on whitespace/punctuation but
+    keeps `handle_webhook_callback`, `api.v1.users`, `acme-notes-be-api` as
+    SINGLE tokens -- so a query for `webhook_callback` never lexically matches,
+    defeating the lexical lane on a code corpus. We append the split parts
+    (handle / webhook / callback) to the text fed to BM25, applied to BOTH
+    documents and queries so their subtoken vocabularies line up. The original
+    identifier stays in `text` (exact-symbol matches unaffected) -- this only
+    ADDS recall. NB: changes the indexed sparse vectors -> needs a re-index."""
+    extra: list[str] = []
+    for ident in extract_identifiers(text):
+        parts = [p for p in _SUBTOKEN_SPLIT.split(ident) if len(p) >= 2]
+        if len(parts) > 1:
+            extra.extend(parts)
+    return f"{text} {' '.join(extra)}" if extra else text
 _lock = threading.Lock()
 _model = None
 _query_model = None
@@ -55,7 +82,7 @@ def encode_documents(texts: Iterable[str]) -> list[qm.SparseVector]:
     model = _ensure_model()
     out: list[qm.SparseVector] = []
     # FastEmbed's embed() yields SparseEmbedding(indices: ndarray, values: ndarray)
-    for emb in model.embed(list(texts)):
+    for emb in model.embed([_bm25_augment(t) for t in texts]):
         out.append(qm.SparseVector(
             indices=emb.indices.tolist(),
             values=emb.values.tolist(),
@@ -70,8 +97,9 @@ def encode_query(text: str) -> qm.SparseVector:
     (per Qdrant/bm25 model card). FastEmbed's `query_embed()` handles this.
     """
     model = _ensure_model()
-    # query_embed yields a single SparseEmbedding for one query.
-    for emb in model.query_embed(text):
+    # query_embed yields a single SparseEmbedding for one query. Augment with the
+    # same identifier subtokens used at index time so partial-symbol queries match.
+    for emb in model.query_embed(_bm25_augment(text)):
         return qm.SparseVector(
             indices=emb.indices.tolist(),
             values=emb.values.tolist(),

@@ -93,12 +93,24 @@ def grade_documents_node(
             # rewrote even on good retrieval.
             trust_floor = float(state.get("rerank_trust_score", _TRUST_RERANK_SCORE))
             if best_rr >= trust_floor or retries >= max_retries:
-                kept = candidates[:min_relevant]
+                # Scale the floor for multi-fact / synthesis queries: the strict
+                # binary grader over-prunes, and rescuing only min_relevant=1 can
+                # ship a 1-chunk context for a query that needs several. Use the
+                # distinct-entity (anchor) count and any decomposed sub-queries as
+                # a proxy for how many groundings the answer needs, capped at the
+                # generation budget (top_k, default 5).
+                anchors = state.get("anchors") or []
+                sub_queries = state.get("sub_queries") or []
+                gen_budget = int(state.get("top_k") or 5)
+                floor_n = min(
+                    max(min_relevant, len(anchors), len(sub_queries)), gen_budget
+                )
+                kept = candidates[:floor_n]
                 _log.info(
                     "grader floor (%s): kept top %d of %d candidates "
-                    "(all failed strict grade)",
+                    "(all failed strict grade; anchors=%d sub_queries=%d)",
                     "confident rerank" if best_rr >= trust_floor else "retries exhausted",
-                    len(kept), len(candidates),
+                    len(kept), len(candidates), len(anchors), len(sub_queries),
                 )
 
         return {

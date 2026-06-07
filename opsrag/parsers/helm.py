@@ -116,10 +116,15 @@ class HelmParser:
 
         sections: list[DocSection] = []
         for key, value in data.items():
-            if isinstance(value, dict):
-                content = yaml.dump(value, default_flow_style=False, sort_keys=False).strip()
-            elif isinstance(value, list):
-                content = yaml.dump(value, default_flow_style=False, sort_keys=False).strip()
+            # Dump {key: value}, NOT bare value -- otherwise the top-level key
+            # (`resources`, `image`, `replicas`) appears nowhere in the indexed
+            # content, only in metadata, so "resource limits for X" loses both
+            # the BM25 anchor and the semantic anchor. generic.py already does
+            # this; Helm (the most common file type) silently didn't.
+            if isinstance(value, (dict, list)):
+                content = yaml.dump(
+                    {key: value}, default_flow_style=False, sort_keys=False
+                ).strip()
             else:
                 content = f"{key}: {value}"
 
