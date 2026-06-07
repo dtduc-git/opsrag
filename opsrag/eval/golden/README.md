@@ -40,7 +40,15 @@ Each file under this directory is a **category** (filename = category id, e.g. `
 | `acceptable_sources` | optional | Alternative sources with **OR-semantics** (any one found = satisfied). Use when a question has multiple valid groundings, e.g. a YAML file AND the prose doc that describes it. See "OR-semantics goldens" below. |
 | `must_contain` | optional | Substrings the answer MUST include. Anchor on facts, not phrasing. |
 | `must_not_contain` | optional | Substrings the answer MUST NOT include. Useful for hallucination guards. |
-| `max_retrieved_sources` | optional | Integer cap on how many sources the system may surface. Adds a **retrieval-side** assertion (`RetrievalRestraintMetric`) on top of the answer-side `must_not_contain` — for a query naming a purely fabricated entity the weak-retrieval gate should surface (near) nothing. Set it only on cases whose query has no real-tech term that would legitimately retrieve, and keep it permissive (tolerate a floored top-1 + rewrite residue). Omit = no retrieval-side assertion. |
+| `max_retrieved_sources` | optional | Integer cap on how many sources the system may surface. Adds a **retrieval-side** assertion (`RetrievalRestraintMetric`) on top of the answer-side `must_not_contain` — for a query naming a purely fabricated entity the weak-retrieval gate should surface (near) nothing. Set it only on cases whose query has no real-tech term that would legitimately retrieve, and keep it permissive (tolerate a floored top-1 + rewrite residue). Pair it with `must_not_contain` (the cap checks source count, not that the answer refused) — the loader warns otherwise. Omit = no retrieval-side assertion. |
+
+### Path qualification (avoid recall inflation)
+
+`expected_sources` / `acceptable_sources` MUST be **qualified** — include the repo/dir path (`apps/auth/values.yaml`), not a bare filename (`values.yaml`). A bare leaf matches *any* retrieved path ending in it, which silently over-credits recall in a corpus with many duplicate filenames (e.g. vendored chart copies). `match_path` no longer honours the `/`-suffix arm for bare leaves, so an unqualified entry simply won't match; the loader emits a warning at load time. The `<page_id>:<slug>` Confluence/Rootly form is exempt — its page-id is discriminating.
+
+### Running the gate against retrieval, not the cache
+
+The CI gate hits `POST /query`, which runs the **QA cache + classifier + generation**. Launch the eval target server with `OPSRAG_DISABLE_QA_CACHE=1` so a cache hit can't serve a stored answer/sources for a golden — otherwise a retrieval regression is masked and the ranking metrics measure the cache, not retrieval.
 | `notes` | optional | Provenance + rationale. **Required for adversarial / multi-doc goldens.** |
 | `expected_baseline_faith` | optional | Float in `[0, 1]`. The *design-intended* Faithfulness baseline for this golden. **Documentation-only** -- the eval framework does not enforce or compare against this; it exists so future reviewers don't misread a low-but-stable score as a defect. **Required on adversarial-category goldens.** See "Adversarial baselines" below. |
 
