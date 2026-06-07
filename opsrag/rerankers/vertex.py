@@ -35,7 +35,9 @@ _MAX_RECORDS = 200
 # CHARS_PER_TOKEN=3 (opsrag.tokenization) this is ~500 tokens, safely
 # under the cap. Old value was 4000 chars (>=1000 tokens for prose, >=2000
 # for dense YAML/HCL), which the API was silently truncating server-side.
-_MAX_CHARS_PER_RECORD = 1500
+# 1500 chars is still ~1000 tokens for dense YAML/HCL (~1.5 chars/token) --
+# over the model's ~512-token record cap -- so use 1000 chars to stay under it.
+_MAX_CHARS_PER_RECORD = 1000
 _WINDOW_OVERLAP_CHARS = 200  # ~65 tokens of carryover between windows
 
 

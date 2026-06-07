@@ -23,10 +23,12 @@ from opsrag.interfaces.vectorstore import SearchResult
 
 _log = logging.getLogger("opsrag.agent.reranker")
 
-# Boost multiplier when chunk's source_path or repo contains an anchor
-# token literally. Cross-encoder scores are in [0, 1] so 1.5x pushes a
-# moderate match (0.4) above a strong-but-irrelevant match (0.55).
-_PATH_ANCHOR_BOOST = 1.5
+# Additive, CAPPED tie-breaker bonus when a chunk's source_path/repo contains an
+# anchor token literally. Cross-encoder scores are in [0, 1]. A multiplicative
+# 1.5x (the old value) was NOT capped despite the docstring -- it let a path-
+# matching 0.40 doc (->0.60) leapfrog a genuinely-better 0.55 doc. An additive
+# bonus only overturns CLOSE calls (gaps < the bonus), not large quality gaps.
+_PATH_ANCHOR_BONUS = 0.15
 
 # Min rerank score considered "real signal" from the cross-encoder.
 # `semantic-ranker-default-004` returns 0..1; scores below this are
@@ -79,19 +81,28 @@ def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k:
             effective_top_k = max(top_k, 10)
 
         results = [SearchResult(chunk=c, score=0.0) for c in chunks]
-        # Pull a wider candidate pool from the cross-encoder so the
-        # path-anchor boost has room to re-order. We still cap output at
-        # effective_top_k after boost.
-        wide_top_k = max(effective_top_k * 3, effective_top_k)
-        reranked = await reranker.rerank(query, results, top_k=wide_top_k)
+        # Score the FULL candidate pool so the anchor boost can rescue an
+        # anchor-matching doc the cross-encoder ranked deep (passing
+        # effective_top_k*3 capped the boost's view to ~15 of the ~40 pool).
+        # Fall back to bi-encoder order if the reranker errors (a cloud
+        # reranker API hiccup must not crash the whole query).
+        wide_top_k = len(results)
+        try:
+            reranked = await reranker.rerank(query, results, top_k=wide_top_k)
+        except Exception as exc:
+            _log.warning("reranker failed (%s) -- falling back to vector order", exc)
+            from opsrag.interfaces.reranker import RerankResult
+            # Neutral score (not 0.0) so a reranker OUTAGE doesn't trip the
+            # weak-retrieval gate into a spurious "insufficient information".
+            reranked = [RerankResult(chunk=c, relevance_score=1.0) for c in chunks]
 
-        # Apply path-anchor boost. Order-preserving multiplicative boost.
+        # Apply path-anchor boost -- additive + capped (see _PATH_ANCHOR_BONUS).
         boosted = []
         for r in reranked:
             chunk = r.chunk
             base = float(r.relevance_score)
             if anchors and path_matches_any_anchor(chunk.source_path, chunk.repo, anchors):
-                score = base * _PATH_ANCHOR_BOOST
+                score = min(1.0, base + _PATH_ANCHOR_BONUS)
             else:
                 score = base
             boosted.append((score, base, chunk))

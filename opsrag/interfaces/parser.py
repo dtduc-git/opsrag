@@ -41,6 +41,11 @@ class DocSection:
     content: str
     level: int
     section_type: str = "generic"
+    # Full heading ancestry (H1 -> H2 -> H3) for this section. Parsers that
+    # understand nesting populate it; others leave it empty and the chunker
+    # falls back to [doc.title, heading]. Used to build the chunk heading_path
+    # breadcrumb so an H3 chunk still carries its H1/H2 scope into retrieval.
+    breadcrumb: list[str] = field(default_factory=list)
 
 
 @dataclass

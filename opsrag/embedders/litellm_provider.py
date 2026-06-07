@@ -56,18 +56,37 @@ class LiteLLMEmbeddings:
     def model_name(self) -> str:
         return self._model
 
-    def _call_kwargs(self, inputs: list[str]) -> dict:
+    def _input_type(self, role: str) -> str | None:
+        """Provider-specific ``input_type`` for query/document asymmetry.
+
+        Cohere and Voyage embed queries and documents into DIFFERENT spaces and
+        REQUIRE this hint -- without it (the prior behaviour) queries were
+        embedded as documents, a measurable recall loss (an entirely different
+        vector space for Voyage). OpenAI-compatible endpoints don't take an
+        input_type, so we omit it there. ``role`` is 'query' or 'document'.
+        """
+        m = self._model.lower()
+        if "voyage" in m:
+            return "query" if role == "query" else "document"
+        if "cohere" in m or "/embed-" in m or m.startswith("embed-"):
+            return "search_query" if role == "query" else "search_document"
+        return None  # OpenAI / generic OpenAI-compatible: no input_type param
+
+    def _call_kwargs(self, inputs: list[str], role: str = "document") -> dict:
         kwargs: dict = {"model": self._model, "input": inputs}
+        input_type = self._input_type(role)
+        if input_type:
+            kwargs["input_type"] = input_type
         if self._api_base:
             kwargs["api_base"] = self._api_base
         if self._api_key:
             kwargs["api_key"] = self._api_key
         return kwargs
 
-    async def _aembed(self, inputs: list[str]) -> list[list[float]]:
+    async def _aembed(self, inputs: list[str], role: str = "document") -> list[list[float]]:
         import litellm
 
-        resp = await litellm.aembedding(**self._call_kwargs(inputs))
+        resp = await litellm.aembedding(**self._call_kwargs(inputs, role))
         # LiteLLM normalises to an OpenAI-shaped response: r.data[i]["embedding"].
         return [row["embedding"] for row in resp.data]
 
@@ -77,7 +96,7 @@ class LiteLLMEmbeddings:
         t0 = time.perf_counter()
         bs = self._batch_size
         batches = [texts[i : i + bs] for i in range(0, len(texts), bs)]
-        batch_vecs = await asyncio.gather(*(self._aembed(b) for b in batches))
+        batch_vecs = await asyncio.gather(*(self._aembed(b, "document") for b in batches))
         vectors = [v for bv in batch_vecs for v in bv]
         latency_ms = (time.perf_counter() - t0) * 1000
         _usage_tracker.record(
@@ -91,7 +110,7 @@ class LiteLLMEmbeddings:
 
     async def embed_query(self, query: str) -> list[float]:
         t0 = time.perf_counter()
-        vecs = await self._aembed([query])
+        vecs = await self._aembed([query], "query")
         latency_ms = (time.perf_counter() - t0) * 1000
         _usage_tracker.record(
             model=self._model,

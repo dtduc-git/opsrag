@@ -201,7 +201,10 @@ class AgentConfig(BaseModel):
 
 
 class RerankerConfig(BaseModel):
-    provider: Literal["fastembed", "cohere", "bedrock", "vertex", "noop"] = "noop"
+    # Default to the local cross-encoder (FastEmbed): reranking is the single
+    # highest-ROI retrieval lever, it runs offline with no API key, and shipping
+    # `noop` meant the default deployment fed raw bi-encoder order to the LLM.
+    provider: Literal["fastembed", "cohere", "bedrock", "vertex", "noop"] = "fastembed"
     model: str = "rerank-v3.5"
     api_key_env: str = "COHERE_API_KEY"
     # Bedrock rerank (Cohere Rerank 3.5 hosted on Bedrock) -- no COHERE_API_KEY.

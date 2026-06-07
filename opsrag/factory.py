@@ -326,14 +326,31 @@ def build_providers(config: OpsRAGConfig) -> Providers:
         )
 
     if config.reranker.provider == "fastembed":
-        from opsrag.rerankers.fastembed_reranker import FastEmbedReranker
-        reranker: Reranker = FastEmbedReranker(model=config.reranker.model)
+        # The default. If the `fastembed` extra isn't installed, warn loudly and
+        # fall back to no-op rather than crash boot -- the operator didn't
+        # explicitly pick a cloud reranker, so a hard failure here would be
+        # surprising for a minimal install.
+        try:
+            from opsrag.rerankers.fastembed_reranker import FastEmbedReranker
+            reranker: Reranker = FastEmbedReranker(model=config.reranker.model)
+        except Exception as exc:
+            import logging
+            logging.getLogger("opsrag.factory").warning(
+                "fastembed reranker unavailable (%s) -- falling back to no-op. "
+                "Install the `fastembed` extra to enable local reranking.", exc,
+            )
+            reranker = NoOpReranker()
     elif config.reranker.provider == "cohere":
         api_key = _env(config.reranker.api_key_env)
-        reranker = (
-            CohereReranker(api_key=api_key, model=config.reranker.model)
-            if api_key else NoOpReranker()
-        )
+        if not api_key:
+            # Fail fast: an EXPLICIT cohere selection with no key is a
+            # misconfiguration, not a reason to silently degrade to no-op (the
+            # exact silent-failure class that burned us on Neo4j/APOC).
+            raise ValueError(
+                f"reranker.provider=cohere but {config.reranker.api_key_env} is "
+                "unset. Set the API key or choose a different reranker.provider."
+            )
+        reranker = CohereReranker(api_key=api_key, model=config.reranker.model)
     elif config.reranker.provider == "bedrock":
         from opsrag.rerankers.bedrock import BedrockReranker
         # Cohere Rerank 3.5 (or amazon.rerank) hosted ON Bedrock -- same AWS

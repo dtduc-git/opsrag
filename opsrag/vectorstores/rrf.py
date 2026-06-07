@@ -17,6 +17,7 @@ single-purpose and unit-testable.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Iterable
 
@@ -28,9 +29,17 @@ _RRF_K = 60  # Cormack 2009 default -- match hybrid_search.py constant.
 
 
 def _chunk_key(r: SearchResult) -> str:
-    """Stable identity for a chunk across pools. `chunk.id` is set by
-    the chunker and persists across embeddings."""
-    return getattr(r.chunk, "id", "") or f"{r.chunk.repo}:{r.chunk.source_path}:{hash(r.chunk.content[:200])}"
+    """Stable identity for a chunk across pools. `chunk.id` is set by the
+    chunker and persists across embeddings (the normal case). The fallback uses
+    a FULL-content sha1 -- builtin `hash()` is salted per process
+    (PYTHONHASHSEED), which made cross-pool consensus + eval non-reproducible,
+    and `content[:200]` collided across chunks sharing a templated
+    `[Context: ...]` prefix, falsely merging different chunks."""
+    cid = getattr(r.chunk, "id", "") or ""
+    if cid:
+        return cid
+    digest = hashlib.sha1(r.chunk.content.encode("utf-8")).hexdigest()[:16]
+    return f"{r.chunk.repo}:{r.chunk.source_path}:{digest}"
 
 
 def rrf_merge_pools(

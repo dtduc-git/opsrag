@@ -113,9 +113,13 @@ class RankPrecisionAtKMetric(BaseMetric):
             self.reason = "skipped: golden has no expected/acceptable sources"
             return self.score
         if not retrieved:
-            self.score = 1.0
-            self.success = True
-            self.reason = "no retrieved sources"
+            # We already returned for the no-relevant-set case above, so a
+            # relevant set DOES exist here -- retrieving nothing is a total
+            # precision miss (0.0), not a vacuous pass. Scoring 1.0 would mask a
+            # retrieval-zeroing regression on the precision axis.
+            self.score = 0.0
+            self.success = False
+            self.reason = "no retrieved sources but golden expects some"
             return self.score
         top = retrieved[: self.k]
         hits = [r for r in top if _is_relevant(r, expected, acceptable)]

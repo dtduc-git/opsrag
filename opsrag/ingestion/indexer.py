@@ -28,16 +28,29 @@ from opsrag.interfaces.scm import RepoFile
 
 _log = logging.getLogger("opsrag.ingestion.indexer")
 
-# File globs the indexer considers. Mirrors IngestionPipeline.index_repo's
-# default patterns so local and SCM indexing see the same document kinds.
+# File globs the indexer considers. MUST mirror IngestionPipeline.index_repo's
+# default patterns so the local/quickstart corpus indexes the SAME file kinds as
+# production SCM indexing -- otherwise local lacks all source code and eval runs
+# against a corpus that doesn't match what production retrieves over.
 DEFAULT_PATTERNS: tuple[str, ...] = (
-    "**/*.md",
-    "**/*.markdown",
-    "**/*.tf",
-    "**/*.hcl",
-    "**/*.yaml",
-    "**/*.yml",
+    # Docs + IaC + config
+    "**/*.md", "**/*.markdown",
+    "**/*.tf", "**/*.hcl",
+    "**/*.yaml", "**/*.yml",
     "**/Dockerfile",
+    "**/*.tpl", "**/*.gotmpl",
+    "**/*.json",
+    "**/Makefile",
+    # Source code (parity with pipeline.py SCM globs)
+    "**/*.py", "**/*.pyi",
+    "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs",
+    "**/*.ts", "**/*.tsx",
+    "**/*.vue",
+    "**/*.go",
+    "**/*.java", "**/*.kt", "**/*.kts",
+    "**/*.html", "**/*.htm",
+    "**/*.css", "**/*.scss", "**/*.sass", "**/*.less",
+    "**/*.sh", "**/*.bash",
 )
 
 

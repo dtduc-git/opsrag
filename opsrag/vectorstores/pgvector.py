@@ -15,6 +15,9 @@ import asyncpg
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.parser import DocType
 from opsrag.interfaces.vectorstore import SearchResult
+from opsrag.vectorstores.lane_weights import compute_lane_weights
+from opsrag.vectorstores.priority import chunk_priority, priority_multiplier
+from opsrag.vectorstores.rrf import rrf_merge_pools
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS opsrag_chunks (
@@ -37,12 +40,29 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_chunks_source ON opsrag_chunks (source_path)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_doc_type ON opsrag_chunks (doc_type)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_chunk_id ON opsrag_chunks (chunk_id)",
+    # GIN full-text index over content -- powers the real lexical lane in
+    # hybrid_search (replaces the old binary ILIKE substring match).
+    "CREATE INDEX IF NOT EXISTS idx_chunks_content_fts "
+    "ON opsrag_chunks USING gin (to_tsvector('simple', content))",
 ]
 
+# HNSW, not IVFFlat: IVFFlat must be built AFTER the table has rows (and needs
+# `ivfflat.probes` tuned, else it scans a single list -> severe recall loss),
+# and the old code built it on an empty table inside a swallowed try/except so
+# it silently never existed. HNSW builds fine on an empty table, grows
+# incrementally, and gives better recall; tune recall at query time via
+# `hnsw.ef_search`.
+# Explicit build params (pgvector defaults m=16, ef_construction=64 are low for
+# a code/identifier corpus -- bake in higher recall at index time).
 _CREATE_VECTOR_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding
-ON opsrag_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+ON opsrag_chunks USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 200);
 """
+
+# Per-session recall knob for HNSW search (higher = better recall, slower).
+# Matches the Qdrant store's hnsw_ef so the two backends have comparable recall.
+_HNSW_EF_SEARCH = 192
 
 
 def _deterministic_uuid(chunk_id: str) -> str:
@@ -119,7 +139,8 @@ class PgVectorStore:
             try:
                 await conn.execute(_CREATE_VECTOR_INDEX)
             except Exception:
-                pass  # IVFFlat needs enough rows; may fail on empty table
+                pass  # best-effort; HNSW builds on an empty table but tolerate
+                      # races / older pgvector without HNSW support
         self._ensured = True
 
     async def upsert(
@@ -183,16 +204,38 @@ class PgVectorStore:
                parent_chunk_id, chunk_type, token_count, metadata,
                1 - (embedding <=> $1::vector) AS score
         FROM {self._table}
-        WHERE embedding IS NOT NULL{where}
+        WHERE embedding IS NOT NULL
+          AND chunk_type IS DISTINCT FROM 'parent'{where}
         ORDER BY embedding <=> $1::vector
         LIMIT ${len(params) + 2}
         """
         params.append(top_k)
 
         async with self._pool.acquire() as conn:
+            await conn.execute(f"SET hnsw.ef_search = {_HNSW_EF_SEARCH}")
             rows = await conn.fetch(query, str(embedding), *params)
 
         return [self._row_to_result(r) for r in rows]
+
+    async def get_chunks_by_chunk_ids(self, chunk_ids: list[str]) -> list[Chunk]:
+        """Fetch full chunks by stable chunk_id. Without this the generator's
+        parent-substitution (children retrieved -> parents fed to the LLM)
+        silently no-ops on pgvector, handing the LLM 256-tok child slices
+        instead of 1024-tok parents -- defeating the parent-child design."""
+        if not chunk_ids:
+            return []
+        await self.ensure_table()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT chunk_id, content, doc_type, source_path, repo,
+                       parent_chunk_id, chunk_type, token_count, metadata
+                FROM {self._table}
+                WHERE chunk_id = ANY($1)
+                """,
+                chunk_ids,
+            )
+        return [self._row_to_chunk(r) for r in rows]
 
     async def delete(self, chunk_ids: list[str]) -> int:
         if not chunk_ids:
@@ -233,31 +276,82 @@ class PgVectorStore:
         embedding: list[float],
         query_text: str,
         top_k: int = 10,
-        alpha: float = 0.7,
+        alpha: float = 0.7,  # kept for interface compat; RRF replaces the blend
         filters: dict | None = None,
     ) -> list[SearchResult]:
-        await self.ensure_table()
-        where, params = self._build_where(filters, start_idx=3)
+        """Two-lane hybrid with RRF fusion -- parity with the Qdrant path.
 
-        # Combine cosine similarity with text match scoring
-        query = f"""
+        The previous single-query `ORDER BY (alpha*cosine + (1-alpha)*ts_rank)`
+        ordered on a COMPUTED column, so Postgres could not use the HNSW index
+        and scanned the whole table per query (an O(N) recall/latency cliff at
+        scale). Instead we run TWO index-using queries -- a dense ANN lane
+        (`ORDER BY embedding <=> $1`, HNSW) and a lexical FTS lane (GIN) -- and
+        fuse them with Reciprocal Rank Fusion, the same algorithm the Qdrant
+        store uses. The authoritative-content priority boost (SRE-KB /
+        architecture tiers) is then applied so it takes effect on pgvector too.
+        """
+        await self.ensure_table()
+        candidate_k = max(top_k * 8, 50)
+
+        # Lane 1 -- dense ANN. ORDER BY the raw distance (NOT a blended score)
+        # so the HNSW index is actually used.
+        dwhere, dparams = self._build_where(filters, start_idx=2)
+        dense_sql = f"""
         SELECT chunk_id, content, doc_type, source_path, repo,
                parent_chunk_id, chunk_type, token_count, metadata,
-               (
-                 {alpha} * (1 - (embedding <=> $1::vector)) +
-                 {1 - alpha} * CASE WHEN content ILIKE '%' || $2 || '%' THEN 1.0 ELSE 0.0 END
-               ) AS score
+               1 - (embedding <=> $1::vector) AS score
         FROM {self._table}
-        WHERE embedding IS NOT NULL{where}
-        ORDER BY score DESC
-        LIMIT ${len(params) + 3}
+        WHERE embedding IS NOT NULL
+          AND chunk_type IS DISTINCT FROM 'parent'{dwhere}
+        ORDER BY embedding <=> $1::vector
+        LIMIT {candidate_k}
         """
-        params.append(top_k)
+        # Lane 2 -- lexical FTS over the GIN index. websearch_to_tsquery
+        # tokenizes/stems the query (handles multi-word, phrases, negation),
+        # unlike the old whole-query ILIKE substring that never fired.
+        lwhere, lparams = self._build_where(filters, start_idx=2)
+        lex_sql = f"""
+        SELECT chunk_id, content, doc_type, source_path, repo,
+               parent_chunk_id, chunk_type, token_count, metadata,
+               ts_rank(to_tsvector('simple', content),
+                       websearch_to_tsquery('simple', $1), 32) AS score
+        FROM {self._table}
+        WHERE to_tsvector('simple', content)
+              @@ websearch_to_tsquery('simple', $1)
+          AND chunk_type IS DISTINCT FROM 'parent'{lwhere}
+        ORDER BY score DESC
+        LIMIT {candidate_k}
+        """
 
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(query, str(embedding), query_text, *params)
+            await conn.execute(f"SET hnsw.ef_search = {_HNSW_EF_SEARCH}")
+            dense_rows = await conn.fetch(dense_sql, str(embedding), *dparams)
+            lex_rows = await conn.fetch(lex_sql, query_text, *lparams)
 
-        return [self._row_to_result(r) for r in rows]
+        dense_results = [self._row_to_result(r) for r in dense_rows]
+        lex_results = [self._row_to_result(r) for r in lex_rows]
+
+        # Identifier-aware lane weighting (parity with Qdrant): boost the lexical
+        # lane on symbol queries (handle_webhook_callback, acme-notes-be-api) so
+        # pgvector doesn't retrieve measurably worse than Qdrant on exact-symbol
+        # queries. dense=1.0, lexical=sparse weight.
+        lw = compute_lane_weights(query_text)
+        fused = rrf_merge_pools(
+            [dense_results, lex_results],
+            top_k=max(candidate_k, top_k),
+            pool_weights=[lw["dense"], lw["sparse"]],
+        )
+        # Authoritative-content priority boost (parity with Qdrant). pgvector
+        # has no `priority` column, so derive the tier from repo/source_path.
+        boosted: list[SearchResult] = []
+        for sr in fused:
+            mult = priority_multiplier(chunk_priority(sr.chunk.repo, sr.chunk.source_path))
+            boosted.append(
+                SearchResult(chunk=sr.chunk, score=sr.score * mult,
+                             distance_metric="rrf+priority")
+            )
+        boosted.sort(key=lambda s: s.score, reverse=True)
+        return boosted[:top_k]
 
     @staticmethod
     def _build_where(
@@ -279,11 +373,11 @@ class PgVectorStore:
         return "".join(clauses), params
 
     @staticmethod
-    def _row_to_result(row) -> SearchResult:
+    def _row_to_chunk(row) -> Chunk:
         metadata = row["metadata"]
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
-        chunk = Chunk(
+        return Chunk(
             id=row["chunk_id"],
             content=row["content"],
             doc_type=DocType(row["doc_type"]),
@@ -294,8 +388,11 @@ class PgVectorStore:
             chunk_type=row["chunk_type"],
             token_count=row["token_count"],
         )
+
+    @classmethod
+    def _row_to_result(cls, row) -> SearchResult:
         return SearchResult(
-            chunk=chunk,
+            chunk=cls._row_to_chunk(row),
             score=float(row["score"]),
             distance_metric="cosine",
         )

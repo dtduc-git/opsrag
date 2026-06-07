@@ -35,8 +35,15 @@ from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.embedder import EmbeddingProvider
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.parser import DocType
-from opsrag.interfaces.vectorstore import VectorStore
+from opsrag.interfaces.vectorstore import SearchResult, VectorStore
+from opsrag.vectorstores.priority import priority_multiplier
 from opsrag.vectorstores.rrf import rrf_merge_pools
+
+# Minimum candidate pool handed to the reranker, independent of the answer
+# top_k. Reranking is the highest-ROI lever but can only re-order what it's
+# given; a wide pool lets the cross-encoder promote a doc the bi-encoder ranked
+# deep. Truncation back to the output size happens in the rerank node.
+_RERANK_CANDIDATE_POOL = 40
 
 # Match GitLab/GitHub-style repo paths: owner/repo or owner/group/.../repo.
 _REPO_PATH_RE = re.compile(
@@ -397,6 +404,15 @@ def vector_retrieve_node(
             # repos that mention the slug. Same factor as listing intent.
             scoped_top_k = min(top_k * 3, 50)
 
+        # Candidate-pool floor for reranking. A cross-encoder can only rescue a
+        # doc the bi-encoder ranked low if that doc is in the pool -- a "vanilla"
+        # query with no intent signal otherwise fetched only `top_k` (~10),
+        # making the (now default-on) reranker nearly inert. The rerank node
+        # truncates back to the output size and grading runs AFTER rerank, so a
+        # wide retrieval pool costs an extra cross-encoder pass, NOT extra
+        # per-doc LLM grader calls.
+        scoped_top_k = max(scoped_top_k, _RERANK_CANDIDATE_POOL)
+
         filters = {"repo": repo} if hard_filter else None
 
         # Path-pattern fan-out: when the query mentions a service slug
@@ -437,12 +453,17 @@ def vector_retrieve_node(
 
         # Code lane: embed the query with the code-specific embedder so
         # hybrid_search can fuse a 4th RRF lane over the `opsrag_code`
-        # collection. Best-effort -- a code-embedder hiccup must never sink the
-        # main retrieval, so fall back to dense+BM25 on error.
+        # collection. Use the RAW query, NOT the HyDE expansion: the code
+        # embedder runs CODE_RETRIEVAL_QUERY, which expects identifier/code-like
+        # query text -- a Flash-generated prose hypothetical ("the service uses
+        # a middleware that...") is the opposite of what that lane wants and
+        # dilutes exactly the symbol queries the code lane exists to win.
+        # Best-effort -- a code-embedder hiccup must never sink the main
+        # retrieval, so fall back to dense+BM25 on error.
         code_embedding = None
         if _code_lane_on:
             try:
-                code_embedding = await code_embedder.embed_query(embed_target)
+                code_embedding = await code_embedder.embed_query(query)
             except Exception:
                 _log.warning(
                     "code-lane query embed failed; proceeding dense+BM25 only",
@@ -504,8 +525,14 @@ def vector_retrieve_node(
         from collections import Counter as _Counter
         repo_counts: _Counter[str] = _Counter()
         for r in results:
+            # `repo` is a top-level Chunk field, NOT a nested metadata key --
+            # reading metadata.get("repo") returned nothing, so repo_counts was
+            # always empty and the targeted per-repo filename scroll below was
+            # dead (only the unfiltered top-3 fallback ever ran).
             md = r.chunk.metadata or {}
-            repo_name = md.get("repo") or md.get("repository") or ""
+            repo_name = (
+                getattr(r.chunk, "repo", "") or md.get("repo") or md.get("repository") or ""
+            )
             if repo_name:
                 repo_counts[repo_name] += 1
         # All distinct repos from the vector pool (no truncation --
@@ -558,6 +585,21 @@ def vector_retrieve_node(
                 top_k=len(results) + len(fanout_results),
                 pool_weights=[1.0, 0.5, 0.5],
             )
+            # rrf_merge_pools re-derives scores from rank and DISCARDS the
+            # authoritative-content priority boost the vector store applied
+            # (SRE-KB / architecture / user-correction). Re-apply it here so a
+            # fanout query doesn't silently lose the boost. The priority tag was
+            # carried onto chunk.metadata by the store's _hit_to_result.
+            reboosted: list = []
+            for sr in results:
+                mult = priority_multiplier((sr.chunk.metadata or {}).get("priority"))
+                reboosted.append(
+                    sr if mult == 1.0
+                    else SearchResult(chunk=sr.chunk, score=sr.score * mult,
+                                      distance_metric=sr.distance_metric)
+                )
+            reboosted.sort(key=lambda s: s.score, reverse=True)
+            results = reboosted
 
         latency_ms = (time.perf_counter() - start) * 1000
 

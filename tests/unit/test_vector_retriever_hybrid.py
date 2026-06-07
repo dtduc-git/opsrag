@@ -81,10 +81,12 @@ async def test_main_path_uses_hybrid_with_raw_query_and_code_lane():
     assert call["query_text"] == "where is handle_webhook defined"
     # Dense lane embedded the HyDE text.
     assert emb.seen[0] == "A hypothetical answer about webhooks"
-    # Code lane threaded through, embedded with the code embedder.
+    # Code lane threaded through, embedded with the code embedder -- using the
+    # RAW query, NOT the HyDE prose: CODE_RETRIEVAL_QUERY wants identifier/code-
+    # shaped query text, so a prose hypothetical would defeat the code lane.
     assert call["code_embedding"] is not None
     assert call["code_store"] is code_store
-    assert code_emb.seen == ["A hypothetical answer about webhooks"]
+    assert code_emb.seen == ["where is handle_webhook defined"]
     assert "bm25" in out["sources_searched"]
     assert "code" in out["sources_searched"]
 

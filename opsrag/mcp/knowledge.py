@@ -59,6 +59,17 @@ _vector_store: Any | None = None
 # `hybrid_search` so the code lane joins the RRF fusion.
 _code_embedder: Any | None = None
 _code_vector_store: Any | None = None
+# Optional LLM for multi-query decomposition. Only used when the operator sets
+# OPSRAG_DECOMPOSE_QUERIES=1 (decompose_query no-ops otherwise); None disables it
+# -- which is what made the feature dead (the call hard-coded llm=None).
+_llm: Any | None = None
+# Optional reranker. The MCP tool path previously had NO rerank stage (it lived
+# only in the LangGraph vector_retrieve_node), so tool-routed queries got raw
+# bi-encoder order. Binding it here closes that divergence; None = no rerank.
+_reranker: Any | None = None
+# Candidate pool fetched before reranking, so the cross-encoder can promote a
+# doc the bi-encoder ranked deep (mirrors the agent path's _RERANK_CANDIDATE_POOL).
+_RERANK_POOL = 40
 
 
 def bind(
@@ -66,6 +77,8 @@ def bind(
     vector_store: Any,
     code_embedder: Any | None = None,
     code_vector_store: Any | None = None,
+    llm: Any | None = None,
+    reranker: Any | None = None,
 ) -> None:
     """Inject providers so the handler can serve queries. Called once
     from server lifespan after providers are constructed.
@@ -82,11 +95,13 @@ def bind(
     2026-05-23. The wiring is gone but the Neo4j driver remains for
     Cartography integration.
     """
-    global _embedder, _vector_store, _code_embedder, _code_vector_store
+    global _embedder, _vector_store, _code_embedder, _code_vector_store, _llm, _reranker
     _embedder = embedder
     _vector_store = vector_store
     _code_embedder = code_embedder
     _code_vector_store = code_vector_store
+    _llm = llm
+    _reranker = reranker
     _log.info(
         "knowledge_search bound: embedder=%s vector_store=%s code_embedder=%s code_vector_store=%s",
         type(embedder).__name__,
@@ -148,11 +163,12 @@ async def _h_knowledge_search(_unused, args: dict) -> Any:
     decomposition_meta: dict[str, Any] = {}
     try:
         from opsrag.agent.query_decomposer import decompose_query
-        # Graph-lane LLM wiring removed 2026-05-23; decomposer falls back
-        # to the regex heuristic when llm is None, so the common case is
-        # unaffected. If we want LLM-driven decomposition back, callers
-        # can pass an LLM via `bind()` again.
-        decomp = await decompose_query(query, None)
+        # Use the bound LLM so multi-query decomposition actually fires when the
+        # operator enables OPSRAG_DECOMPOSE_QUERIES=1. (It was hard-coded to None,
+        # which made the feature dead -- decompose_query short-circuits to
+        # [query] with no LLM.) Still flag-gated + heuristic-gated internally, so
+        # the default deployment is unchanged.
+        decomp = await decompose_query(query, _llm)
         sub_queries = decomp.sub_queries
         decomposition_meta = {
             "n_sub_queries": len(sub_queries),
@@ -169,7 +185,12 @@ async def _h_knowledge_search(_unused, args: dict) -> Any:
     # hybrid_search call -- same cost / latency as pre-T1.1. When the
     # decomposer fanned out, asyncio.gather runs the parallel retrievals
     # concurrently and cross-pool RRF merges them.
-    pool_k = max(k * 2, 10) if len(sub_queries) > 1 else k
+    # When a reranker is wired, fetch a WIDER candidate pool so the cross-encoder
+    # can rescue a relevant doc the bi-encoder ranked deep, then trim to k after
+    # reranking. NoOp reranker adds no signal, so don't pay for the wider fetch.
+    rerank_on = _reranker is not None and type(_reranker).__name__ != "NoOpReranker"
+    base_pool = max(k, _RERANK_POOL) if rerank_on else k
+    pool_k = max(base_pool * 2, 10) if len(sub_queries) > 1 else base_pool
     try:
         if len(sub_queries) == 1:
             results = await _retrieve_one_pool(sub_queries[0], pool_k)
@@ -192,9 +213,28 @@ async def _h_knowledge_search(_unused, args: dict) -> Any:
                 results = await _retrieve_one_pool(query, pool_k)
             else:
                 from opsrag.vectorstores.rrf import rrf_merge_pools
-                results = rrf_merge_pools(good_pools, top_k=k)
+                results = rrf_merge_pools(good_pools, top_k=base_pool)
     except Exception as exc:  # noqa: BLE001
         return {"error": f"retrieval failed: {exc}"}
+
+    # -- Rerank ------------------------------------------------------
+    # Cross-encoder re-scoring of the wide candidate pool, then trim to k.
+    # Closes the divergence with the LangGraph path (which always reranks);
+    # without this, tool-routed queries shipped raw bi-encoder order to the LLM.
+    if rerank_on and results:
+        try:
+            from opsrag.interfaces.vectorstore import SearchResult
+            reranked = await _reranker.rerank(query, results, top_k=k)
+            results = [
+                SearchResult(chunk=rr.chunk, score=float(rr.relevance_score),
+                             distance_metric="rerank")
+                for rr in reranked
+            ]
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("rerank failed (%s) -- using pre-rerank order", exc)
+            results = results[:k]
+    else:
+        results = results[:k]
 
     hits: list[dict] = []
     for r in results or []:
