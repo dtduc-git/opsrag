@@ -32,8 +32,42 @@ def _config_summary() -> dict:
     }
 
 
+def _assert_cache_bypassed(opsrag_url: str) -> None:
+    """Fail the gate if the QA cache is live on the target server.
+
+    A cache hit serves STORED sources, so the ranking metrics would measure the
+    cache, not retrieval -- masking a regression. We can't read the server's env
+    from here, so PROBE it: send a cacheable (procedural) query twice; a 2nd-call
+    cache_hit means the cache is ON and the eval server is misconfigured (it must
+    run with OPSRAG_DISABLE_QA_CACHE=1). Transport errors don't block the gate."""
+    from opsrag.eval.runner import _query_opsrag
+
+    probe = "what is the standard procedure to deploy a service"
+    try:
+        _query_opsrag(opsrag_url, probe)
+        second = _query_opsrag(opsrag_url, probe)
+    except Exception as exc:
+        _log.warning(
+            "cache-bypass probe failed (%s) -- proceeding without the assertion",
+            exc,
+        )
+        return
+    if second.get("cache_hit"):
+        print(
+            "EVAL GATE ABORTED: the QA cache is ENABLED on the target server "
+            "(repeat probe returned cache_hit=true). Run the eval server with "
+            "OPSRAG_DISABLE_QA_CACHE=1 so the ranking metrics measure retrieval, "
+            "not the cache.",
+            file=sys.stderr,
+        )
+        raise SystemExit(3)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     opsrag_url = os.environ.get("OPSRAG_URL", "http://localhost:8000")
+    # Before an expensive gated run, assert the server isn't serving from cache.
+    if getattr(args, "gate", False):
+        _assert_cache_bypassed(opsrag_url)
     judge = VertexGeminiJudge(
         model_name=os.environ.get("OPSRAG_JUDGE_MODEL", "gemini-2.5-pro"),
     )
