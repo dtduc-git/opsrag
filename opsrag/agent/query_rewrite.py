@@ -202,13 +202,26 @@ async def maybe_rewrite_query(
             return query
         if rewritten.lower() == query.strip().lower():
             return query
-        # Re-inject any exact identifier the user typed in THIS follow-up that
-        # the LLM paraphrased away (acme-notes-be -> "the notes service",
-        # dropping CrashLoopBackOff). The BM25 + anchor-boost lanes depend on the
-        # literal tokens; same fix the CRAG rewriter (rewriter.py) already uses.
-        anchors = extract_anchors(query)
+        # Re-inject any exact identifier the LLM paraphrased away. Crucially this
+        # spans the CURRENT follow-up AND the recent prior turns: the entity
+        # behind "it"/"its config" usually lives in the prior turn, not the
+        # follow-up ("tell me more about its config" has no anchors), and the LLM
+        # may resolve "it" -> "the notes service" instead of the literal slug,
+        # silently dropping the token the BM25/anchor lanes need. extract_anchors
+        # only grabs identifier-shaped tokens so this stays focused; cap the
+        # re-injection so a multi-entity history can't flood the query.
+        prior_tail = prior_messages[-4:] if prior_messages else []
+        candidates = list(extract_anchors(query))
+        for m in prior_tail:
+            candidates.extend(extract_anchors(m.get("content") or ""))
+        seen_a: set[str] = set()
+        anchors: list[str] = []
+        for a in candidates:
+            if a.lower() not in seen_a:
+                seen_a.add(a.lower())
+                anchors.append(a)
         low = rewritten.lower()
-        missing = [a for a in anchors if a.lower() not in low]
+        missing = [a for a in anchors if a.lower() not in low][:4]
         if missing:
             rewritten = f"{rewritten} {' '.join(missing)}"
         _log.info(

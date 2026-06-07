@@ -80,6 +80,13 @@ class OpsRAGState(TypedDict, total=False):
     # provider (FastEmbed sigmoid vs Cohere compressed-low).
     min_rerank_score: float
     rerank_trust_score: float
+    # True when the reranker errored and we fell back to vector order -- carries a
+    # mid-band score so it bypasses the weak gate WITHOUT signalling max trust.
+    reranker_outage: bool
+    # Generation budget (caps the grader's synthesis floor); decomposed sub-query
+    # texts when query decomposition is enabled (also sizes the floor).
+    top_k: int
+    sub_queries: list[str]
     # Queries already tried by the rewriter this turn -- fed back into the
     # rewrite prompt so each CRAG retry explores a different reformulation.
     rewrite_history: list[str]

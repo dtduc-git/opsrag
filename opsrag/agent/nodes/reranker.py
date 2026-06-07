@@ -104,14 +104,22 @@ def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k:
         # Fall back to bi-encoder order if the reranker errors (a cloud
         # reranker API hiccup must not crash the whole query).
         wide_top_k = len(results)
+        reranker_outage = False
         try:
             reranked = await reranker.rerank(query, results, top_k=wide_top_k)
         except Exception as exc:
             _log.warning("reranker failed (%s) -- falling back to vector order", exc)
             from opsrag.interfaces.reranker import RerankResult
-            # Neutral score (not 0.0) so a reranker OUTAGE doesn't trip the
-            # weak-retrieval gate into a spurious "insufficient information".
-            reranked = [RerankResult(chunk=c, relevance_score=1.0) for c in chunks]
+            reranker_outage = True
+            # Score that DECOUPLES the two things a reranker score drives:
+            #   * bypass the weak-retrieval gate (>= floor) -- an outage must not
+            #     fake a spurious "insufficient information", AND
+            #   * do NOT signal max confidence (< trust) to the grader's
+            #     trust-rerank-over-CRAG floor -- an outage is when retrieval is
+            #     LEAST verifiable, so it must not suppress CRAG correction.
+            # The prior 1.0 did the first but broke the second. Mid-band value.
+            _neutral = (rerank_floor + rerank_trust) / 2.0
+            reranked = [RerankResult(chunk=c, relevance_score=_neutral) for c in chunks]
 
         # Apply path-anchor boost -- additive + capped (see _PATH_ANCHOR_BONUS).
         boosted = []
@@ -145,6 +153,7 @@ def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k:
             "anchors_matched_in_results": anchors_in_kept,
             "min_rerank_score": rerank_floor,
             "rerank_trust_score": rerank_trust,
+            "reranker_outage": reranker_outage,
             "current_step": "reranked",
         }
 

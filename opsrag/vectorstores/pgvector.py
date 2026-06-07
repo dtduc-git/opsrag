@@ -357,7 +357,8 @@ class PgVectorStore:
             the code collection) is Qdrant-only; the retriever feature-detects
             and does NOT pass code_embedding/code_store here. Symbol *recall* is
             partly recovered by the trgm lane, but code-semantic ranking is absent.
-          * Sparse math differs. Qdrant = subword BM25 (true IDF); here = ts_rank_cd
+          * Sparse math differs. Qdrant = BM25 (true IDF) over identifier-subtoken-
+            augmented text; here = ts_rank_cd
             over `simple` FTS + a trgm substring lane. This recovers exact-symbol
             recall, not BM25-ranked lexical relevance.
           * The trgm lane is best-effort and silently absent without pg_trgm (a
@@ -410,18 +411,26 @@ class PgVectorStore:
         trgm_sql = ""
         trgm_params: list = []
         if idents:
-            iwhere, iparams = self._build_where(filters, start_idx=len(idents) + 1)
+            # $1 = raw query for the ORDER BY relevance signal; $2..$(n+1) = ILIKE
+            # patterns; filters follow. Without a real ORDER BY the lane returned
+            # rows in arbitrary scan order, so RRF ranked an exact-symbol match by
+            # physical row position (noise). word_similarity() (pg_trgm) scores the
+            # best-matching window of the chunk against the query -> a real rank.
+            iwhere, iparams = self._build_where(filters, start_idx=len(idents) + 2)
             ilike_clauses = " OR ".join(
-                f"content ILIKE ${i + 1} ESCAPE '\\'" for i in range(len(idents))
+                f"content ILIKE ${i + 2} ESCAPE '\\'" for i in range(len(idents))
             )
-            trgm_params = [f"%{self._ilike_escape(t)}%" for t in idents]
+            trgm_params = [query_text] + [
+                f"%{self._ilike_escape(t)}%" for t in idents
+            ]
             trgm_sql = f"""
             SELECT chunk_id, content, doc_type, source_path, repo,
                    parent_chunk_id, chunk_type, token_count, metadata, priority,
-                   1.0 AS score
+                   word_similarity($1, content) AS score
             FROM {self._table}
             WHERE ({ilike_clauses})
               AND chunk_type IS DISTINCT FROM 'parent'{iwhere}
+            ORDER BY score DESC
             LIMIT {candidate_k}
             """
 

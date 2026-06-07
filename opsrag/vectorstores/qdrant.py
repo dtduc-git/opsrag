@@ -4,8 +4,10 @@ Uses AsyncQdrantClient. Chunks are stored as points with their content
 and metadata in the payload, keyed by a stable UUID derived from chunk.id.
 
 Schema:
-  - Named dense vector "dense" -- Vertex text-embedding-005, 768d, cosine
-  - Named sparse vector "bm25" -- FastEmbed Qdrant/bm25 with IDF modifier
+  - Named dense vector "dense" -- dim/metric from the configured embedder
+    (e.g. Cohere Embed v4 @1536 or gemini-embedding-001 @3072), cosine
+  - Named sparse vector "bm25" -- FastEmbed Qdrant/bm25 with IDF modifier,
+    fed identifier-subtoken-augmented text (see bm25_sparse._bm25_augment)
 
 Hybrid search uses Reciprocal Rank Fusion (RRF, Cormack et al. 2009)
 with k=60 (industry default, parameter-free fusion) over both vector

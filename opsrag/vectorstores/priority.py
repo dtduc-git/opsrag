@@ -32,10 +32,18 @@ _PRIORITY_BOOSTS: dict[str, float] = {
 # fractions of this unit so they reorder WITHIN the single-lane tier and win
 # close calls, but don't out-score a strong multi-lane hit (~2-3 RRF units).
 _RRF_UNIT = 1.0 / (60 + 1)
+# Bonuses are a FRACTION of one unit, capped below 1.0 so even the top tier can't
+# out-score a strong two-lane consensus (~2 units, e.g. 1/61 + 1/62 = 0.033). At
+# the prior 1.0*unit, an architecture-canonical single-lane #1 (1/61 + 1/61 =
+# 0.0328) edged past that consensus (0.0325) -- violating this module's own
+# "won't leap past a strong multi-lane hit" guarantee. The fetched pool is deep
+# (candidate_k = max(top_k*8, 50) ~ 50-80), so the bonus must stay a tie-breaker
+# among close single-lane hits, not a tier-jumper. 0.75 keeps arch #1 at 0.0287 <
+# 0.0325 while still beating every non-priority single-lane hit.
 _PRIORITY_RRF_BONUS: dict[str, float] = {
-    "architecture-canonical": 1.0 * _RRF_UNIT,  # reliably beats any single-lane-only hit
-    "user-correction": 0.8 * _RRF_UNIT,
-    "high": 0.5 * _RRF_UNIT,
+    "architecture-canonical": 0.75 * _RRF_UNIT,
+    "user-correction": 0.6 * _RRF_UNIT,
+    "high": 0.4 * _RRF_UNIT,
 }
 
 # Repo/path rules for deriving the tier when no stored tag is available
