@@ -34,6 +34,7 @@ import logging
 import os
 import re
 
+from opsrag.ingestion.metadata import content_hash as _content_hash
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.parser import DocType, ParsedDocument
@@ -75,17 +76,18 @@ _STRUCTURED_TYPE_LABELS: dict[DocType, str] = {
     DocType.SHELL: "Shell script",
 }
 
-# Env detection from path. Normalize the canonical env names so retrieval is
-# consistent regardless of where the env appears in the path. Pattern order
-# matters: longer/more-specific first so `preprod` doesn't get caught by the
-# `prod` rule. (Deployment-specific abbreviations come from
+# Env detection from path. Canonical names, checked in precedence order so
+# `preprod` isn't mis-claimed by the `prod` rule. Token-set form (not a single
+# whole-segment fullmatch) so an env spelled INSIDE a filename is caught --
+# `values-prod.yaml` and `values-staging.yaml` must get DIFFERENT context
+# prefixes (the headline use case), which the old `fullmatch` on `/`-segments
+# silently failed. (Deployment-specific abbreviations come from
 # `deployment.environments` in DeploymentContext, not hardcoded here.)
-_ENV_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\b(preprod|pre-prod)\b", re.I), "preprod"),
-    (re.compile(r"\b(staging|stage)\b", re.I), "staging"),
-    (re.compile(r"\b(prod|production)\b", re.I), "production"),
-    (re.compile(r"\b(dev|develop|development)\b", re.I), "dev"),
-    (re.compile(r"\b(qa|test|testing)\b", re.I), "qa"),
+_ENV_TOKEN_MAP: list[tuple[tuple[str, ...], str]] = [
+    (("staging", "stage"), "staging"),
+    (("prod", "production"), "production"),
+    (("dev", "develop", "development"), "dev"),
+    (("qa", "test", "testing"), "qa"),
 ]
 
 # Keep individual prompts under this token estimate to fit gemini-flash
@@ -104,13 +106,28 @@ def _extract_env_from_path(path: str) -> str:
     """
     if not path:
         return ""
-    # Only consider path *segments* -- avoid matching env markers embedded
-    # in filenames (e.g., `prod_metrics.yaml` shouldn't count as production).
-    for seg in path.split("/"):
-        for pat, canon in _ENV_PATTERNS:
-            if pat.fullmatch(seg):
-                return canon
+    low = path.lower()
+    # preprod is hyphen/underscore-spelled in the wild (`pre-prod`, `pre_prod`);
+    # catch it before the generic `prod` token would mis-claim it.
+    if re.search(r"pre[-_]?prod", low):
+        return "preprod"
+    # Tokenize on any non-alphanumeric so a filename-encoded env is caught:
+    # `values-prod.yaml` -> {values, prod, yaml}. Exact-token match (not
+    # substring) preserves the old false-positive guard -- `product` -> {product}
+    # never matches `prod`.
+    tokens = {t for t in re.split(r"[^a-z0-9]+", low) if t}
+    for names, canon in _ENV_TOKEN_MAP:
+        if any(n in tokens for n in names):
+            return canon
     return ""
+
+
+def _refresh_content_hash(chunk: Chunk) -> None:
+    """Re-stamp metadata.content_hash after the chunk's content was mutated by a
+    context prefix, so the dedup/idempotent-upsert hash matches the embedded
+    text. No-op if the chunker never set one (e.g. fixed-size chunker)."""
+    if isinstance(chunk.metadata, dict) and "content_hash" in chunk.metadata:
+        chunk.metadata["content_hash"] = _content_hash(chunk.content)
 
 
 def _leading_key(content: str) -> str:
@@ -259,8 +276,11 @@ async def augment_chunks(
                 # Recompute: the prefix (40-80 tok) was added AFTER the chunker
                 # sized this piece, so the stored token_count was stale and any
                 # downstream budget/truncation logic under-counted the real
-                # embedded length.
+                # embedded length. Likewise refresh the dedup content_hash so it
+                # describes the text that's actually embedded+stored, not the
+                # pre-prefix slice.
                 child.token_count = estimate_tokens(child.content)
+                _refresh_content_hash(child)
 
     return chunks
 
@@ -281,6 +301,7 @@ def _augment_structured(chunks: list[Chunk], doc: ParsedDocument) -> None:
         if ctx:
             chunk.content = f"[Context: {ctx}]\n\n{chunk.content}"
             chunk.token_count = estimate_tokens(chunk.content)
+            _refresh_content_hash(chunk)
 
 
 async def _generate_contexts(

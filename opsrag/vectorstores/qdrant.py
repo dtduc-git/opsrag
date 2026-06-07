@@ -105,9 +105,10 @@ def _chunk_priority(
 
 
 def _priority_multiplier(payload: dict | None) -> float:
-    """Score multiplier derived from the payload's priority tag. Defaults
-    to 1.0 (no boost). Used by both dense `search()` and `hybrid_search()`
-    so the boost is consistent regardless of retrieval path.
+    """Score MULTIPLIER derived from the payload's priority tag. Defaults to 1.0.
+    Valid ONLY on the cosine [0, 1] band (dense-only `search()`); the fused
+    hybrid path uses `_priority_rrf_bonus` instead (a multiplier steamrolls the
+    compressed RRF band).
 
     Priorities:
       - "architecture-canonical"  -> 2.0x (SRE-KB docs/architecture/*)
@@ -119,6 +120,13 @@ def _priority_multiplier(payload: dict | None) -> float:
     # pgvector store + the agent fanout re-merge).
     from opsrag.vectorstores.priority import priority_multiplier
     return priority_multiplier((payload or {}).get("priority"))
+
+
+def _priority_rrf_bonus(tag: str | None) -> float:
+    """Additive RRF-unit priority bonus for a tag (0.0 when None/unknown). Used
+    by `hybrid_search` to boost authoritative content in fused-rank space."""
+    from opsrag.vectorstores.priority import priority_rrf_bonus
+    return priority_rrf_bonus(tag)
 
 
 def _chunk_point_id(chunk_id: str) -> str:
@@ -544,16 +552,17 @@ class QdrantVectorStore:
                 if key not in seen_hits:
                     seen_hits[key] = h
 
-        # Priority boost -- multiply the fused RRF score by the payload's
-        # priority multiplier. SRE-KB chunks land 50% higher in the
-        # ranking so canonical answers out-rank Confluence/Slack on
-        # overlapping queries. Applied AFTER RRF so the multiplier
-        # composes cleanly with both lexical and semantic contributions.
+        # Priority boost -- ADD a bounded bonus (in RRF units) to the fused
+        # score so authoritative SRE-KB content out-ranks Confluence/Slack on
+        # close calls. NOT a multiplier: RRF scores live in a tiny band
+        # (~0.010-0.016), where a x2.0 would vault a weakly-ranked SRE-KB chunk
+        # at rank 40 past a genuine single-lane #1. The additive bonus reorders
+        # within the single-lane tier without leaping past a strong multi-lane
+        # hit (~0.033+). See vectorstores/priority.py.
         for key in list(rrf_score.keys()):
             h = seen_hits.get(key)
-            mult = _priority_multiplier(getattr(h, "payload", None) if h else None)
-            if mult != 1.0:
-                rrf_score[key] *= mult
+            payload = getattr(h, "payload", None) if h else None
+            rrf_score[key] += _priority_rrf_bonus((payload or {}).get("priority"))
 
         # Order by boosted RRF score descending
         ranked = sorted(rrf_score.items(), key=lambda x: x[1], reverse=True)[:top_k]
@@ -568,13 +577,20 @@ class QdrantVectorStore:
     def _scroll_hit_to_result(point) -> SearchResult:
         """Convert a scroll result (no score) to a SearchResult."""
         payload = point.payload or {}
+        metadata = payload.get("metadata", {}) or {}
+        # Carry the priority tag onto the chunk (mirror _hit_to_result). Without
+        # this a high-priority chunk found via the filename/slug FANOUT loses its
+        # boost in the agent's fanout RRF re-merge -- the same chunk via the main
+        # lane keeps it, so identical content ranks differently by retrieval path.
+        if payload.get("priority") is not None and "priority" not in metadata:
+            metadata = {**metadata, "priority": payload.get("priority")}
         chunk = Chunk(
             id=payload.get("chunk_id", str(point.id)),
             content=payload.get("content", ""),
             doc_type=DocType(payload.get("doc_type", DocType.GENERIC_MARKDOWN.value)),
             source_path=payload.get("source_path", ""),
             repo=payload.get("repo", ""),
-            metadata=payload.get("metadata", {}) or {},
+            metadata=metadata,
             parent_chunk_id=payload.get("parent_chunk_id"),
             chunk_type=payload.get("chunk_type", "child"),
             token_count=payload.get("token_count", 0),

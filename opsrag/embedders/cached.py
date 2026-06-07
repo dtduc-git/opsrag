@@ -66,6 +66,15 @@ class CachedEmbedder:
 
     def _key(self, query: str) -> tuple[str, str, int]:
         # NB: case-preserving on purpose -- see module docstring.
+        #
+        # Key is (text, model, dim) -- deliberately QUERY-ONLY. It omits
+        # input_type and api_base/endpoint, which is correct here because this
+        # cache wraps embed_query exclusively (always input_type=query, one
+        # endpoint per process). Do NOT reuse this cache for document embeddings
+        # or across endpoints: queries and documents embed into different spaces
+        # for Cohere/Voyage, so a shared key would serve a query vector for a
+        # document (silent recall loss). Add input_type/endpoint to the key first
+        # if that ever changes.
         return (query.strip(), self._inner.model_name, self._inner.dimension)
 
     async def embed_query(self, query: str) -> list[float]:
