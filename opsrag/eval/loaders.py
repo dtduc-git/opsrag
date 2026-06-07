@@ -136,6 +136,12 @@ class GoldenQuery:
     acceptable_sources: list[str] = field(default_factory=list)
     must_contain: list[str] = field(default_factory=list)
     must_not_contain: list[str] = field(default_factory=list)
+    # Retrieval-side restraint cap for negative goldens: the max number of
+    # sources the system may surface for a "doesn't exist in the corpus" query.
+    # When set, RetrievalRestraintMetric fails if more are returned -- catches a
+    # weak-retrieval-gate regression that pulls in junk even when the answer
+    # text still happens to refuse. None = no retrieval-side assertion.
+    max_retrieved_sources: int | None = None
     notes: str = ""
     # Optional design-intent baseline for the Faithfulness metric, expressed
     # as a value in [0, 1]. Used for adversarial goldens where the bot is
@@ -155,6 +161,7 @@ class GoldenQuery:
             acceptable_sources=list(d.get("acceptable_sources") or []),
             must_contain=list(d.get("must_contain") or []),
             must_not_contain=list(d.get("must_not_contain") or []),
+            max_retrieved_sources=d.get("max_retrieved_sources"),
             notes=d.get("notes", ""),
             expected_baseline_faith=d.get("expected_baseline_faith"),
         )
@@ -270,5 +277,6 @@ def to_llm_test_case(
             "retrieved_sources": retrieved_sources if retrieved_sources is not None else retrieval_context,
             "must_contain": g.must_contain,
             "must_not_contain": g.must_not_contain,
+            "max_retrieved_sources": g.max_retrieved_sources,
         },
     )

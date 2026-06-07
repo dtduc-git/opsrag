@@ -22,8 +22,10 @@ from opsrag.eval.metrics import (
     MRRMetric,
     MustContainMetric,
     MustNotContainMetric,
+    NDCGAtKMetric,
     RankPrecisionAtKMetric,
     RankRecallAtKMetric,
+    RetrievalRestraintMetric,
     SourceRecallMetric,
 )
 from opsrag.eval.usage_hook import get_usage_total
@@ -94,8 +96,19 @@ def _run_metrics(test_case, judge: VertexGeminiJudge) -> list[MetricResult]:
         # comes first in the report.
         SourceRecallMetric(),
         RankPrecisionAtKMetric(k=5),
+        # Recall@5 (top-of-list recall, what the generator actually reads) AND
+        # Recall@10 (does it appear at all): a doc slipping from rank 4 to rank 8
+        # tanks Recall@5 while Recall@10 stays flat -- the two together localize
+        # re-ranking regressions.
+        RankRecallAtKMetric(k=5),
         RankRecallAtKMetric(k=10),
+        # Position-aware over ALL relevant docs in the window (Recall is a set
+        # test, MRR is first-hit only).
+        NDCGAtKMetric(k=5),
         MRRMetric(),
+        # Retrieval-side restraint for negatives (no-op unless the golden caps
+        # max_retrieved_sources).
+        RetrievalRestraintMetric(),
         MustContainMetric(),
         MustNotContainMetric(),
         # LLM-judged, slowest, costs Pro tokens -- last.

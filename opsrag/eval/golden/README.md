@@ -40,6 +40,7 @@ Each file under this directory is a **category** (filename = category id, e.g. `
 | `acceptable_sources` | optional | Alternative sources with **OR-semantics** (any one found = satisfied). Use when a question has multiple valid groundings, e.g. a YAML file AND the prose doc that describes it. See "OR-semantics goldens" below. |
 | `must_contain` | optional | Substrings the answer MUST include. Anchor on facts, not phrasing. |
 | `must_not_contain` | optional | Substrings the answer MUST NOT include. Useful for hallucination guards. |
+| `max_retrieved_sources` | optional | Integer cap on how many sources the system may surface. Adds a **retrieval-side** assertion (`RetrievalRestraintMetric`) on top of the answer-side `must_not_contain` — for a query naming a purely fabricated entity the weak-retrieval gate should surface (near) nothing. Set it only on cases whose query has no real-tech term that would legitimately retrieve, and keep it permissive (tolerate a floored top-1 + rewrite residue). Omit = no retrieval-side assertion. |
 | `notes` | optional | Provenance + rationale. **Required for adversarial / multi-doc goldens.** |
 | `expected_baseline_faith` | optional | Float in `[0, 1]`. The *design-intended* Faithfulness baseline for this golden. **Documentation-only** -- the eval framework does not enforce or compare against this; it exists so future reviewers don't misread a low-but-stable score as a defect. **Required on adversarial-category goldens.** See "Adversarial baselines" below. |
 
