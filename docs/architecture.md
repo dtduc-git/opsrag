@@ -147,6 +147,30 @@ a minimal deployment never needs the heavier providers installed.
 Adding a provider means implementing the interface and adding one branch
 to the factory; nothing else has to change.
 
+### Vector store: Qdrant vs pgvector (retrieval-quality trade-off)
+
+The two vector-store backends are not at full retrieval parity, and the
+choice has a measurable quality impact on symbol-heavy queries:
+
+- **Qdrant** runs full hybrid retrieval: dense ANN plus a *true BM25*
+  sparse lane (FastEmbed with an IDF modifier, fed identifier-subtoken-
+  augmented text), fused via RRF. It is also the only backend that supports
+  the optional code lane (`code_embedding` + `code_vector_store`). This is
+  the recommended default.
+- **pgvector** provides strong dense ANN but *not* lexical parity. Its
+  sparse lane is Postgres full-text search (`ts_rank_cd` over `simple`
+  FTS) plus a best-effort `pg_trgm` trigram lane that recovers exact-symbol
+  *recall* — not true BM25/IDF *ranking*. The code lane does not apply
+  (the retriever feature-detects and skips it on pgvector). If `pg_trgm`
+  is not grantable on the target Postgres (`CREATE EXTENSION pg_trgm`), the
+  trigram lane is disabled and exact-symbol recall falls back to dense +
+  FTS only (a warning is logged at startup).
+
+Choose pgvector to avoid operating Qdrant (e.g. reuse an existing
+RDS/CloudSQL/AlloyDB instance), accepting somewhat weaker lexical-relevance
+ranking on identifier/symbol queries. Choose Qdrant when retrieval quality
+on code/symbol lookups matters most.
+
 ## Null graph backend (default)
 
 The knowledge graph is provider-selected, not feature-flagged. The
