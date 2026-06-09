@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Callable, Sequence, TypeVar
+from collections.abc import Callable, Sequence
+from typing import TypeVar
 
 T = TypeVar("T")
 

@@ -50,9 +50,9 @@ from opsrag.auth import (
     current_user_oid_var,
     get_current_user_dep,
 )
-from opsrag.investigations.feature_gate import investigation_live_telemetry_enabled
 from opsrag.auth.scopes import Scope, require_scope
 from opsrag.indexing_tracker import indexing_tracker
+from opsrag.investigations.feature_gate import investigation_live_telemetry_enabled
 from opsrag.usage import tracker as usage_tracker
 
 _log = logging.getLogger("opsrag.routes")
@@ -60,7 +60,7 @@ _log = logging.getLogger("opsrag.routes")
 router = APIRouter()
 
 
-def _owner_id_for(current_user: "CurrentUser", req_user_id: str | None) -> str:
+def _owner_id_for(current_user: CurrentUser, req_user_id: str | None) -> str:
     """Resolve the OWNER id to persist on a session's checkpoints.
 
     Security: the persisted owner MUST be the authenticated identity, never
@@ -84,7 +84,7 @@ def _is_real_owner(owner: str | None) -> bool:
     return bool(owner) and owner != "anonymous"
 
 
-def _deny_if_not_owner(current_user: "CurrentUser", owner: str | None) -> None:
+def _deny_if_not_owner(current_user: CurrentUser, owner: str | None) -> None:
     """Enforce per-session ownership for a single-thread read/delete.
 
     Raises 404 (NOT 403 -- avoids an existence oracle) when the caller is

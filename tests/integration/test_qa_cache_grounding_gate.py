@@ -17,8 +17,6 @@ compiled graph, embedder, and cache:
 """
 from __future__ import annotations
 
-import pytest
-
 from opsrag.agent.graph import query_with_session
 
 

@@ -1252,7 +1252,7 @@ class InvestigationRunner:
         prior_history: list[dict[str, Any]] | None = None,
         prior_verdicts: HypothesisVerdictBatch | None = None,
         round_idx: int = 0,
-        budget: "_RunBudget | None" = None,
+        budget: _RunBudget | None = None,
     ) -> list[dict[str, Any]]:
         """One round of Pro reasoner picks discriminating tools + we
         execute them. Returns the tool call history as a list of
