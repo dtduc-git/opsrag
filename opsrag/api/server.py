@@ -1503,14 +1503,9 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
     app.include_router(webhooks_router)
     app.include_router(router)
 
-    # Hypothesis-driven investigation subgraph -- separate router so
-    # it stays cleanly isolated from the live-query chat path.
-    # Legacy hypothesis-tree investigation routes -- DISABLED. The
-    # new routes_investigations router owns
-    # /investigations/* now. Keep the import path documented in case we
-    # need to re-enable for archaeology, but don't register the routes.
-    # from opsrag.api.investigation_routes import router as investigation_router
-    # app.include_router(investigation_router)
+    # (The legacy hypothesis-tree investigation engine was retired; the
+    # event-driven InvestigationRunner -- mounted below as
+    # investigations_router -- owns all /investigations/* routes.)
 
     # MCP-server-as-proxy. Token management (Pomerium-authed) +
     # MCP transport (bearer-token-authed) endpoints under /api/mcp/*.
