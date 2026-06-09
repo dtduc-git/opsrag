@@ -44,6 +44,10 @@ interface Props {
   // items list a `requires` scope and are hidden when it's absent. In OPEN
   // mode the backend grants every scope so nothing is hidden.
   scopes?: Scope[];
+  // Config-driven feature gate from /ui-config: hides the Investigate tab
+  // unless the deployment enabled a live-telemetry MCP integration. Separate
+  // from the scope gate (authz) -- this is "is the feature wired at all".
+  investigationEnabled?: boolean;
   // POSTs /api/auth/logout then re-gates. When provided (and authenticated),
   // an in-app Sign-out control is shown in the footer. Replaces the old
   // build-time VITE_SIGN_OUT_URL href flow.
@@ -106,6 +110,10 @@ interface NavItem {
   // Scope required to SEE this item. Omitted = always visible. Hiding is
   // UX-only; the backend's require_scope stays authoritative.
   requires?: Scope;
+  // When explicitly false, the item is hidden because the deployment hasn't
+  // enabled the backing integration (config-driven feature gate, distinct
+  // from the scope/authz gate). Omitted/true = not feature-gated.
+  featureEnabled?: boolean;
 }
 
 interface NavSection {
@@ -119,6 +127,7 @@ export default function Sidebar({
   investigations = [],
   me = null,
   scopes,
+  investigationEnabled = false,
   onSignOut,
   collapsed = false,
   onToggleCollapsed,
@@ -151,7 +160,7 @@ export default function Sidebar({
       label: "Workspace",
       items: [
         { page: "chat", label: "Conversations", icon: I.conversations, title: "Your conversations", badge: sessions.length || undefined, requires: "chat" },
-        { page: "investigate", label: "Investigations", icon: I.investigate, title: "Agentic root-cause analysis", badge: investigations.length || undefined, requires: "investigate" },
+        { page: "investigate", label: "Investigations", icon: I.investigate, title: "Agentic root-cause analysis", badge: investigations.length || undefined, requires: "investigate", featureEnabled: investigationEnabled },
         { page: "runbooks", label: "Runbooks", icon: I.runbooks, title: "Hand-authored SRE playbooks", alsoActiveOn: ["runbook-edit"] },
         { page: "connections", label: "MCP Tokens", icon: I.mcptokens, title: "Personal access tokens for MCP clients (Claude Code, Cursor)", requires: "mcp" },
       ],
@@ -184,9 +193,13 @@ export default function Sidebar({
     },
   ];
 
-  // Filter items the viewer lacks scope for, then drop any section left empty.
+  // Filter items the viewer lacks scope for OR whose backing feature the
+  // deployment hasn't enabled, then drop any section left empty.
   const sections: NavSection[] = allSections
-    .map((sec) => ({ ...sec, items: sec.items.filter((it) => hasScope(it.requires)) }))
+    .map((sec) => ({
+      ...sec,
+      items: sec.items.filter((it) => hasScope(it.requires) && it.featureEnabled !== false),
+    }))
     .filter((sec) => sec.items.length > 0);
 
   const isActive = (it: NavItem): boolean => {

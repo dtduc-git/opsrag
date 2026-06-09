@@ -106,6 +106,10 @@ interface Props {
   onNewChat: () => void;
   onOpenChat: (threadId: string) => void;
   brandName?: string;
+  // Config-driven feature gate (from /ui-config): hides the investigation
+  // CTA + recent-investigations card when no live-telemetry integration is
+  // enabled, matching the sidebar tab gate.
+  investigationEnabled?: boolean;
 }
 
 export default function HomePage({
@@ -115,6 +119,7 @@ export default function HomePage({
   onNewChat,
   onOpenChat,
   brandName = "OpsRAG",
+  investigationEnabled = false,
 }: Props) {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageWeeks, setUsageWeeks] = useState<UsageWeek[] | null>(null);
@@ -368,10 +373,12 @@ export default function HomePage({
               <span className="home-qa-icon"><IconChat /></span>
               <span className="home-qa-body"><span className="home-qa-title">New chat</span><span className="home-qa-sub">Ask the assistant</span></span>
             </button>
-            <button className="home-qa" onClick={() => onNavigate("investigate")}>
-              <span className="home-qa-icon"><SearchGlyph /></span>
-              <span className="home-qa-body"><span className="home-qa-title">New investigation</span><span className="home-qa-sub">Multi-step trace</span></span>
-            </button>
+            {investigationEnabled && (
+              <button className="home-qa" onClick={() => onNavigate("investigate")}>
+                <span className="home-qa-icon"><SearchGlyph /></span>
+                <span className="home-qa-body"><span className="home-qa-title">New investigation</span><span className="home-qa-sub">Multi-step trace</span></span>
+              </button>
+            )}
             <button className="home-qa" onClick={() => onNavigate("sources")}>
               <span className="home-qa-icon"><IconPlus /></span>
               <span className="home-qa-body"><span className="home-qa-title">Add source</span><span className="home-qa-sub">Connect &amp; index</span></span>
@@ -383,7 +390,8 @@ export default function HomePage({
           </div>
         </section>
 
-        {/* ── Recent investigations (full width) ── */}
+        {/* ── Recent investigations (full width) -- gated on live telemetry ── */}
+        {investigationEnabled && (
         <section className="home-card home-card-full">
           <div className="home-card-head">
             <div className="home-card-title">
@@ -431,6 +439,7 @@ export default function HomePage({
             </ul>
           )}
         </section>
+        )}
       </div>
     </div>
   );
