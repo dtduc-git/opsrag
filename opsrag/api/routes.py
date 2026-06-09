@@ -538,8 +538,22 @@ async def integrations(request: Request) -> dict:
 
 
 @router.get("/usage/{session_id}")
-async def session_usage(session_id: str) -> dict:
-    """Token usage for a specific session."""
+async def session_usage(
+    session_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(require_scope(Scope.CHAT)),
+) -> dict:
+    """Token usage for a specific session.
+
+    IDOR fix: usage is keyed by the session id (the same namespace as
+    thread_id), so an authenticated caller may only read usage for a session
+    they own. Deny with 404 (not 403) so a non-owner can't probe whether a
+    session exists. Open / anonymous mode does not enforce (dev); legacy
+    anonymous-owned threads are grandfathered. Mirrors the /sessions read +
+    delete guards (get_session_owner + _deny_if_not_owner)."""
+    store = request.app.state.session_store
+    owner = await store.get_session_owner(session_id)
+    _deny_if_not_owner(current_user, owner)
     data = usage_tracker.get_session_usage(session_id)
     if data is None:
         return {"session_id": session_id, "usage": None}
@@ -557,6 +571,20 @@ async def query(
     cfg = getattr(request.app.state, "config", None)
     source_url_bases = SourceUrlBases.from_app_config(cfg) if cfg else None
     semantic_router = getattr(request.app.state, "semantic_router", None)
+
+    # Authorization (IDOR): continuing an EXISTING thread requires owning it.
+    # /query is a write+read path -- query_with_session(_events) loads the
+    # thread's prior checkpoints (history) and appends to them -- so an
+    # unguarded req.thread_id would let an authenticated caller read and
+    # inject into another user's conversation. Mirror the /sessions read +
+    # delete guards; one check covers BOTH the streaming and non-streaming
+    # branches below. New threads (no thread_id), open / anonymous mode, and
+    # legacy anonymous-owned threads are not gated (see _deny_if_not_owner).
+    # Placed BEFORE the contextvar set so a 404 can't leak the token.
+    if req.thread_id:
+        store = request.app.state.session_store
+        owner = await store.get_session_owner(req.thread_id)
+        _deny_if_not_owner(current_user, owner)
 
     # Bind the request's user_oid into a contextvar so the Vertex
     # `on_usage` hook (wired by the factory) can attribute the cost
@@ -1489,9 +1517,20 @@ async def investigation_feedback(
     investigation_id: str,
     req: InvestigationFeedbackRequest,
     request: Request,
+    current_user: CurrentUser = Depends(require_scope(Scope.INVESTIGATE)),
 ) -> InvestigationFeedbackResponse:
     """Attach up/down feedback (and
     optional free-text correction) to a past investigation cache entry.
+
+    Authz: gated on the ``investigate`` scope -- the same scope that gates
+    viewing investigations (routes_investigations.py). Without this gate a
+    chat-only member who cannot even see investigations could still post
+    feedback on them. The persisted submitter identity is bound to the
+    AUTHENTICATED principal (current_user.oid), never the client-supplied
+    req.user_id, so a caller cannot attribute feedback to another user
+    (mirrors /correction). Investigations are a shared team resource (no
+    per-user owner column), so the scope gate -- not per-row ownership -- is
+    the correct authorization boundary here.
 
     Dual-write: the Qdrant-side investigation cache gets the
     legacy flag (so cache-audit + thumbs-down purge keep working) AND we
@@ -1510,6 +1549,10 @@ async def investigation_feedback(
         raise HTTPException(status_code=400, detail="thumbs must be 'up' or 'down'")
 
     direction = 1 if req.thumbs == "up" else -1
+
+    # Bind submitter to the authenticated identity; fall back to the
+    # client-supplied value only in open / anonymous mode. See /correction.
+    submitter = current_user.oid or req.user_id
 
     cache = getattr(request.app.state, "investigation_cache", None)
     cache_ok = False
@@ -1530,7 +1573,7 @@ async def investigation_feedback(
                 investigation_id=investigation_id,
                 direction=direction,
                 thread_id=req.thread_id,
-                user_id=req.user_id,
+                user_id=submitter,
                 note=req.correction,
                 query_snippet=req.query_snippet,
                 answer_snippet=req.answer_snippet,
