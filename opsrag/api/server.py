@@ -20,6 +20,11 @@ from opsrag.agent.graph import (
 from opsrag.api.errors import register_error_handlers
 from opsrag.api.middleware import RateLimitMiddleware
 from opsrag.api.oidc_enforcement import OIDCAuthMiddleware
+from opsrag.api.rate_limit_backend import (
+    MemoryRateLimitBackend,
+    RedisRateLimitBackend,
+    make_redis_client,
+)
 from opsrag.api.routes import router
 from opsrag.api.routes_health import health_router
 from opsrag.auth import (
@@ -43,6 +48,40 @@ from opsrag.qa_cache import is_enabled as qa_cache_enabled
 from opsrag.sessions.postgres import PostgresSessionStore
 from opsrag.usage import tracker as usage_tracker
 from opsrag.usage_persistence import UsagePersistence
+
+
+def _build_rate_limit_backend(cfg: OpsRAGConfig):
+    """Construct the rate-limit backend from ``cfg.api``.
+
+    ``rate_limit_backend == "memory"`` (default) returns an in-process
+    backend and touches neither the ``redis`` extra nor the network.
+
+    ``rate_limit_backend == "redis"`` is the require-redis path: it builds a
+    ``redis.asyncio`` client from the env var named by ``cfg.api.redis_url_env``
+    and PINGs it, FAILING FAST with a clear error if the var is unset or the
+    server is unreachable. The shared backend is returned for both the request
+    limiter and the login lockout so replicas agree.
+    """
+    if cfg.api.rate_limit_backend != "redis":
+        return MemoryRateLimitBackend()
+
+    url = os.environ.get(cfg.api.redis_url_env, "").strip()
+    if not url:
+        raise RuntimeError(
+            "rate_limit_backend=redis requires a Redis URL; set the "
+            f"{cfg.api.redis_url_env} environment variable"
+        )
+    client = make_redis_client(url)
+    try:
+        asyncio.run(client.ping())
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "rate_limit_backend=redis: cannot reach Redis at "
+            f"${cfg.api.redis_url_env} ({exc}). Redis is required when the "
+            "redis rate-limit backend is selected."
+        ) from exc
+    _log.info("rate-limit: redis backend connected (%s)", cfg.api.redis_url_env)
+    return RedisRateLimitBackend(client=client)
 
 
 def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
@@ -203,10 +242,21 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                             roles=("admin",),
                         )
                         _log.info("auth: seeded admin user %s", admin_email)
+                # Share the rate-limit backend with login ONLY when it's the
+                # distributed (redis) one, so the lockout is enforced across
+                # replicas. On the default memory backend, leave backend=None
+                # so login keeps its own byte-identical in-process state.
+                _rl_backend = getattr(app.state, "rate_limit_backend", None)
+                _login_backend = (
+                    _rl_backend
+                    if isinstance(_rl_backend, RedisRateLimitBackend)
+                    else None
+                )
                 app.state.login_rate_limiter = LoginRateLimiter(
                     max_attempts=lc.login_max_attempts,
                     window_seconds=lc.login_window_seconds,
                     lockout_seconds=lc.login_lockout_seconds,
+                    backend=_login_backend,
                 )
                 _sso_blocks = (
                     ("google", cfg.auth.sso.google),
@@ -1490,10 +1540,17 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             _log.error("auth: SSO SessionMiddleware setup failed (%s)", exc)
     app.add_middleware(OIDCAuthMiddleware)
+    # Rate-limit backend (FLAG-GATED): "memory" (default) keeps in-process
+    # state; "redis" shares it across replicas and is REQUIRED -- this fails
+    # fast here if Redis is unreachable. The same backend is reused for the
+    # login lockout (built in the lifespan) so both honor one shared store.
+    rate_limit_backend = _build_rate_limit_backend(cfg)
+    app.state.rate_limit_backend = rate_limit_backend
     app.add_middleware(
         RateLimitMiddleware,
         requests_per_minute=cfg.api.rate_limit_rpm,
         enabled=cfg.api.rate_limit_enabled,
+        backend=rate_limit_backend,
     )
 
     # Health/readiness first so the allowlist paths are always present.

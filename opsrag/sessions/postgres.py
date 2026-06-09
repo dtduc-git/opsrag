@@ -113,6 +113,24 @@ class PostgresSessionStore:
                 )
         return True
 
+    async def get_session_owner(self, thread_id: str) -> str | None:
+        """Return the recorded owner (checkpoint-metadata ``user_id``) for a
+        thread, or None if the thread has no checkpoints. Mirrors how
+        ``list_sessions`` reads ``cfg.get("user_id")`` -- the owner is the
+        ``user_id`` persisted in the checkpoint's ``configurable`` block."""
+        if self._saver is None:
+            return None
+        config = {"configurable": {"thread_id": thread_id}}
+        async for cp_tuple in self._saver.alist(config):
+            cfg = cp_tuple.config.get("configurable", {}) or {}
+            owner = cfg.get("user_id")
+            if owner is None:
+                # Newer LangGraph keeps user-defined configurable keys in
+                # metadata, not in the rehydrated config -- check both.
+                owner = (cp_tuple.metadata or {}).get("user_id")
+            return owner
+        return None
+
     async def get_session_metadata(self, thread_id: str) -> dict | None:
         if self._saver is None:
             return None

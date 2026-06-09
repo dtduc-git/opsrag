@@ -60,6 +60,45 @@ _log = logging.getLogger("opsrag.routes")
 router = APIRouter()
 
 
+def _owner_id_for(current_user: "CurrentUser", req_user_id: str | None) -> str:
+    """Resolve the OWNER id to persist on a session's checkpoints.
+
+    Security: the persisted owner MUST be the authenticated identity, never
+    the client-supplied ``req.user_id`` (which is spoofable). When the user
+    is authenticated and carries an oid, bind the owner to it. In open /
+    anonymous mode we fall back to the client value (or "anonymous") to
+    preserve zero-config dev behavior. ``req.user_id`` may still feed
+    memory/personalization, but the OWNER binding uses the verified id.
+    """
+    if not current_user.is_anonymous and current_user.oid:
+        return current_user.oid
+    return req_user_id or "anonymous"
+
+
+def _is_real_owner(owner: str | None) -> bool:
+    """True iff ``owner`` is a real, lockable identity (not a legacy /
+    pre-auth placeholder). MIGRATION/grandfather: threads whose owner is
+    empty or "anonymous" predate owner binding and stay accessible -- we
+    cannot retroactively assign them an owner, so only threads with a real
+    authenticated owner are guarded."""
+    return bool(owner) and owner != "anonymous"
+
+
+def _deny_if_not_owner(current_user: "CurrentUser", owner: str | None) -> None:
+    """Enforce per-session ownership for a single-thread read/delete.
+
+    Raises 404 (NOT 403 -- avoids an existence oracle) when the caller is
+    authenticated AND the thread has a real owner that isn't them. Open /
+    anonymous mode does not enforce (preserves dev behavior); legacy
+    anonymous-owned threads (see _is_real_owner) stay accessible.
+    """
+    if current_user.is_anonymous or not current_user.oid:
+        return
+    # Grandfather: only real authenticated owners are locked down.
+    if _is_real_owner(owner) and owner != current_user.oid:
+        raise HTTPException(status_code=404, detail="session not found")
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=__version__)
@@ -525,13 +564,17 @@ async def query(
     # Anonymous / tracking-disabled requests set None, which the
     # persistence layer treats as "leave the column NULL".
     token = current_user_oid_var.set(current_user.oid)
+    # Owner binding: persist the AUTHENTICATED identity as the session owner
+    # (never the spoofable client-supplied req.user_id). Falls back to the
+    # client value / "anonymous" in open mode. See _owner_id_for.
+    owner_id = _owner_id_for(current_user, req.user_id)
     try:
         if req.stream:
             providers = request.app.state.providers
             qa_cache = getattr(request.app.state, "qa_cache", None)
             investigation_cache = getattr(request.app.state, "investigation_cache", None)
             return StreamingResponse(
-                _stream_query(graph, req, providers, qa_cache, investigation_cache, source_url_bases, semantic_router, current_user.oid, current_user.email, current_user.name),
+                _stream_query(graph, req, providers, qa_cache, investigation_cache, source_url_bases, semantic_router, current_user.oid, current_user.email, current_user.name, owner_id),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -544,7 +587,7 @@ async def query(
             result = await query_with_session(
                 graph,
                 query=req.query,
-                user_id=req.user_id,
+                user_id=owner_id,
                 thread_id=req.thread_id,
                 embedder=providers.embedder,
                 qa_cache=qa_cache,
@@ -830,7 +873,7 @@ def _extract_chart_components(tool_message_history: list[dict]) -> list[dict]:
     return components
 
 
-async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investigation_cache=None, source_url_bases: SourceUrlBases | None = None, semantic_router=None, user_oid: str | None = None, user_email: str | None = None, user_name: str | None = None):
+async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investigation_cache=None, source_url_bases: SourceUrlBases | None = None, semantic_router=None, user_oid: str | None = None, user_email: str | None = None, user_name: str | None = None, owner_id: str | None = None):
     """SSE generator. Emits node-level progress events from
     LangGraph's `astream_events` plus chunked answer for progressive
     rendering. Event taxonomy::
@@ -860,7 +903,10 @@ async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investiga
         async for ev in query_with_session_events(
             graph,
             query=req.query,
-            user_id=req.user_id,
+            # Owner binding: prefer the authenticated owner_id computed in the
+            # handler over the spoofable req.user_id (None only on legacy call
+            # paths that don't pass it). See _owner_id_for.
+            user_id=owner_id if owner_id is not None else req.user_id,
             thread_id=req.thread_id,
             embedder=providers.embedder,
             qa_cache=qa_cache,
@@ -1292,8 +1338,17 @@ async def _reaugment_docs(
 
 
 @router.get("/sessions/{user_id}", response_model=SessionListResponse)
-async def list_sessions(user_id: str, request: Request) -> SessionListResponse:
+async def list_sessions(
+    user_id: str, request: Request,
+    current_user: CurrentUser = Depends(get_current_user_dep),
+) -> SessionListResponse:
     store = request.app.state.session_store
+    # IDOR fix: an authenticated caller may only list THEIR OWN sessions --
+    # override the path user_id with the verified oid so a spoofed/other id
+    # in the URL can't enumerate another user's threads. Open / anonymous
+    # mode keeps the path-supplied id (preserves zero-config dev behavior).
+    if not current_user.is_anonymous and current_user.oid:
+        user_id = current_user.oid
     sessions = await store.list_sessions(user_id)
     return SessionListResponse(
         sessions=[SessionSummary(**s) for s in sessions]
@@ -1303,14 +1358,16 @@ async def list_sessions(user_id: str, request: Request) -> SessionListResponse:
 @router.delete("/sessions/{thread_id}")
 async def delete_session(
     thread_id: str, request: Request,
-    _user: CurrentUser = Depends(require_scope(Scope.CHAT)),
+    current_user: CurrentUser = Depends(require_scope(Scope.CHAT)),
 ) -> dict:
-    """Delete a chat session. Requires authentication (``chat`` scope); was
-    previously gated only by the unregistered ADMIN_ROUTES, i.e. open at
-    runtime. NOTE: there is still no per-session OWNERSHIP check -- any
-    authenticated user can delete any thread_id. Closing that needs the
-    pending authz work (bind sessions to current_user.oid)."""
+    """Delete a chat session. Requires authentication (``chat`` scope) and
+    per-session OWNERSHIP: an authenticated caller may only delete a thread
+    they own. We deny with 404 (not 403) so a non-owner can't probe whether
+    a thread_id exists. Open / anonymous mode does not enforce (dev). Legacy
+    anonymous-owned threads are grandfathered (still deletable)."""
     store = request.app.state.session_store
+    owner = await store.get_session_owner(thread_id)
+    _deny_if_not_owner(current_user, owner)
     deleted = await store.delete_session(thread_id)
     return {"thread_id": thread_id, "deleted": deleted}
 
@@ -1872,10 +1929,20 @@ async def cache_purge(
 
 
 @router.get("/sessions/{thread_id}/messages")
-async def session_messages(thread_id: str, request: Request) -> dict:
+async def session_messages(
+    thread_id: str, request: Request,
+    current_user: CurrentUser = Depends(get_current_user_dep),
+) -> dict:
     """Replay the message history of a thread by walking its LangGraph
-    checkpoints. Returns chronological [{role, content, ...}] pairs."""
+    checkpoints. Returns chronological [{role, content, ...}] pairs.
+
+    IDOR fix: an authenticated caller may only read a thread they own; we
+    deny with 404 (not 403) so a non-owner can't probe thread existence.
+    Open / anonymous mode does not enforce; legacy anonymous-owned threads
+    are grandfathered (still readable)."""
     store = request.app.state.session_store
+    owner = await store.get_session_owner(thread_id)
+    _deny_if_not_owner(current_user, owner)
     messages = await store.get_messages(thread_id)
     return {"thread_id": thread_id, "messages": messages}
 
