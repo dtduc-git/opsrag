@@ -458,6 +458,7 @@ export default function App({ me, reloadMe }: AppProps) {
         onNewInvestigation={() => { setActiveInvestigation(null); setPage("investigate"); }}
         me={me}
         scopes={me.scopes}
+        investigationEnabled={uiConfig?.investigation_enabled ?? false}
         onSignOut={handleSignOut}
       />
 
@@ -467,6 +468,7 @@ export default function App({ me, reloadMe }: AppProps) {
             me={me}
             sessions={sessions}
             brandName={uiConfig?.brand_name ?? "OpsRAG"}
+            investigationEnabled={uiConfig?.investigation_enabled ?? false}
             onNavigate={(p) => setPage(p as Page)}
             onNewChat={handleNewConversation}
             onOpenChat={async (id) => {

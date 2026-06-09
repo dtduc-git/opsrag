@@ -87,6 +87,11 @@ export interface UIConfig {
   rootly_web_url: string;
   gitlab_base_url: string;
   model_name?: string | null;
+  // Config-driven feature gate: true only when the deployment enabled a
+  // live-telemetry MCP integration (datadog / prometheus / k8s / ...).
+  // The Investigate tab is hidden when false. Optional for backward compat
+  // with older backends that don't return it (treated as false).
+  investigation_enabled?: boolean;
 }
 
 export async function fetchUIConfig(): Promise<UIConfig> {

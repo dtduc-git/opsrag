@@ -139,6 +139,12 @@ class UIConfigResponse(BaseModel):
     slack_workspace_url: str | None = None
     rootly_web_url: str | None = None
     gitlab_base_url: str | None = None
+    # Feature gate (config-driven, NOT hardcoded): the Investigate tab is
+    # only meaningful when the operator enabled a live-telemetry MCP
+    # integration (datadog / prometheus / kubernetes / ...). The UI hides
+    # the tab when this is False. Defaults False so a vendor-neutral
+    # deployment with no telemetry enabled never shows it.
+    investigation_enabled: bool = False
 
 
 # Investigation feedback API

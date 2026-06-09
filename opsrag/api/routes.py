@@ -50,6 +50,7 @@ from opsrag.auth import (
     current_user_oid_var,
     get_current_user_dep,
 )
+from opsrag.api.investigation_routes import investigation_live_telemetry_enabled
 from opsrag.auth.scopes import Scope, require_scope
 from opsrag.indexing_tracker import indexing_tracker
 from opsrag.usage import tracker as usage_tracker
@@ -87,6 +88,9 @@ async def ui_config(request: Request) -> UIConfigResponse:
         # Show the strongest reasoning model (pro/escalation) when set, else
         # the default llm -- so the footer reflects what answers complex queries.
         model_name=(cfg.agent.pro_model or cfg.llm.model),
+        # Config-driven feature gate: only surface the Investigate tab when a
+        # live-telemetry MCP integration is enabled (the operator's pick).
+        investigation_enabled=investigation_live_telemetry_enabled(cfg),
     )
 
 
