@@ -87,6 +87,10 @@ bedrock = ["boto3>=1.35"]
 litellm = ["litellm>=1.50"]
 pgvector = ["asyncpg>=0.30"]
 cohere = ["cohere>=5.13"]
+# Distributed rate limiting (api.rate_limit_backend="redis"): shares the
+# request-rate window + login lockout across replicas via redis.asyncio.
+# Optional — the default "memory" backend needs none of it.
+redis = ["redis>=5"]
 # Mem0 per-service operational memory (provider="mem0"). Reuses the project's
 # existing Qdrant + configured LLM/embedder; no separate datastore.
 mem0 = ["mem0ai>=0.1"]

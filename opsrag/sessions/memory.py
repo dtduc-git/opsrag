@@ -71,6 +71,19 @@ class InMemorySessionStore:
             return True
         return False
 
+    async def get_session_owner(self, thread_id: str) -> str | None:
+        """Return the recorded owner (checkpoint-metadata ``user_id``) for a
+        thread, or None if the thread has no checkpoints. Mirrors how
+        ``list_sessions`` reads ``cfg.get("user_id")``."""
+        config = {"configurable": {"thread_id": thread_id}}
+        for cp_tuple in self._saver.list(config):
+            cfg = cp_tuple.config.get("configurable", {}) or {}
+            owner = cfg.get("user_id")
+            if owner is None:
+                owner = (cp_tuple.metadata or {}).get("user_id")
+            return owner
+        return None
+
     async def get_session_metadata(self, thread_id: str) -> dict | None:
         cp = self._saver.get({"configurable": {"thread_id": thread_id}})
         if cp is None:

@@ -193,6 +193,14 @@ class APIConfig(BaseModel):
     api_keys_env: str = "OPSRAG_API_KEYS"
     rate_limit_rpm: int = 60
     rate_limit_enabled: bool = True
+    # Where rate-limit state lives. "memory" (default) keeps the current
+    # in-process behavior -- correct for a single replica but loses state
+    # across replicas. "redis" shares state across replicas via a Redis
+    # backend (the `redis` extra), in which case Redis is REQUIRED: the API
+    # fails fast at startup if it can't reach the server named by
+    # `redis_url_env`.
+    rate_limit_backend: Literal["memory", "redis"] = "memory"
+    redis_url_env: str = "OPSRAG_REDIS_URL"
 
 
 class AgentConfig(BaseModel):

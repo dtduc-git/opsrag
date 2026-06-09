@@ -79,14 +79,21 @@ class LoginRateLimiter:
     """Per-key (email/IP) failed-login throttle with temporary lockout.
 
     After ``max_attempts`` failures within ``window_seconds`` the key is
-    locked for ``lockout_seconds``. A success resets the counter. This is
-    in-process (per replica) -- sufficient to blunt online password
-    guessing; a distributed limiter is a future hardening.
+    locked for ``lockout_seconds``. A success resets the counter.
+
+    State lives either in-process (the default -- per replica, sufficient to
+    blunt online password guessing) or in a shared
+    :class:`opsrag.api.rate_limit_backend.RateLimitBackend` (e.g. Redis) so
+    the lockout is enforced across replicas. The synchronous methods below
+    are the in-process fast path and stay behaviorally identical when no
+    ``backend`` is set; the ``*_async`` wrappers are what the request
+    handler calls and route to the backend when one is configured.
     """
 
     max_attempts: int = 5
     window_seconds: float = 300.0
     lockout_seconds: float = 900.0
+    backend: object | None = None  # opsrag.api.rate_limit_backend.RateLimitBackend
     _state: dict[str, _Attempts] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -121,6 +128,33 @@ class LoginRateLimiter:
     def record_success(self, key: str) -> None:
         with self._lock:
             self._state.pop(key, None)
+
+    # -- async surface used by the handler (backend-aware) ------------------
+    async def is_locked_async(self, key: str) -> bool:
+        if self.backend is not None:
+            return await self.backend.login_locked(key)
+        return self.is_locked(key)
+
+    async def retry_after_async(self, key: str) -> int:
+        if self.backend is not None:
+            return await self.backend.login_retry_after(key)
+        return self.retry_after(key)
+
+    async def record_failure_async(self, key: str) -> bool:
+        if self.backend is not None:
+            return await self.backend.record_login_failure(
+                key,
+                max_attempts=self.max_attempts,
+                window_seconds=self.window_seconds,
+                lockout_seconds=self.lockout_seconds,
+            )
+        return self.record_failure(key)
+
+    async def record_success_async(self, key: str) -> None:
+        if self.backend is not None:
+            await self.backend.record_login_success(key)
+            return
+        self.record_success(key)
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +248,12 @@ async def password_login(
     limiter: LoginRateLimiter = _require_state(request, "login_rate_limiter")
 
     key = f"{email.strip().lower()}|{_client_ip(request)}"
-    if limiter.is_locked(key):
+    if await limiter.is_locked_async(key):
+        retry = await limiter.retry_after_async(key)
         raise HTTPException(
             status_code=429,
-            detail={"error": "locked_out", "retry_after": limiter.retry_after(key)},
-            headers={"Retry-After": str(limiter.retry_after(key))},
+            detail={"error": "locked_out", "retry_after": retry},
+            headers={"Retry-After": str(retry)},
         )
 
     user = await store.get_user_by_email(email)
@@ -228,14 +263,15 @@ async def password_login(
     ok, new_hash = verify_password(password, stored_hash)
 
     if not ok or user is None:
-        locked = limiter.record_failure(key)
+        locked = await limiter.record_failure_async(key)
         detail = {"error": "invalid_credentials"}
         if locked:
-            detail = {"error": "locked_out", "retry_after": limiter.retry_after(key)}
+            retry = await limiter.retry_after_async(key)
+            detail = {"error": "locked_out", "retry_after": retry}
             raise HTTPException(status_code=429, detail=detail)
         raise HTTPException(status_code=401, detail=detail)
 
-    limiter.record_success(key)
+    await limiter.record_success_async(key)
     if new_hash is not None:
         # Verify-and-upgrade: persist the stronger hash.
         try:

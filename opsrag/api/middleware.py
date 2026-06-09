@@ -1,12 +1,14 @@
 """Security and rate-limiting middleware for the OpsRAG API."""
 from __future__ import annotations
 
-import time
-from collections import defaultdict
-
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+
+from opsrag.api.rate_limit_backend import (
+    MemoryRateLimitBackend,
+    RateLimitBackend,
+)
 
 # Paths that always skip auth and rate limiting.
 _PUBLIC_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
@@ -88,8 +90,11 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Sliding-window rate limiter keyed by API key or client IP.
 
-    Uses an in-memory store -- suitable for single-process deployments.
-    For multi-replica setups, swap in a Redis-backed implementation.
+    State lives in a pluggable :class:`RateLimitBackend`. The default
+    :class:`MemoryRateLimitBackend` is in-process -- suitable for
+    single-process deployments. Pass a :class:`RedisRateLimitBackend` for
+    multi-replica setups so the window is shared across replicas. Behavior
+    on the memory backend is identical to the original in-line logic.
     """
 
     def __init__(
@@ -97,12 +102,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         app,
         requests_per_minute: int = 60,
         enabled: bool = True,
+        backend: RateLimitBackend | None = None,
     ):
         super().__init__(app)
         self._rpm = requests_per_minute
         self._window = 60.0  # seconds
         self._enabled = enabled
-        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self._backend: RateLimitBackend = backend or MemoryRateLimitBackend()
 
     def _get_key(self, request: Request) -> str:
         api_key = request.headers.get("X-API-Key")
@@ -122,25 +128,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         key = self._get_key(request)
-        now = time.monotonic()
-        window_start = now - self._window
+        decision = await self._backend.hit(key, self._rpm, self._window)
 
-        # Prune old entries
-        timestamps = self._buckets[key]
-        self._buckets[key] = [t for t in timestamps if t > window_start]
-
-        if len(self._buckets[key]) >= self._rpm:
-            retry_after = int(self._window - (now - self._buckets[key][0])) + 1
+        if not decision.allowed:
             return JSONResponse(
                 status_code=429,
                 content={"detail": "Rate limit exceeded"},
-                headers={"Retry-After": str(retry_after)},
+                headers={"Retry-After": str(decision.retry_after)},
             )
 
-        self._buckets[key].append(now)
-
         response = await call_next(request)
-        remaining = max(0, self._rpm - len(self._buckets[key]))
         response.headers["X-RateLimit-Limit"] = str(self._rpm)
-        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
         return response
