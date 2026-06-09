@@ -28,7 +28,6 @@ import pytest
 
 from opsrag.api import routes
 
-
 # --- Fakes ----------------------------------------------------------------
 
 
@@ -272,7 +271,7 @@ def test_owner_id_defaults_to_anonymous_when_open_and_no_req_user_id():
 # proof the guard fired first.
 
 
-def _query_request(req: "_FakeRequest"):
+def _query_request(req: _FakeRequest):
     # agent_graph is read at the top of the handler before the guard; stub it.
     req.app.state.agent_graph = object()
     return req
@@ -352,7 +351,7 @@ class _FakeFeedbackStore:
         return 1
 
 
-def _feedback_request(fb: _FakeFeedbackStore) -> "_FakeRequest":
+def _feedback_request(fb: _FakeFeedbackStore) -> _FakeRequest:
     req = _FakeRequest(_store())
     req.app.state.investigation_cache = None  # exercise the Postgres-only path
     req.app.state.feedback_store = fb

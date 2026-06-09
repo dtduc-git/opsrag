@@ -178,6 +178,7 @@ async def test_redis_login_lockout_via_setex():
 # Login limiter (auth layer) honors the redis backend.
 # ===========================================================================
 async def test_login_rate_limiter_locks_out_via_redis_backend():
+    pytest.importorskip("pwdlib")  # auth.login pulls pwdlib (login extra); skip if absent
     from opsrag.auth.login import LoginRateLimiter
 
     fake = FakeRedis()
@@ -201,6 +202,7 @@ async def test_login_rate_limiter_locks_out_via_redis_backend():
 async def test_login_rate_limiter_memory_path_unchanged_without_backend():
     """No backend -> async wrappers fall through to the in-process logic,
     keeping the existing (synchronous) behavior byte-identical."""
+    pytest.importorskip("pwdlib")  # auth.login pulls pwdlib (login extra); skip if absent
     from opsrag.auth.login import LoginRateLimiter
 
     rl = LoginRateLimiter(max_attempts=3)

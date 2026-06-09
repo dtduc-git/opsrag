@@ -39,7 +39,6 @@ from opsrag.environments import (
 )
 from opsrag.mcp import prometheus as prom
 
-
 # Old hardcoded values -- the refactor must NOT reproduce these unless the
 # target explicitly carries them. The custom targets below use deliberately
 # different namespace/service/port so any leak is caught.

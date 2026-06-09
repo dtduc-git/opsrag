@@ -17,7 +17,6 @@ from opsrag.interfaces.parser import DocType
 from opsrag.interfaces.reranker import RerankResult
 from opsrag.rerankers.mmr import jaccard_similarity, mmr_reorder
 
-
 # --- standalone MMR helper -------------------------------------------------
 
 

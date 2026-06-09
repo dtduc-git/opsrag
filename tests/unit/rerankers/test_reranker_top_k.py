@@ -119,6 +119,7 @@ class _StubCrossEncoder:
 @pytest.mark.asyncio
 async def test_fastembed_honors_caller_top_k_returns_all(monkeypatch):
     """With top_k == len(results), FastEmbed must return every candidate."""
+    pytest.importorskip("fastembed")  # optional extra; skip when absent (CI unit job)
     import opsrag.rerankers.fastembed_reranker as fe
 
     monkeypatch.setattr(fe, "TextCrossEncoder", _StubCrossEncoder)
@@ -140,6 +141,7 @@ async def test_fastembed_honors_caller_top_k_returns_all(monkeypatch):
 @pytest.mark.asyncio
 async def test_fastembed_small_top_k_still_caps(monkeypatch):
     """A small caller top_k must still cap FastEmbed's output."""
+    pytest.importorskip("fastembed")  # optional extra; skip when absent (CI unit job)
     import opsrag.rerankers.fastembed_reranker as fe
 
     monkeypatch.setattr(fe, "TextCrossEncoder", _StubCrossEncoder)

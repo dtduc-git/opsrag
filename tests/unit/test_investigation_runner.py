@@ -18,7 +18,6 @@ from opsrag.investigations.runner import (
     _RunBudget,
 )
 
-
 # --- budget breakers ------------------------------------------------
 
 
