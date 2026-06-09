@@ -1,12 +1,21 @@
 """Kubernetes MCP-style tools for OpsRAG (Sub-sprint 4).
 
-Read-only async tools over the Kubernetes API. Multi-cluster: each
-tool accepts a `cluster` arg matching a kubectl context name. The set
-of clusters and the env->cluster mapping come from the runtime
-DeploymentContext (`kubernetes.clusters`). The default cluster is
-`OPSRAG_K8S_DEFAULT_CLUSTER` env var, else derived from the context;
-when no cluster is configured the caller must pass `cluster`
-explicitly.
+Read-only async tools over the Kubernetes API. Multi-environment: each
+tool accepts an `env` arg (back-compat alias `cluster`) naming an entry
+in the unified `environments:` registry. The set of environments and the
+default come from that registry (`opsrag.environments`): the resolver
+returns an `EnvironmentTarget` whose `.kubernetes` (a `K8sTarget`) says
+how to reach that env's API server -- `mode=gke` (Workload Identity +
+GCP Container API) or `mode=kubeconfig` (a KUBECONFIG context / current
+context / in-cluster ServiceAccount). When no environment is configured
+the caller must pass `env`/`cluster` explicitly, else the tool returns a
+clear "configure the environments: block" error. `OPSRAG_K8S_DEFAULT_CLUSTER`
+still overrides the default env name for back-compat.
+
+This module also exposes a SHARED helper -- `cluster_api_access(env) ->
+{host, token, verify}` -- that the prometheus + elasticsearch MCPs reuse
+to reach an env's API server (service-proxy / port-forward) without
+depending on kubernetes internals.
 
 ## Read-only enforcement
 
@@ -76,43 +85,46 @@ _LOG_TRUNCATE_CHARS = 32000  # generator gets the trace tail; bound it
 
 
 def _known_clusters() -> list[str]:
-    """Cluster context names the deployment exposes, read from the
-    runtime DeploymentContext (`kubernetes.clusters` values). Empty list
-    when no clusters are configured -- callers must then supply an
-    explicit `cluster` argument."""
-    from opsrag.agent.prompt_render import active_deployment
-    clusters = active_deployment().kubernetes.clusters or {}
-    # Preserve insertion order; de-dup while keeping first occurrence.
-    seen: list[str] = []
-    for name in clusters.values():
-        if name and name not in seen:
-            seen.append(name)
-    return seen
+    """Environment names exposed by the unified `environments:` registry.
+    Empty list when nothing is configured -- callers must then supply an
+    explicit `env` (or back-compat `cluster`) argument."""
+    from opsrag.environments import available_environments
+    return available_environments()
 
 
 def _default_cluster() -> str:
-    """Resolve the default cluster context name. Precedence:
-    OPSRAG_K8S_DEFAULT_CLUSTER env var, then the first cluster in the
-    DeploymentContext mapping. Returns "" when nothing is configured;
-    handlers turn an empty value into a clear "cluster required" error
-    rather than falling back to a baked-in org default."""
+    """Resolve the default environment name. Precedence:
+    OPSRAG_K8S_DEFAULT_CLUSTER env var, then the registry's default
+    environment. Returns "" when nothing is configured; handlers turn an
+    empty value into a clear "env required" error rather than falling back
+    to a baked-in org default."""
     env = os.environ.get(DEFAULT_CLUSTER_ENV)
     if env:
         return env
-    known = _known_clusters()
-    return known[0] if known else ""
+    from opsrag.environments import default_environment
+    return default_environment() or ""
 
 
 def _resolve_cluster(args: dict) -> str:
-    """Pick the cluster for a handler call: explicit `cluster` arg wins,
-    otherwise the configured default. Raises a clear error when neither
-    is available so behavior degrades gracefully on an empty context."""
-    cluster = args.get("cluster") or _default_cluster()
+    """Pick the environment for a handler call: explicit `env` arg wins,
+    then the back-compat `cluster` alias, then the configured default.
+    Raises a clear error when none is available so behavior degrades
+    gracefully on an empty registry.
+
+    The returned string is the ENV NAME -- it keys the per-env API-client
+    cache and the resolver (`resolve_environment(env)`); handlers echo it
+    back as ``result["cluster"]`` for caller continuity.
+
+    Precedence: explicit `env` arg > back-compat `cluster` alias >
+    `_default_cluster()` (OPSRAG_K8S_DEFAULT_CLUSTER env, then the
+    registry's default environment)."""
+    cluster = args.get("env") or args.get("cluster") or _default_cluster()
     if not cluster:
         raise RuntimeError(
-            "k8s mcp: no cluster specified and none configured. Pass a "
-            "`cluster` argument, or set kubernetes.clusters in the "
-            "deployment context (or OPSRAG_K8S_DEFAULT_CLUSTER env)."
+            "k8s mcp: no environment specified and none configured. Pass an "
+            "`env` argument (back-compat alias `cluster`), or define the "
+            "`environments:` block in config (legacy k8s.clusters / "
+            "OPSRAG_K8S_DEFAULT_CLUSTER env also accepted)."
         )
     return cluster
 
@@ -150,6 +162,10 @@ class _Connection:
 
 
 _clients: dict[str, _Connection] = {}
+# Per-env API-access bundle cache: { env: {host, token, verify} }. Built by
+# `cluster_api_access(env)` and reused by prometheus/elasticsearch. Cleared
+# on 401 (refresh_adc_token) or via `invalidate_env_api_cache`.
+_api_access: dict[str, dict] = {}
 # Cluster coordinates registry: { name: {project, location, name} }.
 # Populated from OPSRAG_K8S_CLUSTERS env (JSON) or config.yaml's
 # `k8s.clusters` block. If empty, falls back to legacy kubeconfig mode.
@@ -192,37 +208,48 @@ def _load_cluster_coords_from_env() -> dict[str, dict]:
 
 
 def register_clusters(clusters: dict[str, dict]) -> None:
-    """Programmatically register the cluster -> (project, location, name)
-    mapping. Called from config-loading code at startup so the K8s MCP
-    knows which GCP clusters to authenticate against. Each value must
-    contain `project`, `location`, `name` keys (GCP cluster coords).
-
-    Compatible with the airflow-style Workload Identity pattern:
-    auth via ADC + GCP Container API -> no kubeconfig file needed.
+    """BACK-COMPAT SHIM. Historically this registered the cluster ->
+    (project, location, name) GKE-coords mapping consumed directly by the
+    K8s MCP. The MCP is now ENV-DRIVEN through the unified `environments:`
+    registry (`opsrag.environments`): `register_clusters` no longer feeds
+    the resolution path -- `bind_environments(cfg)` does (it synthesizes a
+    GKE env per `k8s.clusters` entry when no explicit `environments:` block
+    is set). We keep populating the legacy `_cluster_coords` dict so any
+    old caller / test importing this symbol still works; it is otherwise
+    unused by the env-driven `cluster_api_access` / `_get_connection`.
     """
     global _cluster_coords, _cluster_coords_loaded
     _cluster_coords = {k: dict(v) for k, v in (clusters or {}).items()}
     _cluster_coords_loaded = True
-    _log.info("k8s mcp: registered %d cluster(s): %s",
-              len(_cluster_coords), sorted(_cluster_coords))
+    _log.info(
+        "k8s mcp: register_clusters() back-compat shim recorded %d cluster(s) "
+        "%s (env resolution now flows through the environments: registry)",
+        len(_cluster_coords), sorted(_cluster_coords),
+    )
+
+
+def invalidate_env_api_cache(env: str | None = None) -> None:
+    """Drop the cached API-access bundle(s) so the next call rebuilds with
+    a fresh endpoint/CA/token. `env=None` clears all. Used by the 401
+    auto-refresh path (prometheus/es reuse `cluster_api_access`)."""
+    if env is None:
+        _api_access.clear()
+        _clients.clear()
+        return
+    _api_access.pop(env, None)
+    _clients.pop(env, None)
 
 
 async def refresh_adc_token() -> None:
-    """Force a re-mint of the ADC token. Called on 401 from any cluster's
-    API. Clears the per-cluster API client cache so the next call rebuilds
-    with the fresh token."""
-    global _adc_creds, _clients, _kubeconfig_loaded
-    if _cluster_coords:
-        _adc_creds = None  # forces re-mint on next _get_adc_token()
-        _clients.clear()
-        _log.info("k8s mcp: ADC creds reset (gke mode)")
-        return
-    # Legacy local-dev: patch the kubeconfig file with a fresh ADC token.
-    src_path = "/root/.kube/config"
-    await _materialize_kubeconfig_with_adc_token(src_path)
+    """Force a re-mint of the ADC token. Called on 401 from any env's API.
+    Clears the per-env API-access + client caches so the next call rebuilds
+    with a fresh token. Env-agnostic: works whether the bound envs are GKE
+    (re-mint ADC) or kubeconfig (re-derive token from the context)."""
+    global _adc_creds
+    _adc_creds = None  # forces re-mint on next _get_adc_token()
+    _api_access.clear()
     _clients.clear()
-    _kubeconfig_loaded = True
-    _log.info("k8s mcp: ADC token refreshed (kubeconfig mode)")
+    _log.info("k8s mcp: ADC creds reset + api-access cache cleared")
 
 
 async def _get_adc_token() -> str:
@@ -364,27 +391,114 @@ async def _materialize_kubeconfig_with_adc_token(src_path: str) -> None:
 # follow-up TODO.
 
 
+def _materialize_ca_cert(key: str, ca_cert_b64: str) -> str:
+    """Write a base64 CA cert to /tmp/opsrag-ca-<key>.crt and return the
+    path. The K8s client + httpx both want ssl_ca_cert as a filesystem
+    PATH, not bytes; we cache one file per key (env/cluster) for the
+    process lifetime. Shared by the K8s API client builder and
+    `cluster_api_access` (prometheus/es reuse the exact same CA file)."""
+    global _ca_cert_dir
+    import base64
+    import tempfile
+    if _ca_cert_dir is None:
+        _ca_cert_dir = tempfile.mkdtemp(prefix="opsrag-ca-")
+    ca_path = os.path.join(_ca_cert_dir, f"{key}.crt")
+    if not os.path.exists(ca_path):
+        with open(ca_path, "wb") as f:
+            f.write(base64.b64decode(ca_cert_b64))
+    return ca_path
+
+
+async def cluster_api_access(env: str | None) -> dict:
+    """SHARED helper -- return ``{host, token, verify}`` for reaching an
+    environment's Kubernetes API server. Prometheus (k8s_proxy reach) and
+    Elasticsearch (port_forward / proxy reach) call this so they depend on
+    this foundation, not on K8s internals.
+
+    - ``host``   : ``https://<endpoint>`` (no trailing slash).
+    - ``token``  : bearer token (may be "" for cert-only kubeconfigs).
+    - ``verify`` : a CA-file PATH (str) for httpx ``verify=``, or False to
+      disable verification (cert-less kubeconfig host).
+
+    Resolves ``resolve_environment(env).kubernetes`` (a ``K8sTarget``) and
+    branches on ``mode``:
+      - ``gke``        -> ADC + GCP Container API endpoint/CA + ADC token
+                          (same as the old prometheus ``_get_proxy_config``).
+      - ``kubeconfig`` -> ``new_client_from_config(context=target.context)``
+                          (None -> current-context / in-cluster), then read
+                          host/token/ssl_ca_cert off the Configuration.
+
+    Cached by ``env``; the cache is invalidated on 401 via
+    ``refresh_adc_token`` / ``invalidate_env_api_cache``. Raises
+    ``EnvironmentResolutionError`` for an unknown/empty env and a clear
+    ``RuntimeError`` when the resolved env has no kubernetes target."""
+    from opsrag.environments import resolve_environment
+
+    env = _resolve_cluster({"env": env}) if env is None else env
+    if env in _api_access:
+        return _api_access[env]
+
+    _ensure_imports()
+    target = resolve_environment(env).kubernetes
+    if target is None:
+        raise RuntimeError(
+            f"k8s mcp: environment {env!r} has no `kubernetes` target "
+            f"configured -- cannot reach its API server."
+        )
+
+    if target.mode == "gke":
+        if not (target.project and target.location and target.name):
+            raise RuntimeError(
+                f"k8s mcp: env {env!r} kubernetes mode=gke requires "
+                f"project/location/name."
+            )
+        info = await _gke_get_cluster(
+            project=target.project, location=target.location, name=target.name,
+        )
+        ca_path = _materialize_ca_cert(env, info["ca_cert_b64"])
+        token = await _get_adc_token()
+        out = {
+            "host": f"https://{info['endpoint']}".rstrip("/"),
+            "token": token,
+            "verify": ca_path,
+        }
+    else:
+        # kubeconfig mode: build a client for the target context (None ->
+        # current-context / in-cluster), then extract host/token/CA off the
+        # parsed Configuration. Mirrors the old prometheus kubeconfig branch.
+        api_client = await k8s_config.new_client_from_config(
+            config_file=(os.environ.get("KUBECONFIG") or None),
+            context=(target.context or None),
+        )
+        cfg = api_client.configuration
+        token = ""
+        api_key = cfg.api_key or {}
+        auth_val = api_key.get("authorization") or api_key.get("BearerToken") or ""
+        if auth_val.startswith("Bearer "):
+            token = auth_val[len("Bearer "):]
+        elif auth_val:
+            token = auth_val
+        out = {
+            "host": (cfg.host or "").rstrip("/"),
+            "token": token,
+            "verify": cfg.ssl_ca_cert if cfg.ssl_ca_cert else False,
+        }
+        await api_client.close()
+
+    _api_access[env] = out
+    return out
+
+
 async def _build_api_client_from_cluster_info(
     cluster: str, cluster_info: dict,
 ) -> Any:
     """Build a kubernetes_asyncio ApiClient from a GKE-API-fetched
     {endpoint, ca_cert_b64} pair + a freshly-minted ADC token.
 
-    The K8s client wants ssl_ca_cert as a filesystem PATH, not bytes,
-    so we materialize each cluster's CA cert into /tmp/opsrag-ca-<name>.crt
-    (one-time per cluster lifetime). The bearer token is set on the
-    Configuration directly.
+    The bearer token is set on the Configuration directly; the CA cert is
+    materialized to a per-env file (see `_materialize_ca_cert`).
     """
-    global _ca_cert_dir
-    import base64
-    import tempfile
-    if _ca_cert_dir is None:
-        _ca_cert_dir = tempfile.mkdtemp(prefix="opsrag-ca-")
-    ca_path = os.path.join(_ca_cert_dir, f"{cluster}.crt")
-    if not os.path.exists(ca_path):
-        with open(ca_path, "wb") as f:
-            f.write(base64.b64decode(cluster_info["ca_cert_b64"]))
-
+    ca_path = _materialize_ca_cert(cluster, cluster_info["ca_cert_b64"])
     token = await _get_adc_token()
     configuration = k8s_client.Configuration()
     configuration.host = f"https://{cluster_info['endpoint']}"
@@ -400,40 +514,57 @@ async def _build_api_client_from_cluster_info(
     return k8s_client.ApiClient(configuration=configuration)
 
 
-async def _get_connection(cluster: str) -> _Connection:
-    await _ensure_kubeconfig()
-    if cluster in _clients:
-        return _clients[cluster]
+async def _get_connection(env: str) -> _Connection:
+    """Build (or reuse) the kubernetes_asyncio client bundle for an
+    environment. ENV-DRIVEN: resolves ``resolve_environment(env).kubernetes``
+    (a ``K8sTarget``) and builds the client for BOTH modes:
+      - ``gke``        -> ADC + GCP Container API coords (project/location/name).
+      - ``kubeconfig`` -> ``new_client_from_config(context=target.context)``
+                          (None -> current-context / in-cluster SA).
+    Cached by env name. (`build_fake()` pre-seeds this cache so the offline
+    tests never reach the resolver.)"""
+    if env in _clients:
+        return _clients[env]
 
-    if _cluster_coords:
-        # GKE-API mode: ADC token + GCP Container API fetches the
-        # endpoint + CA cert for the requested cluster. Same flow in
-        # local dev (gcloud ADC) and pod (Workload Identity).
-        coords = _cluster_coords.get(cluster)
-        if not coords:
+    _ensure_imports()
+    from opsrag.environments import resolve_environment
+
+    target = resolve_environment(env).kubernetes
+    if target is None:
+        raise RuntimeError(
+            f"k8s mcp: environment {env!r} has no `kubernetes` target "
+            f"configured -- add a `kubernetes:` block under "
+            f"environments.targets.{env}."
+        )
+
+    if target.mode == "gke":
+        # GKE-API mode: ADC token + GCP Container API fetches the endpoint +
+        # CA cert. Same flow in local dev (gcloud ADC) and pod (Workload
+        # Identity).
+        if not (target.project and target.location and target.name):
             raise RuntimeError(
-                f"k8s mcp: cluster {cluster!r} not in registered coords. "
-                f"Known: {sorted(_cluster_coords)}. Add it to opsrag "
-                f"config.k8s.clusters or OPSRAG_K8S_CLUSTERS env."
+                f"k8s mcp: env {env!r} kubernetes mode=gke requires "
+                f"project/location/name."
             )
         cluster_info = await _gke_get_cluster(
-            project=coords["project"],
-            location=coords["location"],
-            name=coords["name"],
+            project=target.project,
+            location=target.location,
+            name=target.name,
         )
         api_client = await _build_api_client_from_cluster_info(
-            cluster=cluster, cluster_info=cluster_info,
+            cluster=env, cluster_info=cluster_info,
         )
-    elif _incluster_mode:
-        # In-cluster ServiceAccount: load_incluster_config() set the global
-        # default Configuration; a bare ApiClient uses it. Single cluster.
+    elif target.context is None and os.environ.get("KUBERNETES_SERVICE_HOST"):
+        # In-cluster ServiceAccount: kubeconfig mode with no explicit
+        # context, running inside a pod -> use the mounted SA config.
+        k8s_config.load_incluster_config()
         api_client = k8s_client.ApiClient()
     else:
-        # Standard kubeconfig: select the requested context (or the
-        # kubeconfig's current-context when no cluster/context given).
+        # Standard kubeconfig: select the target context (or the
+        # kubeconfig's current-context when context is None).
         cfg_path = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kube/config")
         api_client = await k8s_config.new_client_from_config(
-            config_file=cfg_path, context=(cluster or None),
+            config_file=cfg_path, context=(target.context or None),
         )
 
     conn = _Connection(
@@ -444,7 +575,7 @@ async def _get_connection(cluster: str) -> _Connection:
         rbac=k8s_client.RbacAuthorizationV1Api(api_client=api_client),
         custom=k8s_client.CustomObjectsApi(api_client=api_client),
     )
-    _clients[cluster] = conn
+    _clients[env] = conn
     return conn
 
 
@@ -1226,12 +1357,24 @@ async def _h_top_pod(_unused, args: dict) -> Any:
 # --- tool registry --------------------------------------------------
 
 
+_ENV_PROP = {
+    "type": "string",
+    "description": (
+        "Environment name from the unified `environments:` registry "
+        "(e.g. 'prod', 'staging'). Selects which env's Kubernetes API to "
+        "query. Defaults to the registry's default env (or "
+        "OPSRAG_K8S_DEFAULT_CLUSTER env). Required when no environment is "
+        "configured."
+    ),
+}
+
+# Back-compat alias: older callers/alerts pass `cluster`. Accepted as a
+# synonym for `env` (the handler reads `env` first, then `cluster`).
 _CLUSTER_PROP = {
     "type": "string",
     "description": (
-        "Kube-context name (from the deployment's configured clusters). "
-        "Defaults to OPSRAG_K8S_DEFAULT_CLUSTER env, else the first "
-        "configured cluster. Required when no clusters are configured."
+        "DEPRECATED alias for `env`. Environment name from the "
+        "`environments:` registry (kept for back-compat; prefer `env`)."
     ),
 }
 
@@ -1531,6 +1674,14 @@ KUBERNETES_TOOLS: list[MCPTool] = [
 ]
 
 
+# Expose the unified `env` arg on every tool alongside the back-compat
+# `cluster` alias (handlers read `env` first, then `cluster`). Done once
+# here so each tool schema stays a single `_CLUSTER_PROP`/`env` source.
+for _t in KUBERNETES_TOOLS:
+    _props = _t.input_schema.setdefault("properties", {})
+    _props.setdefault("env", _ENV_PROP)
+
+
 def get_tool(name: str) -> MCPTool:
     for t in KUBERNETES_TOOLS:
         if t.name == name:
@@ -1824,20 +1975,32 @@ def build_fake():
     context and module state.
     """
     _ensure_imports()  # need the real V1 models to build shape-faithful objects
-    from opsrag.agent.prompt_render import active_deployment, set_active_deployment
-    from opsrag.context import DeploymentContext, KubernetesContext
+    from opsrag.config import (
+        EnvironmentsConfig,
+        EnvironmentTarget,
+        K8sTarget,
+        OpsRAGConfig,
+    )
+    from opsrag.environments import bind_environments, reset_environments
     from opsrag.mcp._fake import FakeMCP
 
-    # (i) install a deployment context so `_resolve_cluster` finds a default.
-    prev_deployment = active_deployment()
-    set_active_deployment(
-        DeploymentContext(
-            kubernetes=KubernetesContext(clusters={_FAKE_ENV: _FAKE_CLUSTER}),
-        )
+    # (i) bind a one-env `environments:` registry so `_resolve_cluster`
+    # resolves the default env name -- the cache key + echoed `cluster`.
+    # The kubeconfig target is never reached: the per-env connection is
+    # pre-seeded below, so `_get_connection` short-circuits on the cache.
+    _cfg = OpsRAGConfig()
+    _cfg.environments = EnvironmentsConfig(
+        default=_FAKE_CLUSTER,
+        targets={
+            _FAKE_CLUSTER: EnvironmentTarget(
+                kubernetes=K8sTarget(mode="kubeconfig", context=_FAKE_CLUSTER),
+            ),
+        },
     )
+    bind_environments(_cfg)
 
-    # (ii) pre-seed the per-cluster connection + flip load flags so
-    # `_ensure_kubeconfig()` no-ops (no kubeconfig read, no network).
+    # (ii) pre-seed the per-env connection + flip load flags so the offline
+    # path never touches a kubeconfig / network.
     global _clients, _kubeconfig_loaded, _cluster_coords, _cluster_coords_loaded
     prev_clients = dict(_clients)
     prev_kubeconfig_loaded = _kubeconfig_loaded
@@ -1864,6 +2027,7 @@ def build_fake():
         _kubeconfig_loaded = prev_kubeconfig_loaded
         _cluster_coords = prev_cluster_coords
         _cluster_coords_loaded = prev_cluster_coords_loaded
-        set_active_deployment(prev_deployment)
+        _api_access.clear()
+        reset_environments()
 
     return FakeMCP(tools=list(KUBERNETES_TOOLS), client=None, teardown=_restore)

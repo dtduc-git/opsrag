@@ -1,16 +1,22 @@
 """Prometheus MCP-style tools for OpsRAG (Sub-sprint 4).
 
-Read-only PromQL access to every registered cluster's Prometheus.
-Reaches the in-cluster `monitoring-main-prometheus` (or `monitoring-istio-prometheus`)
-service via the Kubernetes API server's service-proxy:
+Read-only PromQL access to every configured environment's Prometheus.
+Each call resolves the env's `prometheus:` target from the unified
+`environments:` registry (`opsrag.environments`) -- service / namespace /
+port / reach mode are all config-driven (NOT hardcoded). Two reach modes:
 
-    https://<api-server>/api/v1/namespaces/monitoring/services/<svc>:9090/proxy/api/v1/query
+- `k8s_proxy` (default): reach the in-cluster Prometheus service via the
+  Kubernetes API server's service-proxy, using the shared
+  `kubernetes.cluster_api_access(env)` helper for host/token/CA:
 
-This means:
-- Same auth as K8s MCP (patched-kubeconfig with ADC token locally,
-  in-cluster service account in production)
-- Multi-cluster works automatically per kube-context
-- No port-forward, no separate Prometheus auth, no broker-network reachability concerns
+      https://<api-server>/api/v1/namespaces/<ns>/services/<svc>:<port>/proxy/api/v1/query
+
+  Same auth as the K8s MCP (ADC / in-cluster SA); multi-env works per
+  registry entry; no port-forward, no separate Prometheus auth.
+- `direct`: httpx GET the env's `prometheus.url` directly (optional bearer
+  from `prometheus.bearer_token_env`).
+
+The tool arg is unified to `env` (back-compat alias `cluster`).
 
 ## Tools (6 read-only)
 
@@ -66,142 +72,129 @@ def _resolve_relative_time(value: Any) -> Any:
     target = now + delta if sign == "+" else now - delta
     return str(int(target))
 
-from opsrag.mcp import kubernetes as _k8s
+from opsrag.config import PrometheusTarget
+from opsrag.environments import default_environment, resolve_environment
 from opsrag.mcp.gitlab import MCPTool
 from opsrag.mcp.kubernetes import (
-    _default_cluster,
-    _ensure_imports,
-    _ensure_kubeconfig,
+    cluster_api_access,
+    invalidate_env_api_cache,
     refresh_adc_token,
 )
 
 _log = logging.getLogger("opsrag.mcp.prometheus")
 
-# In-cluster Prometheus service. Two instances exist in every
-# cluster: `monitoring-main-prometheus` (app + infra metrics, default)
-# and `monitoring-istio-prometheus` (istio mesh metrics).
-DEFAULT_PROMETHEUS_SERVICE = "monitoring-main-prometheus"
-ISTIO_PROMETHEUS_SERVICE = "monitoring-istio-prometheus"
+# Module-level fallbacks ONLY. The live values come from the resolved
+# `PrometheusTarget` (config-driven, per-env). These constants are kept as
+# harmless last-resort defaults / documentation hints; nothing in the hot
+# path reads them when a target is present.
+DEFAULT_PROMETHEUS_SERVICE = "kube-prometheus-stack-prometheus"
+ISTIO_PROMETHEUS_SERVICE = "kube-prometheus-stack-istio-prometheus"
 PROMETHEUS_NAMESPACE = "monitoring"
 PROMETHEUS_PORT = 9090
 
-# Per-cluster client cache (we reuse kubernetes_asyncio's API client).
-_clients: dict[str, Any] = {}
 _RESULT_TRUNCATE_SERIES = 200  # cap the number of series in a response
 
 
 def _default_prometheus_cluster() -> str:
-    """Default cluster for Prometheus queries. Honors a Prometheus-specific
-    env override, else the shared K8s default (env or first configured
-    cluster). Returns "" when nothing is configured."""
-    return os.environ.get("OPSRAG_PROMETHEUS_DEFAULT_CLUSTER") or _default_cluster()
-
-
-def _resolve_prometheus_cluster(args: dict) -> str:
-    """Explicit `cluster` arg wins; else the configured default. Raises a
-    clear error when neither is available (empty deployment context)."""
-    cluster = args.get("cluster") or _default_prometheus_cluster()
-    if not cluster:
-        raise RuntimeError(
-            "prometheus mcp: no cluster specified and none configured. Pass "
-            "a `cluster` argument, or set kubernetes.clusters in the "
-            "deployment context (or OPSRAG_PROMETHEUS_DEFAULT_CLUSTER / "
-            "OPSRAG_K8S_DEFAULT_CLUSTER env)."
-        )
-    return cluster
-
-
-async def _get_proxy_config(cluster: str) -> dict:
-    """Returns {host, token, verify} for a cluster -- direct httpx GET
-    to the API server's service-proxy URL with bearer token. We bypass
-    kubernetes_asyncio's `connect_..._with_path` because the K8s API
-    server's proxy doesn't preserve query strings appended to the
-    service-proxy path; httpx with explicit `params=` works correctly.
-
-    Two auth paths mirror the K8s MCP:
-      - GKE-API mode (preferred): when clusters are registered via
-        config.k8s.clusters, use ADC + Container API -> endpoint/CA/token.
-      - Legacy kubeconfig mode (local dev fallback).
-    """
-    if cluster in _clients:
-        return _clients[cluster]
-    await _ensure_kubeconfig()
-    _ensure_imports()
-    from kubernetes_asyncio import config as k8s_config
-
-    if _k8s._cluster_coords:
-        coords = _k8s._cluster_coords.get(cluster)
-        if not coords:
-            raise RuntimeError(
-                f"prometheus mcp: cluster {cluster!r} not registered. "
-                f"Known: {sorted(_k8s._cluster_coords)}. Add to config.k8s.clusters."
-            )
-        info = await _k8s._gke_get_cluster(
-            project=coords["project"],
-            location=coords["location"],
-            name=coords["name"],
-        )
-        # Build the CA path the same way the K8s API client does so the
-        # cert is reused across clusters' lifetimes.
-        import base64
-        import tempfile
-        if _k8s._ca_cert_dir is None:
-            _k8s._ca_cert_dir = tempfile.mkdtemp(prefix="opsrag-ca-")
-        ca_path = os.path.join(_k8s._ca_cert_dir, f"{cluster}.crt")
-        if not os.path.exists(ca_path):
-            with open(ca_path, "wb") as f:
-                f.write(base64.b64decode(info["ca_cert_b64"]))
-        token = await _k8s._get_adc_token()
-        out = {
-            "host": f"https://{info['endpoint']}",
-            "token": token,
-            "verify": ca_path,
-        }
-        _clients[cluster] = out
-        return out
-
-    cfg_path = os.environ.get("KUBECONFIG") or "/root/.kube/config"
-    api_client = await k8s_config.new_client_from_config(
-        config_file=cfg_path, context=cluster,
+    """Default environment for Prometheus queries. Honors a Prometheus-specific
+    env override, else the shared registry default. Returns "" when nothing is
+    configured."""
+    return os.environ.get("OPSRAG_PROMETHEUS_DEFAULT_CLUSTER") or (
+        default_environment() or ""
     )
-    cfg = api_client.configuration
-    # Bearer token from the configuration's api_key dict.
-    token = ""
-    api_key = cfg.api_key or {}
-    auth_val = api_key.get("authorization") or api_key.get("BearerToken") or ""
-    if auth_val.startswith("Bearer "):
-        token = auth_val[len("Bearer "):]
-    elif auth_val:
-        token = auth_val
-    out = {
-        "host": cfg.host.rstrip("/"),
-        "token": token,
-        "verify": cfg.ssl_ca_cert if cfg.ssl_ca_cert else False,
-    }
-    await api_client.close()
-    _clients[cluster] = out
-    return out
+
+
+def _resolve_prometheus_env(args: dict) -> str:
+    """Pick the environment for a handler call: explicit `env` arg wins, then
+    the back-compat `cluster` alias, then the configured default. Raises a
+    clear error when none is available (empty registry)."""
+    env = args.get("env") or args.get("cluster") or _default_prometheus_cluster()
+    if not env:
+        raise RuntimeError(
+            "prometheus mcp: no environment specified and none configured. Pass "
+            "an `env` argument (back-compat alias `cluster`), or define the "
+            "`environments:` block in config (legacy k8s.clusters / "
+            "OPSRAG_PROMETHEUS_DEFAULT_CLUSTER / OPSRAG_K8S_DEFAULT_CLUSTER env "
+            "also accepted)."
+        )
+    return env
+
+
+def _resolve_prometheus_target(env: str) -> PrometheusTarget:
+    """Resolve the `PrometheusTarget` for an environment. Raises a clear
+    error when the env exists but has no `prometheus:` block configured (so
+    the caller learns *which* env is missing the integration, not a generic
+    failure)."""
+    target = resolve_environment(env).prometheus
+    if target is None:
+        raise RuntimeError(
+            f"prometheus mcp: prometheus not configured for env {env!r}. Add a "
+            f"`prometheus:` block under environments.targets.{env}."
+        )
+    return target
+
+
+def _select_service(target: PrometheusTarget, args: dict) -> str:
+    """Choose the Prometheus service for this call. The `istio` arg routes to
+    the env's `extra_services["istio"]` when present; otherwise the env's main
+    `target.service`. Falls back to the main service if istio is requested but
+    not configured for the env."""
+    if args.get("istio"):
+        return target.extra_services.get("istio") or target.service
+    return target.service
 
 
 async def _proxy_get(
-    cluster: str,
+    env: str,
+    target: PrometheusTarget,
     service: str,
     path: str,
     params: dict | None = None,
     *,
     _retried: bool = False,
 ) -> Any:
-    """GET via the K8s API server service-proxy. Returns parsed JSON.
-    Uses httpx so query strings reach Prometheus intact.
+    """GET a Prometheus HTTP API path for an environment. Returns parsed JSON.
 
-    Auto-refreshes the ADC token on 401 (token lifetime ~1h; the
-    container can outlive multiple token windows). Retries once after
-    refresh; if the second attempt also 401s, surfaces the error."""
+    Branches on `target.reach`:
+      - `k8s_proxy`: reach the in-cluster Prometheus service through the
+        cluster API server's service-proxy. Host/token/verify come from the
+        shared `kubernetes.cluster_api_access(env)` helper; the proxy URL is
+        built from `target.namespace/service/port`. Auto-refreshes the ADC
+        token on 401 (token lifetime ~1h) and retries once.
+      - `direct`: httpx GET `{target.url}{path}` with an optional bearer token
+        read from the `target.bearer_token_env` env var.
+
+    Uses httpx so query strings reach Prometheus intact (the K8s service-proxy
+    drops query strings appended to the proxy path)."""
     import httpx
-    cfg = await _get_proxy_config(cluster)
+
+    if target.reach == "direct":
+        base = (target.url or "").rstrip("/")
+        if not base:
+            return {
+                "status": "error",
+                "errorType": "config",
+                "error": (
+                    f"prometheus env {env!r}: reach=direct but no `url` set."
+                ),
+            }
+        headers = {}
+        if target.bearer_token_env:
+            tok = os.environ.get(target.bearer_token_env)
+            if tok:
+                headers["Authorization"] = f"Bearer {tok}"
+        url = f"{base}{path}"
+        # PrometheusTarget has no verify toggle; direct URLs are expected to
+        # present a valid public cert (verify=True, httpx default).
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.get(url, params=params or {}, headers=headers)
+            return _parse_prom_response(resp)
+
+    # reach == "k8s_proxy"
+    cfg = await cluster_api_access(env)
     url = (
-        f"{cfg['host']}/api/v1/namespaces/{PROMETHEUS_NAMESPACE}"
-        f"/services/{service}:{PROMETHEUS_PORT}/proxy{path}"
+        f"{cfg['host']}/api/v1/namespaces/{target.namespace}"
+        f"/services/{service}:{target.port}/proxy{path}"
     )
     headers = {}
     if cfg["token"]:
@@ -209,27 +202,36 @@ async def _proxy_get(
     async with httpx.AsyncClient(verify=cfg["verify"], timeout=30.0) as http:
         resp = await http.get(url, params=params or {}, headers=headers)
         if resp.status_code == 401 and not _retried:
-            # Token expired. Refresh + invalidate cached configs + retry once.
+            # Token expired. Refresh ADC + invalidate the cached API-access
+            # bundle for this env + retry once.
             _log.warning(
-                "prometheus proxy 401 on %s -- refreshing ADC token + retry", cluster,
+                "prometheus proxy 401 on %s -- refreshing ADC token + retry", env,
             )
             await refresh_adc_token()
-            _clients.pop(cluster, None)
-            return await _proxy_get(cluster, service, path, params=params, _retried=True)
-        if resp.status_code >= 400:
-            return {
-                "status": "error",
-                "errorType": f"http_{resp.status_code}",
-                "error": resp.text[:500],
-            }
-        try:
-            return resp.json()
-        except Exception:
-            return {
-                "status": "error",
-                "errorType": "parse",
-                "error": resp.text[:500],
-            }
+            invalidate_env_api_cache(env)
+            return await _proxy_get(
+                env, target, service, path, params=params, _retried=True,
+            )
+        return _parse_prom_response(resp)
+
+
+def _parse_prom_response(resp: Any) -> Any:
+    """Turn an httpx response into parsed Prometheus JSON, or a structured
+    error dict on HTTP >= 400 / parse failure."""
+    if resp.status_code >= 400:
+        return {
+            "status": "error",
+            "errorType": f"http_{resp.status_code}",
+            "error": resp.text[:500],
+        }
+    try:
+        return resp.json()
+    except Exception:
+        return {
+            "status": "error",
+            "errorType": "parse",
+            "error": resp.text[:500],
+        }
 
 
 _MAX_POINTS_PER_SERIES = 240  # 4h at 60s step, 24h at 6m step -- keeps matrix JSON under ~40KB
@@ -323,37 +325,40 @@ def _trim_series(result: dict, max_series: int = _RESULT_TRUNCATE_SERIES) -> dic
 
 
 async def _h_query(_unused, args: dict) -> Any:
-    cluster = _resolve_prometheus_cluster(args)
-    service = ISTIO_PROMETHEUS_SERVICE if args.get("istio") else DEFAULT_PROMETHEUS_SERVICE
+    env = _resolve_prometheus_env(args)
+    target = _resolve_prometheus_target(env)
+    service = _select_service(target, args)
     params = {"query": args["query"]}
     if args.get("time"):
         params["time"] = _resolve_relative_time(args["time"])
-    resp = await _proxy_get(cluster, service, "/api/v1/query", params=params)
+    resp = await _proxy_get(env, target, service, "/api/v1/query", params=params)
     if resp.get("status") != "success":
-        return {"cluster": cluster, "error": resp.get("error", "unknown"), "errorType": resp.get("errorType")}
+        return {"cluster": env, "error": resp.get("error", "unknown"), "errorType": resp.get("errorType")}
     data = _trim_series(resp.get("data", {}))
-    return {"cluster": cluster, "service": service, "data": data}
+    return {"cluster": env, "service": service, "data": data}
 
 
 async def _h_query_range(_unused, args: dict) -> Any:
-    cluster = _resolve_prometheus_cluster(args)
-    service = ISTIO_PROMETHEUS_SERVICE if args.get("istio") else DEFAULT_PROMETHEUS_SERVICE
+    env = _resolve_prometheus_env(args)
+    target = _resolve_prometheus_target(env)
+    service = _select_service(target, args)
     params = {
         "query": args["query"],
         "start": _resolve_relative_time(args["start"]),
         "end": _resolve_relative_time(args["end"]),
         "step": args.get("step", "60s"),
     }
-    resp = await _proxy_get(cluster, service, "/api/v1/query_range", params=params)
+    resp = await _proxy_get(env, target, service, "/api/v1/query_range", params=params)
     if resp.get("status") != "success":
-        return {"cluster": cluster, "error": resp.get("error", "unknown"), "errorType": resp.get("errorType")}
+        return {"cluster": env, "error": resp.get("error", "unknown"), "errorType": resp.get("errorType")}
     data = _trim_series(resp.get("data", {}))
-    return {"cluster": cluster, "service": service, "data": data}
+    return {"cluster": env, "service": service, "data": data}
 
 
 async def _h_series(_unused, args: dict) -> Any:
-    cluster = _resolve_prometheus_cluster(args)
-    service = ISTIO_PROMETHEUS_SERVICE if args.get("istio") else DEFAULT_PROMETHEUS_SERVICE
+    env = _resolve_prometheus_env(args)
+    target = _resolve_prometheus_target(env)
+    service = _select_service(target, args)
     match_list = args["match"]
     if isinstance(match_list, str):
         match_list = [match_list]
@@ -363,11 +368,11 @@ async def _h_series(_unused, args: dict) -> Any:
         params["start"] = _resolve_relative_time(args["start"])
     if args.get("end"):
         params["end"] = _resolve_relative_time(args["end"])
-    resp = await _proxy_get(cluster, service, "/api/v1/series", params=params)
+    resp = await _proxy_get(env, target, service, "/api/v1/series", params=params)
     if resp.get("status") != "success":
-        return {"cluster": cluster, "error": resp.get("error", "unknown")}
+        return {"cluster": env, "error": resp.get("error", "unknown")}
     return {
-        "cluster": cluster,
+        "cluster": env,
         "service": service,
         "match": match_list,
         "count": len(resp.get("data") or []),
@@ -376,29 +381,31 @@ async def _h_series(_unused, args: dict) -> Any:
 
 
 async def _h_label_values(_unused, args: dict) -> Any:
-    cluster = _resolve_prometheus_cluster(args)
-    service = ISTIO_PROMETHEUS_SERVICE if args.get("istio") else DEFAULT_PROMETHEUS_SERVICE
+    env = _resolve_prometheus_env(args)
+    target = _resolve_prometheus_target(env)
+    service = _select_service(target, args)
     label = args["label"]
     params = {}
     if args.get("match"):
         # Single match[] for label_values (repeats not as common here)
         params["match[]"] = args["match"]
     resp = await _proxy_get(
-        cluster, service, f"/api/v1/label/{quote(label, safe='')}/values", params=params,
+        env, target, service, f"/api/v1/label/{quote(label, safe='')}/values", params=params,
     )
     return {
-        "cluster": cluster, "service": service, "label": label,
+        "cluster": env, "service": service, "label": label,
         "count": len(resp.get("data") or []),
         "values": (resp.get("data") or [])[:500],
     }
 
 
 async def _h_alerts(_unused, args: dict) -> Any:
-    cluster = _resolve_prometheus_cluster(args)
-    service = ISTIO_PROMETHEUS_SERVICE if args.get("istio") else DEFAULT_PROMETHEUS_SERVICE
-    resp = await _proxy_get(cluster, service, "/api/v1/alerts")
+    env = _resolve_prometheus_env(args)
+    target = _resolve_prometheus_target(env)
+    service = _select_service(target, args)
+    resp = await _proxy_get(env, target, service, "/api/v1/alerts")
     if resp.get("status") != "success":
-        return {"cluster": cluster, "error": resp.get("error", "unknown")}
+        return {"cluster": env, "error": resp.get("error", "unknown")}
     alerts = (resp.get("data") or {}).get("alerts") or []
     # Trim alert payloads -- keep only what's useful
     trimmed = []
@@ -415,7 +422,7 @@ async def _h_alerts(_unused, args: dict) -> Any:
     # Most-recent first by activeAt.
     trimmed.sort(key=lambda x: x.get("active_at") or "", reverse=True)
     return {
-        "cluster": cluster, "service": service,
+        "cluster": env, "service": service,
         "count": len(trimmed),
         "firing": sum(1 for a in trimmed if a.get("state") == "firing"),
         "pending": sum(1 for a in trimmed if a.get("state") == "pending"),
@@ -424,12 +431,13 @@ async def _h_alerts(_unused, args: dict) -> Any:
 
 
 async def _h_targets(_unused, args: dict) -> Any:
-    cluster = _resolve_prometheus_cluster(args)
-    service = ISTIO_PROMETHEUS_SERVICE if args.get("istio") else DEFAULT_PROMETHEUS_SERVICE
+    env = _resolve_prometheus_env(args)
+    target = _resolve_prometheus_target(env)
+    service = _select_service(target, args)
     state = args.get("state") or "active"
-    resp = await _proxy_get(cluster, service, "/api/v1/targets", params={"state": state})
+    resp = await _proxy_get(env, target, service, "/api/v1/targets", params={"state": state})
     if resp.get("status") != "success":
-        return {"cluster": cluster, "error": resp.get("error", "unknown")}
+        return {"cluster": env, "error": resp.get("error", "unknown")}
     data = resp.get("data") or {}
     active = data.get("activeTargets") or []
     # Just return health summary + unhealthy details
@@ -444,7 +452,7 @@ async def _h_targets(_unused, args: dict) -> Any:
         for t in active if t.get("health") != "up"
     ]
     return {
-        "cluster": cluster, "service": service,
+        "cluster": env, "service": service,
         "active_total": len(active),
         "active_healthy": healthy,
         "active_unhealthy": len(unhealthy),
@@ -455,23 +463,34 @@ async def _h_targets(_unused, args: dict) -> Any:
 # --- tool registry --------------------------------------------------
 
 
+_ENV_PROP = {
+    "type": "string",
+    "description": (
+        "Environment name from the configured `environments:` registry "
+        "(Prometheus is reached per-environment -- service/namespace/port "
+        "and reach mode come from that env's `prometheus:` target). Defaults "
+        "to OPSRAG_PROMETHEUS_DEFAULT_CLUSTER / OPSRAG_K8S_DEFAULT_CLUSTER "
+        "env, else the registry's default environment. Required when no "
+        "environments are configured."
+    ),
+}
+
+# Back-compat alias: older callers / tools passed `cluster`. Handlers accept
+# either (`env` wins); the schema documents both so the agent can use either.
 _CLUSTER_PROP = {
     "type": "string",
     "description": (
-        "Kube-context name (Prometheus is in-cluster per environment). "
-        "Taken from the deployment's configured clusters. Defaults to "
-        "OPSRAG_PROMETHEUS_DEFAULT_CLUSTER / OPSRAG_K8S_DEFAULT_CLUSTER "
-        "env, else the first configured cluster. Required when no clusters "
-        "are configured."
+        "Back-compat alias for `env` -- the environment name. Prefer `env`."
     ),
 }
 
 _ISTIO_PROP = {
     "type": "boolean",
     "description": (
-        "Set true to query the istio Prometheus instance "
-        f"({ISTIO_PROMETHEUS_SERVICE}) for mesh / sidecar metrics. "
-        f"Default false -> app/infra Prometheus ({DEFAULT_PROMETHEUS_SERVICE})."
+        "Set true to query the env's istio Prometheus instance "
+        "(the env's `prometheus.extra_services.istio` service) for mesh / "
+        "sidecar metrics. Default false -> the env's main Prometheus "
+        "(`prometheus.service`). Ignored if the env has no istio service."
     ),
 }
 
@@ -501,6 +520,7 @@ PROMETHEUS_TOOLS: list[MCPTool] = [
         input_schema={
             "type": "object",
             "properties": {
+                "env": _ENV_PROP,
                 "cluster": _CLUSTER_PROP,
                 "istio": _ISTIO_PROP,
                 "query": {"type": "string", "description": "PromQL expression"},
@@ -525,6 +545,7 @@ PROMETHEUS_TOOLS: list[MCPTool] = [
         input_schema={
             "type": "object",
             "properties": {
+                "env": _ENV_PROP,
                 "cluster": _CLUSTER_PROP,
                 "istio": _ISTIO_PROP,
                 "query": {"type": "string"},
@@ -546,6 +567,7 @@ PROMETHEUS_TOOLS: list[MCPTool] = [
         input_schema={
             "type": "object",
             "properties": {
+                "env": _ENV_PROP,
                 "cluster": _CLUSTER_PROP,
                 "istio": _ISTIO_PROP,
                 "match": {
@@ -571,6 +593,7 @@ PROMETHEUS_TOOLS: list[MCPTool] = [
         input_schema={
             "type": "object",
             "properties": {
+                "env": _ENV_PROP,
                 "cluster": _CLUSTER_PROP,
                 "istio": _ISTIO_PROP,
                 "label": {"type": "string"},
@@ -590,6 +613,7 @@ PROMETHEUS_TOOLS: list[MCPTool] = [
         input_schema={
             "type": "object",
             "properties": {
+                "env": _ENV_PROP,
                 "cluster": _CLUSTER_PROP,
                 "istio": _ISTIO_PROP,
             },
@@ -605,6 +629,7 @@ PROMETHEUS_TOOLS: list[MCPTool] = [
         input_schema={
             "type": "object",
             "properties": {
+                "env": _ENV_PROP,
                 "cluster": _CLUSTER_PROP,
                 "istio": _ISTIO_PROP,
                 "state": {"type": "string", "enum": ["active", "dropped", "any"]},
@@ -626,7 +651,8 @@ def get_tool(name: str) -> MCPTool:
 
 
 async def _fake_proxy_get(
-    cluster: str,
+    env: str,
+    target: PrometheusTarget,
     service: str,
     path: str,
     params: dict | None = None,
@@ -712,27 +738,37 @@ def build_fake():
     succeeds, and the module-level `_proxy_get` is swapped for a canned
     responder. `teardown` restores both."""
     import opsrag.mcp.prometheus as _mod
-    from opsrag.agent.prompt_render import active_deployment, set_active_deployment
-    from opsrag.context import DeploymentContext, KubernetesContext
+    from opsrag.config import (
+        EnvironmentsConfig,
+        EnvironmentTarget,
+        K8sTarget,
+        OpsRAGConfig,
+        PrometheusTarget,
+    )
+    from opsrag.environments import bind_environments, reset_environments
     from opsrag.mcp._fake import FakeMCP
 
-    _orig_deployment = active_deployment()
-    set_active_deployment(
-        DeploymentContext(
-            kubernetes=KubernetesContext(clusters={"prod": "example-cluster"}),
-        )
+    # Bind a one-env registry so `_resolve_prometheus_env` resolves the
+    # default env name ('example-cluster'); `_proxy_get` is faked below so
+    # the k8s_proxy target is never actually reached.
+    _cfg = OpsRAGConfig()
+    _cfg.environments = EnvironmentsConfig(
+        default="example-cluster",
+        targets={
+            "example-cluster": EnvironmentTarget(
+                kubernetes=K8sTarget(mode="kubeconfig", context="example-cluster"),
+                prometheus=PrometheusTarget(reach="k8s_proxy"),
+            ),
+        },
     )
+    bind_environments(_cfg)
 
     _orig_proxy_get = _mod._proxy_get
-    _orig_clients = dict(_mod._clients)
     _mod._proxy_get = _fake_proxy_get
-    _mod._clients.clear()
 
     def _restore() -> None:
-        set_active_deployment(_orig_deployment)
+        reset_environments()
         _mod._proxy_get = _orig_proxy_get
-        _mod._clients.clear()
-        _mod._clients.update(_orig_clients)
 
     return FakeMCP(
         tools=list(PROMETHEUS_TOOLS), client=None, teardown=_restore,
