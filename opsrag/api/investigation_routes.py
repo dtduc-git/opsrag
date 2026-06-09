@@ -11,6 +11,7 @@ embedder + LLM router to the subgraph's contract.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from opsrag.agents.investigation import build_investigation_graph
 from opsrag.agents.investigation.alert_extractor import extract_alert_context
+from opsrag.agents.investigation.limits import PER_CALL_RETRIEVAL_TIMEOUT_SEC
 from opsrag.agents.investigation.observability import build_investigation_summary
 from opsrag.agents.investigation.result_cache import InvestigationResultCache
 from opsrag.agents.investigation.rootly_resolver import (
@@ -117,7 +119,16 @@ def _build_retrieve_fn(vector_store, embedder):
                 return hit
         try:
             emb = await embedder.embed_query(query)
-            results = await vector_store.search(emb, top_k=top_k)
+            # B1: use the hybrid (dense + BM25 RRF) lane the main query
+            # path uses -- the investigation agent had been running on the
+            # weakest retrieval variant (pure dense). hybrid_search returns
+            # the same SearchResult shape as search().
+            if hasattr(vector_store, "hybrid_search"):
+                results = await vector_store.hybrid_search(
+                    embedding=emb, query_text=query, top_k=top_k,
+                )
+            else:
+                results = await vector_store.search(emb, top_k=top_k)
         except Exception as exc:
             _log.warning("retrieve failed for %r: %s", query[:60], exc)
             return []
@@ -139,6 +150,103 @@ def _build_retrieve_fn(vector_store, embedder):
         return out
 
     return _retrieve
+
+
+# --- P0-B: live-telemetry tool dispatch ----------------------------
+
+# Live tools the investigator may call to TEST a hypothesis: read-only
+# telemetry + code/config + incident history. Excludes write/admin tools
+# and SCM tools (gitlab_/github_) that need a live client not wired here.
+# NB: prefixes are TOOL-name prefixes, not integration names -- the
+# kubernetes integration's tools are named `k8s_*` (not `kubernetes_*`).
+_INVESTIGATION_TOOL_PREFIXES = (
+    "datadog_", "rootly_", "prometheus_", "loki_", "grafana_",
+    "k8s_", "splunk_", "sentry_", "code_",
+)
+
+# Integration NAMES (config keys under `mcp:`) whose LIVE signals make the
+# investigation agent meaningfully more than RAG-only. The Investigate UI
+# is gated on at least one being enabled -- entirely config-driven (the
+# operator's pick), never hardcoded on. `code` is intentionally excluded:
+# code search alone isn't live telemetry and isn't reason enough to surface
+# the Investigate tab.
+_INVESTIGATION_TELEMETRY_INTEGRATIONS = (
+    "datadog", "prometheus", "kubernetes", "loki",
+    "grafana", "splunk", "sentry", "rootly",
+)
+
+
+def investigation_live_telemetry_enabled(cfg: Any) -> bool:
+    """True iff the operator enabled at least one live-telemetry MCP
+    integration -- the condition under which the Investigate feature is
+    worth surfacing in the UI. Purely config-driven: reads the same
+    `cfg.mcp` enables the agent's tool dispatch honors, so the feature
+    appears/disappears with the user's integration picks (open-source
+    deployments with no telemetry enabled never see it)."""
+    mcp = getattr(cfg, "mcp", None) or {}
+    for name in _INVESTIGATION_TELEMETRY_INTEGRATIONS:
+        block = mcp.get(name) if isinstance(mcp, dict) else getattr(mcp, name, None)
+        if block is not None and getattr(block, "enabled", False):
+            return True
+    return False
+
+
+def _build_tool_dispatch_fn() -> tuple[Any, list[dict[str, Any]]]:
+    """Wrap the ENABLED MCP registry as an async dispatch(name, args) plus
+    a catalog of the telemetry tools the investigation agent may call.
+
+    Reuses the chat agent's registry + enable-gating (`filter_enabled`),
+    so only integrations the operator turned on in config are visible
+    (the documented enable-gating gotcha: a disabled `datadog`/`rootly`
+    is simply absent here). Returns (None, []) when MCP is unavailable or
+    no telemetry tool is enabled -> the agent runs RAG-only.
+    """
+    try:
+        from opsrag.mcp import ALL_MCP_TOOLS
+        from opsrag.mcp_server.registry_loader import filter_enabled
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("MCP registry unavailable for investigation: %s", exc)
+        return None, []
+    try:
+        enabled = filter_enabled(ALL_MCP_TOOLS)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("filter_enabled failed (%s) -- investigation runs RAG-only", exc)
+        return None, []
+    registry = {t.name: t for t in enabled}
+    catalog = [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for name, t in registry.items()
+        if name.startswith(_INVESTIGATION_TOOL_PREFIXES)
+    ]
+    if not catalog:
+        return None, []  # no live telemetry enabled -> RAG-only
+
+    async def _dispatch(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        tool = registry.get(tool_name)
+        if tool is None:
+            return {"tool": tool_name, "data": None, "error": "unknown or disabled tool"}
+        if tool_name.startswith(("gitlab_", "github_")):
+            return {"tool": tool_name, "data": None,
+                    "error": "scm tools not available in investigation dispatch"}
+        try:
+            # Non-gitlab MCP handlers ignore the client arg (they manage
+            # their own connections), so None is correct + expected.
+            data = await asyncio.wait_for(
+                tool.call(None, args or {}),
+                timeout=PER_CALL_RETRIEVAL_TIMEOUT_SEC,
+            )
+            return {"tool": tool_name, "data": data, "error": None}
+        except (TimeoutError, asyncio.TimeoutError):
+            return {"tool": tool_name, "data": None,
+                    "error": f"timeout after {PER_CALL_RETRIEVAL_TIMEOUT_SEC}s"}
+        except Exception as exc:  # noqa: BLE001
+            return {"tool": tool_name, "data": None, "error": str(exc)[:300]}
+
+    _log.info(
+        "investigation live-tool dispatch wired: %d tools (%s)",
+        len(catalog), ", ".join(sorted(t["name"] for t in catalog)[:10]),
+    )
+    return _dispatch, catalog
 
 
 # --- Phase B: result cache (past investigations as context) -------
@@ -300,10 +408,20 @@ async def _lookup_past_investigations(app_state, alert_ctx: AlertContext) -> lis
         _log.warning("past investigations embed failed: %s", exc)
         return []
     try:
-        hits = await cache.search(emb, top_k=3)
+        # Over-fetch, then quality-gate: the cache stores EVERY outcome
+        # (the history UI needs dead-ends too), so fetch a few extra and
+        # keep only validated ones for prompt injection.
+        hits = await cache.search(emb, top_k=6)
     except Exception as exc:
         _log.warning("past investigations search failed: %s", exc)
         return []
+    # Quality gate (J2): only seed the hypothesis prompt with priors that
+    # actually reached a validated root cause. Injecting inconclusive /
+    # circuit-breaker-terminated runs would re-seed past DEAD ENDS, and a
+    # confidently-wrong prior would otherwise entrench itself across every
+    # similar future alert (the store has no human-confirmation signal, so
+    # `validated_root_cause` is the strongest correctness proxy we have).
+    validated = [h for h in hits if h.outcome == "validated_root_cause"]
     return [
         {
             "investigation_id": h.investigation_id,
@@ -315,7 +433,7 @@ async def _lookup_past_investigations(app_state, alert_ctx: AlertContext) -> lis
             "similarity": h.adjusted_similarity,
             "age_days": h.age_days,
         }
-        for h in hits
+        for h in validated[:3]
     ]
 
 
@@ -435,12 +553,17 @@ def _build_graph_for_request(app_state, *, embed_query_enabled: bool = True):
 
     retrieve = _build_retrieve_fn(providers.vector_store, providers.embedder)
     embed_query = providers.embedder.embed_query if embed_query_enabled else None
+    # P0-B: live-telemetry dispatch (datadog/rootly/code/...). Falls back
+    # to (None, []) -> RAG-only when no telemetry integration is enabled.
+    tool_dispatch, tool_catalog = _build_tool_dispatch_fn()
 
     return build_investigation_graph(
         retrieve=retrieve,
         llm_flash=llm_flash,
         llm_pro=llm_pro,
         embed_query=embed_query,
+        tool_dispatch=tool_dispatch,
+        tool_catalog=tool_catalog,
     )
 
 

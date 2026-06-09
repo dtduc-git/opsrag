@@ -65,6 +65,12 @@ class HypothesisNode(BaseModel):
     depth: int = 0
     parent_id: str | None = None
     children: list[str] = Field(default_factory=list)
+    # Best-first bookkeeping: set once decide_next has chosen this
+    # validated node for expansion (or finalized it as non-recursable),
+    # so the frontier never re-picks the same node. A validated node that
+    # produced zero (all-duplicate) children would otherwise be selected
+    # forever.
+    expanded: bool = False
     termination_reason: TerminationReason | None = None
     judge_rationale: str = Field(
         default="",
@@ -94,6 +100,15 @@ class BudgetState(BaseModel):
     llm_query_gen_calls: int = 0
     llm_judge_calls: int = 0
     llm_synth_calls: int = 0
+    # P0-B: live-telemetry tool dispatch (datadog/rootly/code/...) and the
+    # LLM call that selects which tool(s) test a hypothesis.
+    tool_dispatch_calls: int = 0
+    llm_tool_select_calls: int = 0
+    # Embeddings done purely for sibling/ancestor dedup. Tracked here for
+    # observability but deliberately NOT counted in total_tool_calls --
+    # they're cheap, bounded by the node cap, and must not consume the
+    # retrieval/LLM tool-call budget (the 300-call breaker).
+    embed_dedup_calls: int = 0
 
     # Per-purpose token breakdown so we can attribute spend.
     input_tokens: int = 0

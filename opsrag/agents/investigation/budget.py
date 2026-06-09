@@ -76,6 +76,13 @@ def record_tool_call(
 ) -> None:
     """Bookkeeping helper -- increments the right per-purpose counter so
     the dashboard can split retrieval vs LLM cost."""
+    # Dedup embeddings are cheap and bounded by the node cap. Count them
+    # separately and do NOT charge them to total_tool_calls -- otherwise a
+    # handful of per-hypothesis embeds inflate the 300-call breaker and
+    # pollute `retrieval_calls`, making the per-purpose dashboard lie.
+    if purpose == "embed_dedup":
+        budget.embed_dedup_calls += 1
+        return
     budget.total_tool_calls += 1
     if purpose == "retrieval":
         budget.retrieval_calls += 1
@@ -85,6 +92,10 @@ def record_tool_call(
         budget.llm_judge_calls += 1
     elif purpose == "llm_synth":
         budget.llm_synth_calls += 1
+    elif purpose == "tool_dispatch":
+        budget.tool_dispatch_calls += 1
+    elif purpose == "llm_tool_select":
+        budget.llm_tool_select_calls += 1
     budget.input_tokens += input_tokens
     budget.output_tokens += output_tokens
     budget.total_llm_tokens += input_tokens + output_tokens
