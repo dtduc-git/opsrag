@@ -16,10 +16,12 @@ class InMemorySessionStore:
     def get_checkpointer(self) -> Any:
         return self._saver
 
-    async def list_sessions(self, user_id: str) -> list[dict]:
+    async def list_sessions(
+        self, user_id: str, *, include_all: bool = False
+    ) -> list[dict]:
         # Mirror the postgres store: derive title/preview/timestamps/turns in
         # the same checkpoint walk (newest-first). See postgres.py for the
-        # field-by-field rationale.
+        # field-by-field rationale and the owner-from-metadata note.
         sessions: dict[str, dict] = {}
         queries: dict[str, set[str]] = {}
         for cp_tuple in self._saver.list(None):
@@ -27,13 +29,16 @@ class InMemorySessionStore:
             thread_id = cfg.get("thread_id")
             if not thread_id:
                 continue
-            if cfg.get("user_id") and cfg["user_id"] != user_id:
+            owner = cfg.get("user_id")
+            if owner is None:
+                owner = (cp_tuple.metadata or {}).get("user_id")
+            if not include_all and owner != user_id:
                 continue
             entry = sessions.setdefault(
                 thread_id,
                 {
                     "thread_id": thread_id,
-                    "user_id": cfg.get("user_id", user_id),
+                    "user_id": owner if owner is not None else "anonymous",
                     "checkpoint_count": 0,
                     "title": None,
                     "preview": None,

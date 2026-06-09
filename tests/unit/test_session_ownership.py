@@ -22,11 +22,12 @@ CurrentUser -- no FastAPI app needed.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
 from opsrag.api import routes
+from opsrag.auth.scopes import Scope
 
 # --- Fakes ----------------------------------------------------------------
 
@@ -34,14 +35,22 @@ from opsrag.api import routes
 @dataclass
 class _FakeUser:
     """Minimal stand-in for ``CurrentUser`` -- only the attributes the
-    ownership guards read (``oid`` + ``is_anonymous``)."""
+    ownership guards read (``oid`` + ``is_anonymous`` + ``scopes``)."""
 
     oid: str | None
     is_anonymous: bool
+    scopes: frozenset = field(default_factory=frozenset)
 
 
 def _user(oid: str) -> _FakeUser:
-    return _FakeUser(oid=oid, is_anonymous=False)
+    # A plain member: chat scope, NOT admin.
+    return _FakeUser(oid=oid, is_anonymous=False, scopes=frozenset({Scope.CHAT}))
+
+
+def _admin(oid: str) -> _FakeUser:
+    return _FakeUser(
+        oid=oid, is_anonymous=False, scopes=frozenset({Scope.CHAT, Scope.ADMIN})
+    )
 
 
 _ANON = _FakeUser(oid=None, is_anonymous=True)
@@ -63,11 +72,13 @@ class _FakeStore:
     async def get_session_owner(self, thread_id: str) -> str | None:
         return self._owners.get(thread_id)
 
-    async def list_sessions(self, user_id: str) -> list[dict]:
+    async def list_sessions(
+        self, user_id: str, *, include_all: bool = False
+    ) -> list[dict]:
         return [
             {"thread_id": tid, "user_id": owner, "checkpoint_count": 1}
             for tid, owner in self._owners.items()
-            if owner == user_id
+            if include_all or owner == user_id
         ]
 
     async def delete_session(self, thread_id: str) -> bool:
@@ -204,6 +215,43 @@ def test_list_sessions_open_mode_uses_path_user_id():
     assert tids == {"t_b"}
 
 
+# --- admin sees + manages everything --------------------------------------
+
+
+def test_list_sessions_admin_sees_all():
+    store = _store()
+    req = _FakeRequest(store)
+    # Admin asking for any path id gets EVERY thread (team oversight).
+    resp = asyncio.run(routes.list_sessions("A", req, current_user=_admin("ADM")))
+    tids = {s.thread_id for s in resp.sessions}
+    assert tids == {"t_a", "t_b", "t_legacy", "t_empty"}
+
+
+def test_list_sessions_regular_user_with_no_threads_sees_empty():
+    store = _store()
+    req = _FakeRequest(store)
+    # A signed-in user who owns nothing (the legacy threads belong to
+    # default/anonymous, not them) gets an EMPTY list -- not everyone's.
+    resp = asyncio.run(routes.list_sessions("anything", req, current_user=_user("Z")))
+    assert resp.sessions == []
+
+
+def test_admin_can_read_any_thread():
+    store = _store()
+    req = _FakeRequest(store)
+    out = asyncio.run(routes.session_messages("t_b", req, current_user=_admin("ADM")))
+    assert out["thread_id"] == "t_b"
+    assert store.read == ["t_b"]  # admin bypass -> history IS read
+
+
+def test_admin_can_delete_any_thread():
+    store = _store()
+    req = _FakeRequest(store)
+    out = asyncio.run(routes.delete_session("t_b", req, current_user=_admin("ADM")))
+    assert out["deleted"] is True
+    assert store.deleted == ["t_b"]
+
+
 # --- store impls expose get_session_owner + read the right owner ----------
 
 
@@ -228,6 +276,26 @@ def test_inmemory_store_get_session_owner_round_trips_via_checkpoint():
     assert asyncio.run(store.get_session_owner("t1")) == "owner-1"
     # Unknown thread -> None (so the guard treats it as not-a-real-owner).
     assert asyncio.run(store.get_session_owner("nope")) is None
+
+
+def test_inmemory_list_sessions_filters_by_owner_and_admin_include_all():
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from opsrag.sessions.memory import InMemorySessionStore
+
+    store = InMemorySessionStore()
+    saver = store.get_checkpointer()
+    for tid, owner in (("tA", "userA"), ("tB", "userB")):
+        cfg = {
+            "configurable": {"thread_id": tid, "checkpoint_ns": "", "user_id": owner}
+        }
+        saver.put(cfg, empty_checkpoint(), {}, {})
+    # Regular caller sees ONLY their own thread (not the other user's).
+    own = asyncio.run(store.list_sessions("userA"))
+    assert {s["thread_id"] for s in own} == {"tA"}
+    # include_all (admin path) returns every thread.
+    every = asyncio.run(store.list_sessions("userA", include_all=True))
+    assert {s["thread_id"] for s in every} == {"tA", "tB"}
 
 
 def test_both_stores_satisfy_session_store_protocol():
