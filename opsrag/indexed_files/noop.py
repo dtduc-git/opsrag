@@ -3,6 +3,7 @@ disabled (no Postgres DSN, or session.provider != postgres)."""
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 
 
 class NoopIndexedFilesTracker:
@@ -31,3 +32,8 @@ class NoopIndexedFilesTracker:
         self, repo: str, branch: str, paths: Iterable[str]
     ) -> None:
         return None
+
+    async def sweep_deleted(
+        self, repo: str, branch: str, run_started_at: datetime
+    ) -> list[str]:
+        return []

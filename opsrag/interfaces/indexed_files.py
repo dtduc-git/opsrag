@@ -10,6 +10,7 @@ ingestion path stays unchanged when dedup is disabled.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Protocol
 
 
@@ -43,4 +44,17 @@ class IndexedFilesTracker(Protocol):
         """Bulk-update last_seen_at for paths still present in the repo
         (whether or not they were re-indexed). Used so a future deletion
         sweep can identify files no longer present in source."""
+        ...
+
+    async def sweep_deleted(
+        self, repo: str, branch: str, run_started_at: datetime
+    ) -> list[str]:
+        """Repo-level deletion sweep run at the END of a successful index pass.
+
+        Returns the paths of rows for ``(repo, branch)`` whose ``last_seen_at``
+        predates ``run_started_at`` -- i.e. files that existed before but were
+        NOT seen during this run (deleted from source) -- and removes their
+        tracker rows. The caller is responsible for purging the corresponding
+        chunks from the vector store. Returns an empty list if the tracker is
+        not ready or nothing is stale."""
         ...

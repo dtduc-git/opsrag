@@ -134,6 +134,34 @@ def test_enrich_never_clobbers_explicit_values():
 
 
 # --------------------------------------------------------------------------
+# preprod env consistency: enrich.py and contextual.py must agree (#14b).
+# A preprod values.yaml was tagged `environment=staging` by the enricher but
+# `[Context: ... env preprod]` by contextual -- a filter/embedding mismatch.
+# --------------------------------------------------------------------------
+
+def test_enrich_preprod_preserved_not_folded_into_staging():
+    out = enrich_metadata(
+        {}, path="charts/payments/values-preprod.yaml", text="",
+        source_type="git", struct_doc_type=DocType.HELM,
+    )
+    assert out["environment"] == "preprod"
+    # preprod must be a recognised canonical env (else the enricher would
+    # silently drop it for not being in the controlled vocabulary).
+    assert "preprod" in md.ENVIRONMENTS
+
+
+def test_enrich_and_contextual_emit_same_preprod_token():
+    from opsrag.ingestion.contextual import _extract_env_from_path
+
+    path = "charts/payments/values-preprod.yaml"
+    enrich_env = enrich_metadata(
+        {}, path=path, text="", source_type="git", struct_doc_type=DocType.HELM,
+    )["environment"]
+    contextual_env = _extract_env_from_path(path)
+    assert enrich_env == contextual_env == "preprod"
+
+
+# --------------------------------------------------------------------------
 # author hashing
 # --------------------------------------------------------------------------
 
