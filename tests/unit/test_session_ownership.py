@@ -259,3 +259,122 @@ def test_owner_id_falls_back_to_req_user_id_in_open_mode():
 
 def test_owner_id_defaults_to_anonymous_when_open_and_no_req_user_id():
     assert routes._owner_id_for(_ANON, None) == "anonymous"
+
+
+# --- /query write+read path (continuing a thread requires owning it) -------
+#
+# POST /query loads req.thread_id's prior checkpoints (history) and appends
+# to them, so an unguarded thread_id is an IDOR (read + inject into another
+# user's conversation). The guard runs before any provider/graph work, so a
+# cross-user thread_id 404s. NOTE: the fake request deliberately has NO
+# `providers` -- if the guard did NOT short-circuit, the handler would raise
+# AttributeError reaching for providers, not HTTPException(404). So a 404 is
+# proof the guard fired first.
+
+
+def _query_request(req: "_FakeRequest"):
+    # agent_graph is read at the top of the handler before the guard; stub it.
+    req.app.state.agent_graph = object()
+    return req
+
+
+def test_query_continue_other_users_thread_is_404():
+    from opsrag.api.models import QueryRequest
+
+    store = _store()
+    req = _query_request(_FakeRequest(store))
+    qr = QueryRequest(query="summarize our conversation", thread_id="t_b")
+    with pytest.raises(routes.HTTPException) as ei:
+        asyncio.run(routes.query(qr, req, current_user=_user("A")))
+    assert ei.value.status_code == 404
+
+
+def test_query_legacy_anonymous_thread_is_grandfathered_past_guard():
+    # The guard must NOT 404 a legacy anonymous-owned thread. It proceeds past
+    # the guard and then fails on the absent providers -- which proves the
+    # guard let it through (an AttributeError, not a 404).
+    from opsrag.api.models import QueryRequest
+
+    store = _store()
+    req = _query_request(_FakeRequest(store))
+    qr = QueryRequest(query="hi", thread_id="t_legacy")
+    with pytest.raises(Exception) as ei:
+        asyncio.run(routes.query(qr, req, current_user=_user("A")))
+    assert not isinstance(ei.value, routes.HTTPException)
+
+
+# --- /usage/{session_id} (usage is keyed by the thread_id namespace) -------
+
+
+def test_usage_other_users_session_is_404():
+    store = _store()
+    req = _FakeRequest(store)
+    with pytest.raises(routes.HTTPException) as ei:
+        asyncio.run(routes.session_usage("t_b", req, current_user=_user("A")))
+    assert ei.value.status_code == 404
+
+
+def test_usage_own_session_is_allowed():
+    store = _store()
+    req = _FakeRequest(store)
+    out = asyncio.run(routes.session_usage("t_a", req, current_user=_user("A")))
+    assert out["session_id"] == "t_a"  # no 404; usage may be None (none recorded)
+
+
+def test_usage_legacy_anonymous_session_is_grandfathered():
+    store = _store()
+    req = _FakeRequest(store)
+    out = asyncio.run(routes.session_usage("t_legacy", req, current_user=_user("A")))
+    assert out["session_id"] == "t_legacy"
+
+
+def test_usage_open_mode_not_enforced():
+    store = _store()
+    req = _FakeRequest(store)
+    out = asyncio.run(routes.session_usage("t_b", req, current_user=_ANON))
+    assert out["session_id"] == "t_b"
+
+
+# --- /investigation/{id}/feedback (bind submitter to authenticated id) -----
+#
+# Investigations are a shared team resource (scope-gated, no per-row owner),
+# so the fix is: gate on the investigate scope (enforced by the route
+# dependency, not unit-tested here) AND persist the AUTHENTICATED identity as
+# the submitter -- never the spoofable client-supplied req.user_id.
+
+
+class _FakeFeedbackStore:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def record(self, **kwargs) -> int:
+        self.calls.append(kwargs)
+        return 1
+
+
+def _feedback_request(fb: _FakeFeedbackStore) -> "_FakeRequest":
+    req = _FakeRequest(_store())
+    req.app.state.investigation_cache = None  # exercise the Postgres-only path
+    req.app.state.feedback_store = fb
+    return req
+
+
+def test_investigation_feedback_binds_submitter_to_authenticated_oid():
+    from opsrag.api.models import InvestigationFeedbackRequest
+
+    fb = _FakeFeedbackStore()
+    req = _feedback_request(fb)
+    body = InvestigationFeedbackRequest(thumbs="up", user_id="pretend-to-be-B")
+    asyncio.run(routes.investigation_feedback("inv1", body, req, current_user=_user("A")))
+    # The persisted user_id is the verified oid, NOT the spoofed client value.
+    assert fb.calls and fb.calls[0]["user_id"] == "A"
+
+
+def test_investigation_feedback_open_mode_falls_back_to_client_user_id():
+    from opsrag.api.models import InvestigationFeedbackRequest
+
+    fb = _FakeFeedbackStore()
+    req = _feedback_request(fb)
+    body = InvestigationFeedbackRequest(thumbs="down", user_id="team-shared")
+    asyncio.run(routes.investigation_feedback("inv2", body, req, current_user=_ANON))
+    assert fb.calls and fb.calls[0]["user_id"] == "team-shared"
