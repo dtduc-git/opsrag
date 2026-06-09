@@ -39,7 +39,9 @@ class PostgresSessionStore:
             raise RuntimeError("PostgresSessionStore.open() must be awaited first")
         return self._saver
 
-    async def list_sessions(self, user_id: str) -> list[dict]:
+    async def list_sessions(
+        self, user_id: str, *, include_all: bool = False
+    ) -> list[dict]:
         if self._saver is None:
             return []
         # ``alist(None)`` yields every checkpoint across all threads,
@@ -59,13 +61,21 @@ class PostgresSessionStore:
             thread_id = cfg.get("thread_id")
             if not thread_id:
                 continue
-            if cfg.get("user_id") and cfg["user_id"] != user_id:
+            # Owner == the checkpoint's ``user_id``. Newer LangGraph keeps
+            # user-defined configurable keys in METADATA, not the rehydrated
+            # config (see get_session_owner), so read both -- otherwise the
+            # per-user filter is a silent no-op and every thread leaks to
+            # every caller. Admins (include_all) skip the filter entirely.
+            owner = cfg.get("user_id")
+            if owner is None:
+                owner = (cp_tuple.metadata or {}).get("user_id")
+            if not include_all and owner != user_id:
                 continue
             entry = seen.setdefault(
                 thread_id,
                 {
                     "thread_id": thread_id,
-                    "user_id": cfg.get("user_id", user_id),
+                    "user_id": owner if owner is not None else "anonymous",
                     "checkpoint_count": 0,
                     "title": None,
                     "preview": None,

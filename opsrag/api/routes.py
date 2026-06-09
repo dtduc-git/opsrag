@@ -84,15 +84,29 @@ def _is_real_owner(owner: str | None) -> bool:
     return bool(owner) and owner != "anonymous"
 
 
+def _is_admin(current_user: CurrentUser) -> bool:
+    """True iff the caller is a REAL (non-anonymous) holder of the admin
+    scope. Admins may list, read, and manage every session. Open-mode
+    anonymous users carry all scopes for dev convenience but are NOT treated
+    as admins here, so open mode keeps its per-path-user_id listing behavior.
+    """
+    if getattr(current_user, "is_anonymous", False):
+        return False
+    return Scope.ADMIN in (getattr(current_user, "scopes", None) or frozenset())
+
+
 def _deny_if_not_owner(current_user: CurrentUser, owner: str | None) -> None:
     """Enforce per-session ownership for a single-thread read/delete.
 
     Raises 404 (NOT 403 -- avoids an existence oracle) when the caller is
     authenticated AND the thread has a real owner that isn't them. Open /
-    anonymous mode does not enforce (preserves dev behavior); legacy
-    anonymous-owned threads (see _is_real_owner) stay accessible.
+    anonymous mode does not enforce (preserves dev behavior); admins bypass
+    (they manage all sessions); legacy anonymous-owned threads (see
+    _is_real_owner) stay accessible.
     """
     if current_user.is_anonymous or not current_user.oid:
+        return
+    if _is_admin(current_user):  # admins read/manage any thread
         return
     # Grandfather: only real authenticated owners are locked down.
     if _is_real_owner(owner) and owner != current_user.oid:
@@ -1371,13 +1385,17 @@ async def list_sessions(
     current_user: CurrentUser = Depends(get_current_user_dep),
 ) -> SessionListResponse:
     store = request.app.state.session_store
-    # IDOR fix: an authenticated caller may only list THEIR OWN sessions --
-    # override the path user_id with the verified oid so a spoofed/other id
-    # in the URL can't enumerate another user's threads. Open / anonymous
-    # mode keeps the path-supplied id (preserves zero-config dev behavior).
-    if not current_user.is_anonymous and current_user.oid:
-        user_id = current_user.oid
-    sessions = await store.list_sessions(user_id)
+    # Admins see EVERY conversation (team oversight); everyone else sees only
+    # their own. IDOR fix: an authenticated non-admin caller may only list
+    # THEIR OWN sessions -- override the path user_id with the verified oid so
+    # a spoofed/other id in the URL can't enumerate another user's threads.
+    # Open / anonymous mode keeps the path-supplied id (zero-config dev).
+    if _is_admin(current_user):
+        sessions = await store.list_sessions(user_id, include_all=True)
+    else:
+        if not current_user.is_anonymous and current_user.oid:
+            user_id = current_user.oid
+        sessions = await store.list_sessions(user_id)
     return SessionListResponse(
         sessions=[SessionSummary(**s) for s in sessions]
     )
