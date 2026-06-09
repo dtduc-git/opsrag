@@ -61,6 +61,16 @@ embedding:
   # bedrock:  provider: bedrock, model: amazon.titan-embed-text-v2:0, aws_region
 
 # --- Vector store ------------------------------------------------------------
+# Retrieval-quality trade-off (qdrant vs pgvector):
+#   qdrant   -- full hybrid: dense ANN + a TRUE BM25 sparse lane (FastEmbed IDF
+#               over identifier-subtoken-augmented text) and the optional code
+#               lane below. Best lexical/symbol ranking; recommended default.
+#   pgvector -- strong dense ANN, but NOT at lexical parity: the sparse lane is
+#               Postgres FTS (ts_rank_cd) + a best-effort pg_trgm trigram lane
+#               for exact-symbol recall -- not true BM25/IDF ranking. The code
+#               lane below is Qdrant-only and does NOT apply. Pick pgvector to
+#               avoid running Qdrant (e.g. reuse RDS/CloudSQL/AlloyDB); accept
+#               somewhat weaker lexical-relevance ranking on symbol-heavy queries.
 vector_store:
   provider: qdrant               # qdrant | pgvector
   url: http://localhost:6333
@@ -69,6 +79,9 @@ vector_store:
   # pgvector:
   #   provider: pgvector
   #   dsn_env: PGVECTOR_DSN
+  #   # NOTE: FTS + pg_trgm sparse lane, no true BM25, no code lane (see above).
+  #   # pg_trgm must be grantable (CREATE EXTENSION pg_trgm) or exact-symbol
+  #   # recall degrades to dense + FTS only.
 
 # --- Code lane (OPTIONAL, Qdrant only) ---------------------------------------
 # Retrieval is always hybrid (dense + BM25 RRF). Enabling the code lane adds a
