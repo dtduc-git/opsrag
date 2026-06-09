@@ -1,0 +1,118 @@
+# =============================================================================
+# opsrag -- multi-environment registry (prod / staging / dev)
+# =============================================================================
+# The canonical multi-cluster shape for `config.environments`. One OpsRAG
+# instance targets THREE environments; the kubernetes / prometheus /
+# elasticsearch MCP tools take an `env` arg resolved against this registry
+# (opsrag/environments.py). Mixes a GKE Workload-Identity cluster (prod) with
+# vendor-neutral kubeconfig-context clusters (staging on EKS, dev local), and
+# gives each env its own Prometheus + Elasticsearch (per-env API key + a
+# logical->physical field mapping that de-hardcodes one org's log schema).
+#
+# Layer it on top of a model overlay:
+#   helm upgrade --install opsrag deploy/helm/opsrag \
+#     --namespace opsrag --create-namespace \
+#     -f deploy/helm/opsrag/values-gcp.yaml \
+#     -f deploy/helm/opsrag/values-multi-env.yaml \
+#     --set image.repository=<registry>/opsrag --set image.tag=<tag>
+#
+# --- Keys under each target are validated (extra="forbid") -------------------
+# kubernetes:    K8sTarget        prometheus: PrometheusTarget
+# elasticsearch: EsTarget         -- see config.py for the exact field set.
+#
+# --- Secrets (api.envFromSecret) ---------------------------------------------
+# Per-env ES API keys are read from the env vars named by each target's
+# `api_key_env`. Put them in the Secret you mount via api.envFromSecret:
+#   ES_API_KEY_PROD, ES_API_KEY_STAGING, ES_API_KEY_DEV
+# (base64 `id:api_key`), plus the app's own POSTGRES_DSN etc. Never inline.
+# The `staging` EKS context authenticates via the kubeconfig's own exec plugin
+# (aws eks get-token); the `prod` GKE target uses Workload Identity (no key).
+# -----------------------------------------------------------------------------
+
+# --- OIDC --------------------------------------------------------------------
+auth:
+  issuer: https://your-idp.example.com
+  audience: opsrag
+
+api:
+  envFromSecret: opsrag-secrets
+
+# --- The three-environment registry ------------------------------------------
+config:
+  environments:
+    default: prod
+    targets:
+
+      # --- prod: GKE via Workload Identity -----------------------------------
+      prod:
+        kubernetes:
+          mode: gke                       # ADC + GCP Container API (no kubeconfig)
+          project: my-gcp-project
+          location: us-central1
+          name: prod-use1
+          default_namespace: default
+        prometheus:
+          reach: k8s_proxy                # through the cluster API server proxy
+          namespace: monitoring
+          service: kube-prometheus-stack-prometheus
+          port: 9090
+          # extra named Prometheis on the same cluster (e.g. a mesh's metrics):
+          extra_services:
+            istio: istio-prometheus
+        elasticsearch:
+          reach: direct                   # reachable HTTPS endpoint
+          url: https://es-prod.example.com:9200
+          api_key_env: ES_API_KEY_PROD    # base64 id:api_key, from envFromSecret
+          index_pattern: "logs-prod-*"
+          backend: elasticsearch
+          verify_ssl: true
+          # logical -> physical field map (de-hardcodes this org's schema):
+          fields:
+            timestamp: "@timestamp"
+            service: "kubernetes.labels.app"
+            level: "log.level"
+            message: "message"
+
+      # --- staging: EKS via a kubeconfig context -----------------------------
+      staging:
+        kubernetes:
+          mode: kubeconfig                # vendor-neutral: a KUBECONFIG context
+          context: staging-eks            # auths via aws-eks-get-token exec plugin
+          default_namespace: default
+        prometheus:
+          reach: k8s_proxy
+          namespace: monitoring
+          service: kube-prometheus-stack-prometheus
+          port: 9090
+        elasticsearch:
+          # ECK in-cluster: the API proxy strips Authorization, so port_forward
+          # preserves API-key auth (tunnels a pod port over the k8s API).
+          reach: port_forward
+          service: staging-es-http
+          namespace: elastic-system
+          port: 9200
+          api_key_env: ES_API_KEY_STAGING
+          index_pattern: "logs-staging-*"
+          fields:
+            timestamp: "@timestamp"
+            service: "kubernetes.labels.app"
+
+      # --- dev: local / in-cluster (current kubeconfig context) --------------
+      dev:
+        kubernetes:
+          mode: kubeconfig
+          context: null                   # null -> current-context / in-cluster SA
+          default_namespace: dev
+        prometheus:
+          # A directly reachable Prometheus (e.g. a dev port-forward / ingress).
+          reach: direct
+          url: http://prometheus.dev.svc:9090
+        elasticsearch:
+          reach: direct
+          url: https://es-dev.example.com:9200
+          api_key_env: ES_API_KEY_DEV
+          index_pattern: "logs-dev-*"
+          verify_ssl: false               # self-signed cert in dev
+          fields:
+            timestamp: "@timestamp"
+            service: "service.name"

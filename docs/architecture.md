@@ -33,10 +33,15 @@ surface, the `DeploymentContext` boundary, and the deployment options.
        v                    v                   v                 v
   +----------+      +---------------+    +-------------+   +---------------+
   | Agent    |      | Ingestion     |    | Providers   |   | MCP registry  |
-  | graph    |      | pipeline      |    | (factory)   |   | (14, gated)   |
+  | graph    |      | pipeline      |    | (factory)   |   | (20, gated)   |
   | (LangGr) |      | SCM->parse->  |    | LLM/embed/  |   | config-gated  |
   |          |      | chunk->embed  |    | vector/graph|   | tool exposure |
   +----+-----+      +-------+-------+    +------+------+   +-------+-------+
+       |
+       |  Investigate mode -> opsrag/investigations/ (InvestigationRunner):
+       |  event-ledger runner; 3 lanes -> hypothesizer -> reasoner (MCP
+       |  tools) -> evaluator; events tailed over SSE. Reaches each env via
+       |  the `environments:` registry (opsrag/environments.py).
        |                    |                   |                  |
        |   query embed +    | upsert chunks     | concrete         | enabled
        |   retrieve         v                   v impls            v tools
@@ -60,15 +65,19 @@ Top-level packages (under `opsrag/`):
 - `api/` - FastAPI surface: HTTP routes, SSE streaming, webhooks, the
   OIDC enforcement middleware, the rate-limit middleware, and the app
   lifespan that wires everything together.
-- `agent/` - the core LangGraph agent (graph builders, nodes, state).
-- `agents/investigation/` - a separate hypothesis-driven investigation
-  subgraph for alert root-cause work; deliberately not wired into the
-  live-query graph.
+- `agent/` - the core LangGraph agent (graph builders, nodes, state)
+  that answers `/query`.
+- `investigations/` - the event-driven Investigate engine
+  (`InvestigationRunner`) for alert root-cause work: a Postgres event
+  ledger backs a resumable SSE feed, parallel evidence lanes feed a
+  hypothesizer + reasoner loop (calling MCP tools) and a structured
+  evaluator. Separate from the `/query` agent graph and feature-gated.
 - `ingestion/` - the indexing pipeline (SCM -> parse -> chunk -> embed
   -> vector store).
-- `factory.py` + `config.py` + `context.py` - provider wiring, the
-  Pydantic settings root, and the operator-supplied `DeploymentContext`.
-- `mcp/` + `mcp_server/` - the 14 MCP integrations, their registry, and
+- `factory.py` + `config.py` + `context.py` + `environments.py` -
+  provider wiring, the Pydantic settings root, the operator-supplied
+  `DeploymentContext`, and the multi-environment registry resolver.
+- `mcp/` + `mcp_server/` - the 20 MCP integrations, their registry, and
   the gating that decides which tools the agent may see.
 - `interfaces/` - the Protocol interfaces every provider implements
   (the plugin contracts).
@@ -122,6 +131,72 @@ Every non-cached answer carries the sources the LLM actually saw, and
 deep-link URLs are built only from `DeploymentContext.source_urls` (see
 below) so the engine never invents a host.
 
+## Investigate engine (event ledger)
+
+Alert root-cause work runs through a separate engine in
+`opsrag/investigations/` (`InvestigationRunner`), not the `/query` agent
+graph. It is event-driven: every step writes a row to the
+`opsrag_investigation_events` Postgres ledger, and the SSE endpoint is a
+thin tail-cursor over that table, so a closed tab or network blip
+recovers by replaying from the last sequence rather than losing a live
+stream.
+
+```text
+  POST /investigations                       (routes_investigations.py)
+       |   create lifecycle row, kick off run_one()
+       v
+  InvestigationRunner.run_one()
+       |
+       +-- 3 evidence lanes (Flash):
+       |     LANE_A runbook search   LANE_B historical similar
+       |     LANE_C live probe
+       |
+       +-- INSIGHT_READY            (Pro fuses the lanes into a card)
+       +-- HYPOTHESES_GENERATED     (Pro, structured Pydantic output)
+       +-- reasoner loop (Pro, MCP tool-calling)
+       |     TOOL_CALLED / TOOL_RESULT per call
+       +-- evaluator pass (Flash, structured output)
+       |     HYPOTHESIS_EVALUATED -> confirmed | ruled_out
+       |                            | untested  | open  (+ citations)
+       +-- CONCLUSION_READY -> INVESTIGATION_COMPLETED
+
+  GET /investigations/{id}/events?since=N     SSE tail of the ledger
+      (browser EventSource reconnects with since=<lastSeenSeq>)
+```
+
+The runner reaches each environment's live tools (Kubernetes,
+Prometheus, Elasticsearch, logs) through the same gated MCP surface as
+the agent, scoped by the `environments:` registry below. A hard
+per-run budget bounds cost and latency: a 240s wall-clock stop, a 40
+cumulative-tool-call cap, and a 45s per-tool timeout. The feature is
+surfaced only when the operator enabled a live-telemetry integration
+(`opsrag/investigations/feature_gate.py`), so a corpus-only deployment
+never sees the Investigate tab.
+
+## Multi-environment registry
+
+A single opsrag instance can target N environments (for example
+`staging` and `production`). The top-level `environments:` config block
+(`EnvironmentsConfig` / `EnvironmentTarget` in `opsrag/config.py`) maps
+each env name to how to reach its Kubernetes, Prometheus, and
+Elasticsearch:
+
+- `kubernetes` - `gke` mode (Workload Identity + the GCP Container API)
+  or vendor-neutral `kubeconfig` mode (an EKS/cert/in-cluster context).
+- `prometheus` - `k8s_proxy` (through the cluster API server's service
+  proxy) or `direct` (a reachable base URL).
+- `elasticsearch` - `direct`, `port_forward`, or `proxy`, with a
+  logical-to-physical `fields` map that de-hardcodes one org's index
+  schema.
+
+The resolver in `opsrag/environments.py` binds this registry once at
+startup (`bind_environments`); lookups are pure and a miss raises a
+structured error rather than falling back to a default. The k8s,
+Prometheus, and Elasticsearch MCP tools each take an `env` argument and
+resolve through it. When `environments.targets` is empty, the registry
+is synthesized from the legacy `k8s` / `elasticsearch` / `deployment`
+blocks, so existing single-env deployments keep working unchanged.
+
 ## Pluggable providers
 
 `opsrag/factory.py :: build_providers(config)` is the single place that
@@ -132,13 +207,13 @@ agnostic:
 
 | Subsystem    | Config key                 | Built-in choices               |
 |--------------|----------------------------|--------------------------------|
-| LLM          | `llm.provider`             | anthropic, openai, vertex, bedrock |
-| Embedder     | `embedding.provider`       | openai, fastembed, vertex, bedrock |
+| LLM          | `llm.provider`             | anthropic, openai, vertex, bedrock, litellm |
+| Embedder     | `embedding.provider`       | fastembed (default), openai, vertex, bedrock, litellm |
 | Vector store | `vector_store.provider`    | qdrant (default), pgvector     |
-| Graph store  | `knowledge_graph.provider` | null/none (default), neo4j     |
-| Reranker     | `reranker.provider`        | noop, cohere, fastembed, vertex|
-| Sessions     | `session.provider`         | inmemory, postgres             |
-| Memory       | `memory.provider`          | inmemory, postgres             |
+| Graph store  | `knowledge_graph.provider` | none/null (default), neo4j     |
+| Reranker     | `reranker.provider`        | fastembed, cohere, bedrock, vertex, noop (+ MMR diversity) |
+| Sessions     | `session.provider`         | memory, postgres               |
+| Memory       | `memory.provider`          | memory, postgres, mem0         |
 | Observability| `observability.provider`   | console, phoenix               |
 | SCM          | `scm.provider`             | gitlab, github (clone or API)  |
 
@@ -187,7 +262,7 @@ ingest-time entity writes.
 
 ## Config-gated MCP tools
 
-opsrag ships 14 named MCP integrations (live infrastructure surfaces
+opsrag ships 20 named MCP integrations (live infrastructure surfaces
 such as Kubernetes, metrics, logs, SCM, incident trackers, cloud
 inventory, and a read-through tool cache). The registry at
 `opsrag/mcp/registry.py` is the single source of truth: each entry

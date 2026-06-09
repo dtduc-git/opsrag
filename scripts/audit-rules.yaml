@@ -223,6 +223,12 @@ hardcoded_hosts_allowlist:
   - "*.k8s.io"                       # K8s API groups (metrics.k8s.io, v4.channel.k8s.io, gateway.networking.k8s.io)
   - app.kubernetes.io                # K8s recommended-labels namespace
   - "*.kubernetes.io"
+  - kubernetes.labels.app            # ES log-field PATH (the `app` label under
+                                     # kubernetes.labels), NOT a host -- appears in
+                                     # the multi-env EsTarget field-mapping examples
+                                     # (values-multi-env.yaml, docs/configuration.md).
+                                     # The host regex misreads the trailing `.app`
+                                     # k8s label key as the `.app` gTLD.
 
   # Source control SaaS
   - github.com

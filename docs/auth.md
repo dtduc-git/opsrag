@@ -1,9 +1,13 @@
 # Authentication
 
-opsrag authenticates every API request with an OIDC Bearer token. There is
-no API-key path: callers obtain a JWT from your identity provider (IdP) and
-send it on each request. This document explains how verification works and
-how to point opsrag at common identity providers.
+opsrag has three authentication modes (`auth.mode`): `open` (no
+enforcement), `oidc` (verify incoming Bearer JWTs — the default and the
+focus of most of this document), and `login` (first-party cookie sessions
+with password and/or SSO). Beyond authentication, opsrag enforces
+**per-session ownership** (a thread can only be read or deleted by its
+owner) and **rate limiting** (a per-request throttle plus a login brute-
+force lockout). This document explains JWT verification, per-provider IdP
+setup, the ownership model, and rate limiting.
 
 ## How auth works
 
@@ -201,3 +205,104 @@ byte the same string, and every party must be able to reach that URL.
   `aud` (not just `azp`) equals `auth.audience`. Confirm with a decoded
   sample token, since v1.0 and v2.0 endpoints emit different `aud`/`iss`
   shapes.
+
+## Per-session ownership
+
+Authentication answers *who is calling*; ownership answers *what they may
+touch*. A conversation thread (session) is owned by the verified identity
+that created it, and only that owner can read or delete it. The owner is the
+caller's stable subject id (`current_user.oid`, derived from the JWT `sub`
+in `oidc` mode or the SSO/`sub` identity in `login` mode), recorded into the
+checkpoint metadata as `user_id` when the thread is first written.
+
+### Enforcement
+
+On every single-thread read or delete (for example `GET /sessions/{thread_id}`,
+`GET /sessions/{thread_id}/messages`, `DELETE /sessions/{thread_id}`), opsrag
+looks up the thread's recorded owner via `store.get_session_owner(thread_id)`
+and compares it to the caller. The check lives in
+`opsrag/api/routes.py:_deny_if_not_owner`:
+
+```python
+if _is_real_owner(owner) and owner != current_user.oid:
+    raise HTTPException(status_code=404, detail="session not found")
+```
+
+Three deliberate properties:
+
+- **Cross-user access returns 404, not 403.** A non-owner gets "session not
+  found" — the same response as a thread that does not exist. Returning 403
+  would be an existence oracle, leaking that the thread is real but
+  forbidden. 404 reveals nothing.
+- **Open / anonymous mode is unenforced.** When the caller is anonymous
+  (`current_user.is_anonymous` or no `oid` — i.e. `auth.mode: open`, no
+  `auth` block, or a request with no usable identity), the ownership check
+  is a no-op. This preserves zero-config local-dev behavior where every
+  caller shares one anonymous identity.
+- **Legacy anonymous-owned threads are grandfathered.** Threads created
+  before owner binding existed have an empty or `"anonymous"` owner.
+  `_is_real_owner` treats only a non-empty, non-`"anonymous"` owner as a
+  lockable identity, so these pre-auth threads stay readable and deletable
+  by anyone. opsrag cannot retroactively assign them an owner, so locking
+  them down would orphan them; only threads with a real authenticated owner
+  are guarded.
+
+Ownership binds to the *verified* id. A client may still pass a `user_id` in
+the request body for memory/personalization, but it never overrides the
+owner binding — that always uses `current_user.oid`.
+
+## Rate limiting
+
+opsrag applies two independent throttles, both backed by a pluggable
+storage seam (`opsrag/api/rate_limit_backend.py`):
+
+1. **Per-request rate limit** — `RateLimitMiddleware` caps requests per key
+   (per client) to `api.rate_limit_rpm` requests per minute. Over the limit
+   returns HTTP 429 with a `Retry-After`.
+2. **Login lockout** — `LoginRateLimiter` (used only in `auth.mode: login`)
+   throttles failed `POST /auth/login` attempts. After
+   `login_max_attempts` failures within `login_window_seconds`, the
+   key (email/IP) is locked for `login_lockout_seconds`; a successful login
+   clears the counter.
+
+### Backend selection: memory vs redis
+
+`api.rate_limit_backend` selects where the throttle state lives:
+
+```yaml
+api:
+  rate_limit_enabled: true
+  rate_limit_rpm: 60
+  rate_limit_backend: memory        # "memory" (default) or "redis"
+  redis_url_env: OPSRAG_REDIS_URL   # env var holding the Redis URL
+```
+
+- `memory` (default) — in-process counters. Correct and dependency-free for
+  a **single replica**, but state is per-process: with multiple replicas
+  each enforces its own limit, so the effective aggregate limit is
+  `rpm x replicas` and a login lockout on one pod is not seen by the others.
+- `redis` — shared state across replicas. The request limiter uses an atomic
+  fixed-window counter (`INCR` + `EXPIRE`); login uses a failure counter plus
+  a `SETEX` lockout key whose TTL is the authoritative retry-after. Use this
+  for any horizontally-scaled deployment.
+
+**Redis is REQUIRED when selected.** `redis` is an optional extra (the
+`redis` import is lazy, so the API stays importable without it). When
+`rate_limit_backend: redis`, opsrag reads the URL from `redis_url_env`,
+`PING`s the server at startup, and **fails fast** if it is unreachable —
+there is no silent fallback to in-memory, because a half-enforced limiter is
+worse than a loud boot failure. The session config also exposes
+`login_max_attempts` / `login_window_seconds` / `login_lockout_seconds`
+(under `auth.login`) so both throttles ride the same backend.
+
+See [`operations.md`](./operations.md#rate-limiting-across-replicas) for the
+multi-replica deployment checklist.
+
+## See also
+
+- [`configuration.md`](./configuration.md) — the full `auth` and `api`
+  config blocks and env precedence.
+- [`operations.md`](./operations.md) — day-2 ops, including rate limiting
+  across replicas and the security hardening checklist.
+- [`architecture.md`](./architecture.md) — where the verifier and middleware
+  sit in the request flow.

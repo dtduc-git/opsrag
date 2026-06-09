@@ -15,7 +15,7 @@ And two hard gaps:
 - **Prometheus** hardcodes service/namespace/port: `DEFAULT_PROMETHEUS_SERVICE="monitoring-main-prometheus"`, `PROMETHEUS_NAMESPACE="monitoring"`, `PROMETHEUS_PORT=9090` (`mcp/prometheus.py:83-86`); reached via the k8s API proxy only.
 - **Elasticsearch** is single-endpoint only (`ElasticsearchConfig`, `config.py:447-472`; `mcp/elasticsearch.py:_config` single `_BOUND`). No per-env.
 
-The private cluster build (`internal-image-repo/images/opsrag/backend`) hardcodes `_KNOWN_CLUSTERS=("acme-prd","acme-pre","acme-stg","acme-ant")`, a canonical-env enum `["ant","stg","pre","prd"]`, the ECK ES schema (`time`, `kubernetes_metadata.labels_name`), etc.
+A private/internal cluster build of OpsRAG hardcodes its cluster names (`_KNOWN_CLUSTERS=("<org>-prd","<org>-pre","<org>-stg","<org>-ant")`), a canonical-env enum (`["ant","stg","pre","prd"]`), a fixed ECK ES schema (`time`, `kubernetes_metadata.labels_name`), etc. This design de-hardcodes all of it so the open-source build carries none of those organization-specific values.
 
 ## Section 1 — Config schema (APPROVED)
 
@@ -51,7 +51,7 @@ environments:
         index_pattern: "app-logs-*"
         backend: elasticsearch
         verify_ssl: true
-        fields:                  # logical -> ES field; de-hardcodes acme ECK schema
+        fields:                  # logical -> ES field; de-hardcodes a fixed/internal ECK schema
           timestamp: "@timestamp"
           service: "kubernetes.labels.app"
           stream: "stream"

@@ -33,6 +33,16 @@ api:
     limits:
       cpu: "1"
       memory: 1Gi
+  # Rate-limit backend (renders into config.api). OMITTED by default so the
+  # app default applies (backend=memory, in-process). Set backend=redis to
+  # share limiter state across replicas -- Redis then becomes REQUIRED: the
+  # API PINGs it at boot and fails fast if unreachable. The URL is read from
+  # the env var named by `redisUrlEnv` (default OPSRAG_REDIS_URL), supplied via
+  # api.envFromSecret -- never inline. `redis` is an optional image extra.
+  rateLimit: {}
+    # backend: redis              # memory (default) | redis
+    # redisUrlEnv: OPSRAG_REDIS_URL
+    # rpm: 60                      # requests/min/identity (default 60)
   # Extra environment variables (name/value) for the api container.
   extraEnv: []
   # Name of an existing Secret whose keys are injected as env vars (LLM keys,
@@ -177,6 +187,23 @@ config:
   observability:
     provider: console
     projectName: opsrag
+  # --- Multi-environment registry (Settings.environments) --------------------
+  # One OpsRAG instance can target N environments; each bundles how to reach
+  # that env's kubernetes + prometheus + elasticsearch. The k8s / prometheus /
+  # elasticsearch MCP tools take an `env` arg resolved against this registry.
+  # OMITTED by default: when `targets` is empty the engine SYNTHESIZES a
+  # registry from the legacy k8s/elasticsearch/deployment blocks (back-compat).
+  # Keys under each target MUST match config.py K8sTarget / PrometheusTarget /
+  # EsTarget (extra="forbid"). See values-multi-env.yaml for the canonical shape.
+  environments: {}
+    # default: prod
+    # targets:
+    #   prod:
+    #     kubernetes: { mode: kubeconfig, context: prod }
+    #     prometheus: { reach: k8s_proxy, namespace: monitoring,
+    #                   service: kube-prometheus-stack-prometheus, port: 9090 }
+    #     elasticsearch: { reach: direct, url: https://es.example.com:9200,
+    #                      api_key_env: ES_API_KEY_PROD }
 
 # --- MCP integrations (all 14; disabled by default) --------------------------
 # The key set MUST equal the MCPIntegration registry exactly (CI-enforced).
