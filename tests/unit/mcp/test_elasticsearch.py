@@ -81,9 +81,24 @@ async def test_esql_query(fake) -> None:
 
 
 async def test_esql_rejected_on_opensearch_backend(fake) -> None:
-    # Flip the bound backend to opensearch -> ES|QL must refuse.
-    import opsrag.mcp.elasticsearch as _mod
-    _mod._BOUND = {**_mod._BOUND, "backend": "opensearch"}
+    # Rebind the registry with an opensearch ES target -> ES|QL must refuse.
+    from opsrag.config import EnvironmentsConfig, EnvironmentTarget, EsTarget
+    from opsrag.environments import bind_environments
+
+    class _Cfg:
+        environments = EnvironmentsConfig(
+            default="default",
+            targets={
+                "default": EnvironmentTarget(
+                    elasticsearch=EsTarget(
+                        reach="direct", url="http://es.local:9200",
+                        backend="opensearch", index_pattern="*",
+                    ),
+                ),
+            },
+        )
+
+    bind_environments(_Cfg())
     with pytest.raises(MCPElasticsearchError) as ei:
         await get_tool("elasticsearch_esql_query").handler(None, {"query": "FROM x"})
     assert ei.value.reason == "backend"

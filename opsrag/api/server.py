@@ -238,6 +238,19 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 _log.error("auth: login-mode setup failed (%s); login disabled", exc)
 
+        # Unified multi-environment registry (Approach A): bind it FIRST so
+        # the k8s / prometheus / elasticsearch MCPs resolve per-env targets
+        # (cluster coords, prometheus service/ns/port, ES endpoint+fields).
+        # When the `environments:` block is empty this synthesizes a registry
+        # from the legacy k8s/elasticsearch/deployment config -- so existing
+        # deployments + the demo keep working (the register_clusters /
+        # es_mcp.bind calls below are now back-compat shims).
+        try:
+            from opsrag.environments import bind_environments
+            bind_environments(cfg)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("environments registry bind failed: %s", exc)
+
         # Register K8s cluster coordinates with the K8s MCP for the optional
         # GKE Workload-Identity provider (ADC + GCP Container API). Empty
         # config (the default) falls through to the vendor-neutral path:

@@ -472,6 +472,107 @@ class ElasticsearchConfig(BaseModel):
     verify_ssl: bool = True
 
 
+# --- Unified multi-environment registry (Approach A) -----------------
+# One OpsRAG instance can target N environments; each environment bundles
+# how to reach its kubernetes + prometheus + elasticsearch. Names in
+# `environments.targets` are the canonical env list (the engine derives
+# DeploymentContext.environments from them -- no hardcoded env enum).
+# See docs/superpowers/specs/2026-06-09-multi-env-environments-registry-design.md
+# Fields are intentionally permissive (most Optional); invalid combinations
+# surface as STRUCTURED errors at resolve/use time, never silent defaults.
+
+
+class K8sTarget(BaseModel):
+    """How to reach one environment's Kubernetes API."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # gke       -> Workload Identity (ADC) + GCP Container API (project/location/name)
+    # kubeconfig-> vendor-neutral: a KUBECONFIG context (EKS via aws-eks-get-token,
+    #              client certs, in-cluster SA when context is None).
+    mode: Literal["gke", "kubeconfig"] = "kubeconfig"
+    # gke mode:
+    project: str | None = None
+    location: str | None = None
+    name: str | None = None
+    # kubeconfig mode (None -> current-context / in-cluster SA):
+    context: str | None = None
+    # shared:
+    default_namespace: str | None = None
+    pod_label_selector: str | None = None
+
+
+class PrometheusTarget(BaseModel):
+    """How to reach one environment's Prometheus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # k8s_proxy -> through the cluster's API server service-proxy.
+    # direct    -> a reachable Prometheus base URL.
+    reach: Literal["k8s_proxy", "direct"] = "k8s_proxy"
+    # k8s_proxy mode (generic defaults -- NOT monitoring-main-prometheus):
+    namespace: str = "monitoring"
+    service: str = "kube-prometheus-stack-prometheus"
+    port: int = 9090
+    # extra named services on the same cluster, e.g. {"istio": "..."}.
+    extra_services: dict[str, str] = Field(default_factory=dict)
+    # direct mode:
+    url: str | None = None
+    bearer_token_env: str | None = None
+
+
+class EsTarget(BaseModel):
+    """How to reach one environment's Elasticsearch / OpenSearch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # direct       -> a reachable ES base URL (HTTPS).
+    # port_forward -> tunnel a pod port over the k8s API (ECK-style; the API
+    #                 proxy strips Authorization, so port-forward preserves
+    #                 API-key auth). proxy -> k8s service-proxy.
+    reach: Literal["direct", "port_forward", "proxy"] = "direct"
+    # direct mode:
+    url: str | None = None
+    # in-cluster (port_forward / proxy):
+    service: str | None = None
+    namespace: str | None = None
+    port: int = 9200
+    pod_label_selector: str | None = None
+    # auth (env-only; prefer API key):
+    api_key_env: str | None = None
+    username_env: str | None = None
+    password_env: str | None = None
+    # query shaping:
+    index_pattern: str = "*"
+    backend: Literal["elasticsearch", "opensearch"] = "elasticsearch"
+    verify_ssl: bool = True
+    # logical -> physical ES field mapping (de-hardcodes one org's schema,
+    # e.g. {"timestamp": "@timestamp", "service": "kubernetes.labels.app_name"}).
+    fields: dict[str, str] = Field(default_factory=dict)
+
+
+class EnvironmentTarget(BaseModel):
+    """One environment: how to reach its k8s + prometheus + elasticsearch.
+    Any integration may be None (that integration is unavailable for the env)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kubernetes: K8sTarget | None = None
+    prometheus: PrometheusTarget | None = None
+    elasticsearch: EsTarget | None = None
+
+
+class EnvironmentsConfig(BaseModel):
+    """Unified multi-environment registry. Empty `targets` -> the engine
+    synthesizes a registry from the legacy `k8s` / `elasticsearch` /
+    `deployment` blocks (backward compatible)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default: str | None = None
+    targets: dict[str, EnvironmentTarget] = Field(default_factory=dict)
+
+
 class CodeCacheConfig(BaseModel):
     """Pre-warm settings for the MCP ``code_*`` tool clone cache.
 
@@ -704,6 +805,10 @@ class Settings(BaseModel):
     brand: BrandConfig = Field(default_factory=BrandConfig)
     k8s: K8sConfig = Field(default_factory=K8sConfig)
     elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
+    # Unified multi-environment registry (Approach A). When `targets` is
+    # empty the engine synthesizes it from the legacy k8s/elasticsearch/
+    # deployment blocks above, so existing deployments keep working.
+    environments: EnvironmentsConfig = Field(default_factory=EnvironmentsConfig)
     investigation_history: InvestigationHistoryConfig = Field(
         default_factory=InvestigationHistoryConfig,
     )
