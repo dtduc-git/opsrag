@@ -228,9 +228,12 @@ jobs:
             base="HEAD^"  # first push / unknown base -- diff the single commit
           fi
           echo "diff base: $base"
-          # `^opsrag/(agent|agents|mcp|eval)/` is the prefix match the broken
-          # contains() was trying (and failing) to express.
-          if git diff --name-only "$base" HEAD | grep -qE '^opsrag/(agent|agents|mcp|eval)/'; then
+          # `^opsrag/(...)/` is the prefix match the broken contains() was
+          # trying (and failing) to express. It covers the agent/MCP/eval code
+          # AND the retrieval pipeline (ingestion/parsers/chunkers/vectorstores/
+          # embedders) -- a chunking or vectorstore change shifts what gets
+          # retrieved, so it must be able to trip the eval gate too.
+          if git diff --name-only "$base" HEAD | grep -qE '^opsrag/(agent|agents|mcp|eval|ingestion|parsers|chunkers|vectorstores|embedders)/'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             echo "eval-relevant paths changed -- gate will run."
           else

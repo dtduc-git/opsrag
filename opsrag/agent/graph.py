@@ -163,6 +163,7 @@ def build_minimal_graph(
     # recall below where multi-fact / synthesis answers break down; align with
     # the other graphs' default of 5.
     rerank_top_k: int = 5,
+    rerank_diversity: float = 0.0,
     known_repos: list[str] | None = None,
     code_embedder: EmbeddingProvider | None = None,
     code_store: VectorStore | None = None,
@@ -179,7 +180,7 @@ def build_minimal_graph(
         ),
     )
     if reranker:
-        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k))
+        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
     graph.add_node("verify_answer", verify_answer_node(llm, vector_store, observability))
 
@@ -206,6 +207,7 @@ def build_full_graph(
     checkpointer=None,
     top_k: int = 10,
     rerank_top_k: int = 5,
+    rerank_diversity: float = 0.0,
     known_repos: list[str] | None = None,
     light_graph=None,
     model_router=None,
@@ -231,7 +233,7 @@ def build_full_graph(
             code_embedder=code_embedder, code_store=code_store,
         ),
     )
-    graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k))
+    graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
     if light_graph is not None:
         from opsrag.agent.nodes.entity_expand import entity_expand_node
         graph.add_node(
@@ -390,6 +392,7 @@ def build_tool_calling_graph(
     checkpointer=None,
     top_k: int = 10,
     rerank_top_k: int = 5,
+    rerank_diversity: float = 0.0,
     known_repos: list[str] | None = None,
     model_router=None,
     code_embedder: EmbeddingProvider | None = None,
@@ -424,7 +427,7 @@ def build_tool_calling_graph(
         ),
     )
     if reranker:
-        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k))
+        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
     if light_graph is not None:
         from opsrag.agent.nodes.entity_expand import entity_expand_node
@@ -477,6 +480,7 @@ def build_multi_agent_graph(
     checkpointer=None,
     top_k: int = 10,
     rerank_top_k: int = 5,
+    rerank_diversity: float = 0.0,
     known_repos: list[str] | None = None,
     model_router=None,
     code_embedder: EmbeddingProvider | None = None,
@@ -511,7 +515,7 @@ def build_multi_agent_graph(
         ),
     )
     if reranker:
-        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k))
+        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
     # Light-graph 1-hop entity augmentation on the retrieval branch -- was wired
     # ONLY into build_full_graph, so in multi_agent mode (config-local default)

@@ -24,3 +24,20 @@ def test_valid_minimal_config_still_accepted() -> None:
     # the rejection above is about the *unknown key*, not strictness in general.
     settings = Settings.model_validate({})
     assert settings is not None
+
+
+def test_unimplemented_chunking_strategy_rejected_at_load() -> None:
+    # "semantic" is not implemented by the chunker factory. It must be rejected
+    # at config-load (clear pydantic error) rather than deferring to a runtime
+    # NotImplementedError when the chunker is built. The error should name the
+    # field so operators can find the bad value.
+    with pytest.raises(ValidationError) as exc_info:
+        Settings.model_validate({"chunking": {"strategy": "semantic"}})
+    assert "chunking.strategy" in str(exc_info.value)
+
+
+def test_implemented_chunking_strategies_still_accepted() -> None:
+    # The two strategies the factory can build remain valid.
+    for strategy in ("parent_child", "fixed_size"):
+        settings = Settings.model_validate({"chunking": {"strategy": strategy}})
+        assert settings.chunking.strategy == strategy

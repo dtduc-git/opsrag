@@ -144,6 +144,7 @@ class QdrantVectorStore:
         collection_name: str = "opsrag",
         dimension: int = 3072,
         distance: str = "cosine",
+        allow_dimension_change: bool = False,
     ):
         self._client = AsyncQdrantClient(url=url, api_key=api_key)
         self._collection = collection_name
@@ -153,6 +154,7 @@ class QdrantVectorStore:
             "dot": qm.Distance.DOT,
             "euclid": qm.Distance.EUCLID,
         }[distance]
+        self._allow_dimension_change = allow_dimension_change
         self._ensured = False
 
     async def ensure_collection(self) -> None:
@@ -160,7 +162,23 @@ class QdrantVectorStore:
             return
         existing = await self._client.get_collections()
         names = {c.name for c in existing.collections}
-        if self._collection not in names:
+        if self._collection in names:
+            # Existing collection: fail closed if its dense vector size differs
+            # from the embedder's dimension (parity with pgvector's
+            # _assert_dimension_compatible). The API server already runs this
+            # guard in its lifespan, but the ingestion/indexer Job builds its
+            # own providers and writes WITHOUT that lifespan -- so an embedder
+            # swap (e.g. 3072 -> 768) would otherwise surface as a cryptic
+            # upsert error here instead of a clear fail-closed message. Reuse
+            # the defensively-typed guard so there's a single source of truth.
+            from opsrag.vectorstore_guard import assert_dimension_compatible
+            await assert_dimension_compatible(
+                self._client,
+                self._collection,
+                self._dimension,
+                self._allow_dimension_change,
+            )
+        else:
             # New collection: named dense + named sparse with IDF modifier.
             await self._client.create_collection(
                 collection_name=self._collection,
