@@ -37,9 +37,16 @@ def test_enable_without_requirements_fails_fast(name: str) -> None:
         validate_enabled_mcps(settings, env={})
     msg = str(exc_info.value)
     assert msg.startswith(f"MCP_MISCONFIGURED:{name}:")
-    # The missing item is one of the integration's declared requirements.
     integ = REGISTRY[name]
-    assert exc_info.value.missing in (integ.required_env + integ.required_config)
+    if integ.validate is not None:
+        # A custom validator expresses OR-semantics the flat required_* tuples
+        # can't (e.g. accept the `environments:` registry OR legacy cluster
+        # config); it returns its own richer missing-item message. The
+        # fail-fast invariant + canonical format are already asserted above.
+        assert exc_info.value.missing
+    else:
+        # Otherwise the missing item is one of the declared requirements.
+        assert exc_info.value.missing in (integ.required_env + integ.required_config)
 
 
 @pytest.mark.parametrize("name", UNGATED)
