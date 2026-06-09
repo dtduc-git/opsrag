@@ -1,0 +1,94 @@
+# =============================================================================
+# opsrag -- live-telemetry MCP scenario (lights up the Investigate feature)
+# =============================================================================
+# Enables the read-only MCP integrations the event-driven InvestigationRunner
+# leans on -- datadog + rootly + kubernetes + prometheus + code + knowledge --
+# and wires each integration's required_env via a Secret mounted with
+# envFromSecret. A minimal single-env `environments:` registry (one prod env in
+# kubeconfig mode) is included so the kubernetes + prometheus tools validate and
+# resolve a target.
+#
+# Layer this on top of a base model overlay, e.g.:
+#   helm upgrade --install opsrag deploy/helm/opsrag \
+#     --namespace opsrag --create-namespace \
+#     -f deploy/helm/opsrag/values-aws.yaml \
+#     -f deploy/helm/opsrag/values-mcp.yaml \
+#     --set image.repository=<registry>/opsrag --set image.tag=<tag>
+# (or -f values-minimal.yaml for Anthropic + fastembed instead of Bedrock.)
+#
+# --- Secrets the enabled integrations need (per opsrag/mcp/registry.py) ------
+# Create a Secret named `opsrag-mcp-secrets` (referenced below via every
+# mcp.<name>.secretRef AND api.envFromSecret) carrying the required_env keys.
+# The deployment mounts each distinct secretRef as an additional envFrom, so
+# these land in the api container:
+#   datadog     -> DD_API_KEY, DD_APP_KEY        (+ optional DD_SITE)
+#   rootly      -> ROOTLY_API_TOKEN
+#   kubernetes  -> (none: in-cluster SA / KUBECONFIG / environments registry)
+#   prometheus  -> (none: reached via the environments registry below)
+#   code        -> (none: local clone cache; GITLAB_TOKEN/GITHUB_TOKEN only if
+#                   the indexer must clone private repos)
+#   knowledge   -> (none: queries the local RAG index)
+# Plus the app's own keys (LLM key when not on Bedrock/Vertex, POSTGRES_DSN).
+# Create with: kubectl create secret generic opsrag-mcp-secrets \
+#   --from-literal=DD_API_KEY=... --from-literal=DD_APP_KEY=... \
+#   --from-literal=ROOTLY_API_TOKEN=... --from-literal=POSTGRES_DSN=...
+# Never commit real values.
+# -----------------------------------------------------------------------------
+
+# --- OIDC --------------------------------------------------------------------
+auth:
+  issuer: https://your-idp.example.com
+  audience: opsrag
+
+# --- API: mount the MCP credential Secret ------------------------------------
+# api.envFromSecret + every enabled mcp.<name>.secretRef are de-duped by the
+# chart, so naming the same Secret here and below mounts it exactly once.
+api:
+  envFromSecret: opsrag-mcp-secrets
+
+# --- App config: a one-env registry so k8s + prometheus tools resolve --------
+# `code` searches the local clone cache, `knowledge` queries the RAG index --
+# neither needs a registry. `kubernetes` + `prometheus` take an `env` arg
+# resolved against `environments`; with one target it defaults to `prod`.
+config:
+  environments:
+    default: prod
+    targets:
+      prod:
+        # kubeconfig mode, context omitted -> the in-cluster ServiceAccount.
+        # Grant that SA read RBAC (pods/services/deployments/events/logs, and
+        # the metrics.k8s.io API for k8s_top_pod) across the namespaces you
+        # investigate.
+        kubernetes:
+          mode: kubeconfig
+          default_namespace: default
+        # Prometheus through the cluster API server's service-proxy: no extra
+        # ingress, reuses the SA token. Point at your kube-prometheus-stack
+        # (or set reach=direct + url for a reachable Prometheus endpoint).
+        prometheus:
+          reach: k8s_proxy
+          namespace: monitoring
+          service: kube-prometheus-stack-prometheus
+          port: 9090
+
+# --- MCP integrations: enable the live-telemetry set -------------------------
+# Each enabled flag renders OPSRAG_MCP_<NAME>_ENABLED on the api container; the
+# secretRef (when set) mounts that Secret as envFrom so required_env is present.
+mcp:
+  datadog:    { enabled: true,  secretRef: opsrag-mcp-secrets }   # DD_API_KEY, DD_APP_KEY
+  rootly:     { enabled: true,  secretRef: opsrag-mcp-secrets }   # ROOTLY_API_TOKEN
+  kubernetes: { enabled: true,  secretRef: "" }                   # in-cluster SA
+  prometheus: { enabled: true,  secretRef: "" }                   # via environments registry
+  code:       { enabled: true,  secretRef: "" }                   # local clone cache
+  knowledge:  { enabled: true,  secretRef: "" }                   # local RAG index
+
+# --- RBAC for the kubernetes / prometheus MCP --------------------------------
+# The chart's indexJob.rbac block grants the Job SA clone/create rights, but the
+# read-only K8s tools run from the API pod's SA. Bind a read Role/ClusterRole to
+# it out-of-band (the chart does not template app-level read RBAC):
+#   kubectl create clusterrole opsrag-read \
+#     --verb=get,list --resource=pods,services,deployments,statefulsets,\
+# daemonsets,jobs,cronjobs,events,pods/log,nodes
+#   kubectl create clusterrolebinding opsrag-read \
+#     --clusterrole=opsrag-read \
+#     --serviceaccount=opsrag:opsrag

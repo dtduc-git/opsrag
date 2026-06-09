@@ -63,10 +63,16 @@ spec:
             {{- with .Values.api.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if .Values.api.envFromSecret }}
+          {{- $mcpSecretRefs := include "opsrag.mcpSecretRefs" . }}
+          {{- if or .Values.api.envFromSecret (trim $mcpSecretRefs) }}
           envFrom:
+            {{- if .Values.api.envFromSecret }}
             - secretRef:
                 name: {{ .Values.api.envFromSecret }}
+            {{- end }}
+            {{- with $mcpSecretRefs }}
+            {{- . | nindent 12 }}
+            {{- end }}
           {{- end }}
           readinessProbe:
             httpGet:

@@ -64,3 +64,24 @@ enable flags (contract: helm-values-schema.md "Wiring from values to container")
   value: {{ $cfg.enabled | quote }}
 {{- end }}
 {{- end -}}
+
+{{/*
+Distinct, sorted Secret names referenced by enabled MCP integrations'
+`secretRef`. The deployment mounts each as an additional `envFrom.secretRef`
+so the integration's required_env (e.g. DD_API_KEY, ROOTLY_API_TOKEN) lands in
+the api container. Dedupes against api.envFromSecret so a shared Secret isn't
+mounted twice.
+*/}}
+{{- define "opsrag.mcpSecretRefs" -}}
+{{- $seen := dict -}}
+{{- with .Values.api.envFromSecret }}{{ $seen = set $seen . true }}{{- end }}
+{{- range $name, $cfg := .Values.mcp }}
+{{- if and $cfg.enabled $cfg.secretRef }}
+{{- if not (hasKey $seen $cfg.secretRef) }}
+{{- $seen = set $seen $cfg.secretRef true }}
+- secretRef:
+    name: {{ $cfg.secretRef }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}

@@ -1,0 +1,64 @@
+# =============================================================================
+# opsrag -- minimal "just works" baseline
+# =============================================================================
+# The smallest real deployment: Anthropic LLM + on-device fastembed + Qdrant,
+# NO MCP integrations, OIDC auth, a single API replica. Use this to stand the
+# service up, confirm /readyz, and ask questions over an indexed corpus before
+# layering on cloud models (values-aws.yaml / values-gcp.yaml), live-telemetry
+# MCP (values-mcp.yaml), or multi-cluster (values-multi-env.yaml).
+#
+# Usage:
+#   helm upgrade --install opsrag deploy/helm/opsrag \
+#     --namespace opsrag --create-namespace \
+#     -f deploy/helm/opsrag/values-minimal.yaml \
+#     --set image.repository=<your-registry>/opsrag --set image.tag=<tag>
+#
+# Required out-of-band: a Qdrant service + Postgres reachable in-cluster, and a
+# Secret named `opsrag-secrets` (api.envFromSecret) carrying at least:
+#   ANTHROPIC_API_KEY   -- the LLM key (config.llm.apiKeyEnv)
+#   POSTGRES_DSN        -- sessions / usage / memory (config.session.dsnEnv)
+#   OPSRAG_SESSION_SIGNING_KEY, OPSRAG_ADMIN_PASSWORD  -- if you use them
+# Never commit real values; create the Secret with `kubectl create secret`.
+# -----------------------------------------------------------------------------
+
+image:
+  repository: ghcr.io/OWNER/opsrag   # override with --set image.repository=...
+  tag: "0.1.0"
+
+# --- OIDC (your IdP) ---------------------------------------------------------
+# Bearer-token verification against your issuer. Point at your discovery URL.
+auth:
+  issuer: https://your-idp.example.com
+  audience: opsrag
+
+# --- App config: Anthropic + fastembed + Qdrant (the shipped defaults) -------
+# These mirror the chart defaults; pinned here so the baseline is explicit.
+config:
+  # cloudProvider unset -> classic provider blocks, no bundle.
+  llm:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    apiKeyEnv: ANTHROPIC_API_KEY
+  embedding:
+    # On-device 384-dim cross-encoder; no embedding API key required.
+    provider: fastembed
+    model: BAAI/bge-small-en-v1.5
+  vectorStore:
+    provider: qdrant
+    url: http://qdrant:6333          # adjust to your Qdrant service / URL
+    collection: opsrag
+  session:
+    provider: postgres
+    dsnEnv: POSTGRES_DSN
+
+# --- API workload: a single replica ------------------------------------------
+# rateLimit omitted -> in-process "memory" backend, correct for 1 replica.
+api:
+  replicaCount: 1
+  envFromSecret: opsrag-secrets
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+# All MCP integrations stay disabled (the chart default). The Investigate
+# feature stays dark until you enable live-telemetry MCPs (see values-mcp.yaml).

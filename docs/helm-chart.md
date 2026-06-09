@@ -6,11 +6,15 @@ the chart-local `deploy/helm/opsrag/README.md`; this document is the
 authoritative per-key reference and the place for operational notes (validation
 behavior, what gets created, upgrade semantics, and the release test).
 
-The chart deploys the opsrag API workload and, optionally, the UI and a Slack
-bot worker, to a Kubernetes cluster (requires Kubernetes >= 1.25). All 14 MCP
-integrations are present in the chart and disabled by default; each
-`mcp.<name>.enabled` flag is wired onto the api container as the environment
-variable `OPSRAG_MCP_<NAME>_ENABLED`.
+The chart deploys the opsrag API workload, the UI, and an indexing CronJob, and
+optionally a Slack bot worker, to a Kubernetes cluster (requires Kubernetes
+>= 1.25). All 20 MCP integrations are present in the chart and disabled by
+default; each `mcp.<name>.enabled` flag is wired onto the api container as the
+environment variable `OPSRAG_MCP_<NAME>_ENABLED`.
+
+For the deployment-oriented walkthrough (local compose, install steps,
+production hardening), see [`./deployment.md`](./deployment.md); this document is
+the per-key values reference.
 
 ## Contents
 
@@ -18,6 +22,8 @@ variable `OPSRAG_MCP_<NAME>_ENABLED`.
 - [Values reference](#values-reference)
 - [MCP integrations](#mcp-integrations)
 - [Supplying credentials](#supplying-credentials)
+- [Keys not templated by the chart](#keys-not-templated-by-the-chart)
+- [Scenario values files](#scenario-values-files)
 - [Schema validation](#schema-validation)
 - [Resources created](#resources-created)
 - [Upgrade notes](#upgrade-notes)
@@ -133,6 +139,28 @@ Opt-out React UI workload (Deployment + Service). Enabled by default.
 | `ui.service.port` | `80` | UI Service port. |
 | `ui.resources` | requests `50m`/`128Mi`, limits `250m`/`256Mi` | CPU/memory requests and limits for the ui container. |
 
+### indexJob
+
+The indexing CronJob (`<fullname>-indexer`). It is BOTH the scheduled full
+reindex and the template the API clones for ad-hoc `POST /index/repo` Jobs, so
+the serving pods stay pure-serving. Enabled by default. See
+[Indexing: CronJob vs ephemeral Job](./deployment.md#indexing-cronjob-vs-ephemeral-job).
+
+| Key | Default | Purpose |
+|---|---|---|
+| `indexJob.enabled` | `true` | Create the indexing CronJob and (optionally) its RBAC. |
+| `indexJob.mode` | `auto` | API trigger mode: `auto` (Job in-cluster, else in-process), `k8s` (always spawn a Job), `inprocess` (legacy in-process). Wired as `OPSRAG_INDEX_JOB_MODE` on the api container. |
+| `indexJob.rbac.create` | `true` | Create the Role + RoleBinding letting the API SA clone the CronJob and create/manage Jobs in this namespace. |
+| `indexJob.schedule` | `"0 3 * * *"` | Cron schedule for the full reindex (`--all`). |
+| `indexJob.suspendSchedule` | `false` | `true` keeps the template available for ad-hoc Jobs without running on a timer. |
+| `indexJob.backoffLimit` | `1` | Job `backoffLimit`. |
+| `indexJob.ttlSecondsAfterFinished` | `3600` | TTL before finished Jobs are garbage-collected. |
+| `indexJob.successfulJobsHistoryLimit` | `3` | Retained successful CronJob runs. |
+| `indexJob.failedJobsHistoryLimit` | `3` | Retained failed CronJob runs. |
+| `indexJob.extraEnv` | `[]` | Extra env appended to the indexer container. |
+| `indexJob.nodeSelector` | `{}` | Node selector for index Jobs. |
+| `indexJob.resources` | requests `500m`/`1Gi`, limit `4Gi` | CPU/memory requests and limits for the indexer container. |
+
 ### slackBot
 
 Opt-in Slack bot worker (Socket Mode; no Service is created for it).
@@ -174,14 +202,22 @@ Rendered into a ConfigMap and mounted at `/etc/opsrag/config.yaml`
 
 | Key | Default | Purpose |
 |---|---|---|
+| `config.cloudProvider` | `""` | Cloud model bundle: `aws` (Bedrock), `gcp` (Vertex), or `""` (none). Fills UNSET model slots (llm/embedding/reranker and the per-purpose models) with provider defaults — no rebuild. Precedence: `OPSRAG_*` env > explicit blocks below > bundle. |
 | `config.llm.provider` | `anthropic` | LLM provider name. |
 | `config.llm.model` | `claude-sonnet-4-20250514` | LLM model identifier. |
 | `config.llm.apiKeyEnv` | `ANTHROPIC_API_KEY` | Env var name the app reads the LLM API key from (the value comes from your Secret). |
+| `config.llm.awsRegion` | `""` | Bedrock region for the LLM (emitted only when set). |
+| `config.llm.project` / `config.llm.location` | `""` | Vertex project / location for the LLM (emitted only when set). |
 | `config.embedding.provider` | `fastembed` | Embedding provider name. |
 | `config.embedding.model` | `BAAI/bge-small-en-v1.5` | Embedding model identifier. |
+| `config.embedding.dimension` | `""` | Embedding dimension. MUST match the model AND the Qdrant collection. Empty = provider/bundle default (aws Cohere Embed v4 = 1536; gcp gemini-embedding-001 = 3072). |
+| `config.embedding.awsRegion` | `""` | Bedrock region for embeddings (emitted only when set). |
+| `config.embedding.project` / `config.embedding.location` | `""` | Vertex project / location for embeddings (emitted only when set). |
+| `config.reranker` | `{}` | Optional reranker block (emitted only when `provider` set). Accepts `provider`, `model`, `awsRegion`, `project`, `location`. The cloud bundle fills it automatically. |
 | `config.vectorStore.provider` | `qdrant` | Vector store provider name. |
 | `config.vectorStore.url` | `http://qdrant:6333` | Vector store endpoint URL. |
 | `config.vectorStore.collection` | `opsrag` | Vector store collection name. |
+| `config.vectorStore.allowDimensionChange` | `false` | Set `true` ONLY for an intentional reindex after switching embedding models (a silent dimension mismatch corrupts the shared Qdrant index + caches). |
 | `config.knowledgeGraph.provider` | `none` | Knowledge graph provider; `none` disables the graph. |
 | `config.session.provider` | `postgres` | Session store provider name. |
 | `config.session.dsnEnv` | `POSTGRES_DSN` | Env var name the app reads the session DSN from (value from your Secret). |
@@ -190,17 +226,19 @@ Rendered into a ConfigMap and mounted at `/etc/opsrag/config.yaml`
 
 ### mcp
 
-The MCP integration map. The key set must equal the application's MCPIntegration
-registry exactly (CI-enforced) and is fixed by the schema. Each entry:
+The MCP integration map (all 20 integrations, read-only). The key set must equal
+the application's MCPIntegration registry exactly (CI-enforced) and is fixed by
+the schema. Each entry:
 
 | Key | Default | Purpose |
 |---|---|---|
 | `mcp.<name>.enabled` | `false` | Enable the integration. Rendered as `OPSRAG_MCP_<NAME>_ENABLED` on the api (and Slack bot) container and into the ConfigMap. |
 | `mcp.<name>.secretRef` | `""` | Optional name of a Secret carrying that integration's credentials. |
 
-The 14 integrations: `cartography`, `cloudflare`, `cloudsql`, `code`,
-`datadog`, `elasticsearch`, `gitlab`, `knowledge`, `kubernetes`, `prometheus`,
-`rootly`, `runbooks`, `slack`, `tool_cache`. See [MCP integrations](#mcp-integrations).
+The 20 integrations: `aws`, `azure`, `cloudflare`, `code`, `datadog`,
+`elasticsearch`, `gcp`, `github`, `gitlab`, `grafana`, `knowledge`,
+`kubernetes`, `loki`, `prometheus`, `rootly`, `runbooks`, `sentry`, `slack`,
+`splunk`, `tool_cache`. See [MCP integrations](#mcp-integrations).
 
 ### secret
 
@@ -305,6 +343,59 @@ Enabling an MCP integration without supplying its required credentials makes the
 pod fail fast at startup with an error of the form
 `MCP_MISCONFIGURED:<name>:<env>`.
 
+## Keys not templated by the chart
+
+The ConfigMap renders a curated subset of the application `config.yaml`. These
+ARE first-class chart values and render into the ConfigMap:
+
+- **Cloud bundle / models** — `config.cloudProvider`, `config.llm`,
+  `config.embedding`, `config.reranker`, `config.vectorStore`.
+- **MCP toggles** — `mcp.<name>.enabled` (+ optional `secretRef` to wire the
+  integration's required-env Secret into the API pod).
+- **Rate-limit backend** — `api.rateLimit.backend` (`memory` default | `redis`),
+  `api.rateLimit.redisUrlEnv`, `api.rateLimit.rpm`. The `redis` backend (for
+  multi-replica) also needs the `redis` extra in the image + the Redis URL in
+  the env named by `redisUrlEnv` (default `OPSRAG_REDIS_URL`) via
+  `api.envFromSecret`; the API pings Redis at boot and **fails fast** if
+  unreachable. See
+  [Redis-backed rate limiting](./deployment.md#redis-backed-rate-limiting-multi-replica).
+- **Multi-environment registry** — `config.environments` (per-env kubernetes /
+  prometheus / elasticsearch targets) renders verbatim under `environments:`.
+  See [`./multi-environment.md`](./multi-environment.md) and
+  [`values-multi-env.yaml`](#scenario-values-files).
+
+The following are **not** surfaced as chart values — to use them, supply your own
+`config.yaml` (baked into the image or mounted via your own ConfigMap):
+
+- **Auth `login` / `open` mode + SSO providers.** The chart renders only
+  `auth.issuer` / `auth.audience` / `auth.jwksCacheSeconds` (`oidc` mode). The
+  first-party `login` mode (cookie sessions + SSO: google/github/microsoft) and
+  `open` mode are `config.yaml`-only. See [`./auth.md`](./auth.md).
+- **Advanced tuning blocks** — memory/Mem0, QA cache, corrections, eval,
+  chunking, light-graph, scheduler — mount a `config.yaml` for these.
+
+Model and provider selection, by contrast, *can* be overridden purely by env
+without a custom config: `OPSRAG_CLOUD_PROVIDER`, `OPSRAG_LLM_PROVIDER`,
+`OPSRAG_LLM_MODEL`, `OPSRAG_PRO_MODEL`, `OPSRAG_EMBEDDING_PROVIDER`,
+`OPSRAG_EMBEDDING_MODEL`, `OPSRAG_EMBEDDING_DIMENSION`,
+`OPSRAG_RERANKER_PROVIDER`, `OPSRAG_RERANKER_MODEL` (set via `api.extraEnv` or
+the Secret). Precedence: env > YAML slot > cloud-bundle default.
+
+## Scenario values files
+
+The chart ships ready-made production overlays alongside `values.yaml`:
+
+| File | Scenario |
+|---|---|
+| [`../deploy/helm/opsrag/values-aws.yaml`](../deploy/helm/opsrag/values-aws.yaml) | EKS + Amazon Bedrock (`config.cloudProvider: aws`), ALB Ingress, autoscaling, PDB, index Job. Credentials via IRSA (no static AWS keys). |
+| [`../deploy/helm/opsrag/values-gcp.yaml`](../deploy/helm/opsrag/values-gcp.yaml) | GKE + Vertex AI (`config.cloudProvider: gcp`), GKE managed Ingress, autoscaling, PDB, index Job. Credentials via Workload Identity (no JSON keys). |
+
+Apply one with `-f deploy/helm/opsrag/values-<cloud>.yaml`, overriding
+`image.repository` / `image.tag` and editing the placeholders in the overlay.
+For minimal, MCP-focused, and multi-environment scenarios, compose your own
+values on top of the defaults — see
+[`./deployment.md`](./deployment.md#scenario-values-files).
+
 ## Schema validation
 
 The chart ships `values.schema.json` (JSON Schema draft 2020-12). Helm validates
@@ -319,7 +410,7 @@ your merged values against it at `helm install`, `helm upgrade`, and
   constrained to `Always`, `IfNotPresent`, or `Never`.
 - `auth` requires non-empty `issuer` and `audience`; `jwksCacheSeconds` must be
   an integer >= 1.
-- `mcp` has `additionalProperties: false` and requires all 14 integration keys
+- `mcp` has `additionalProperties: false` and requires all 20 integration keys
   to be present. Each integration object also has `additionalProperties: false`,
   requires `enabled`, and allows only `enabled` (boolean) and `secretRef`
   (string). Adding an unknown MCP integration name, or an unknown sub-key under
@@ -342,6 +433,10 @@ Created by default but gated:
   `true`)
 - UI `Deployment` and `Service` (`<fullname>-ui`) when `ui.enabled=true`
   (default `true`)
+- Indexing `CronJob` (`<fullname>-indexer`) when `indexJob.enabled=true`
+  (default `true`)
+- Indexer `Role` + `RoleBinding` (`<fullname>-indexjob`) when
+  `indexJob.enabled=true` and `indexJob.rbac.create=true` (defaults `true`)
 
 Opt-in (off by default):
 

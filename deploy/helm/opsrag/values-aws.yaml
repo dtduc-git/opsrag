@@ -59,6 +59,17 @@ config:
     collection: opsrag
     # allowDimensionChange: true  # ONLY when re-indexing after an embed switch
   # POSTGRES_DSN is delivered via the envFromSecret below (sessions/usage/memory).
+  # --- Multi-environment registry (optional) ---------------------------------
+  # With >1 api replica below, target your EKS cluster(s) here so the k8s /
+  # prometheus MCP tools resolve an env. Empty -> synthesized from legacy
+  # blocks. Canonical multi-cluster shape: values-multi-env.yaml.
+  environments: {}
+    # default: prod
+    # targets:
+    #   prod:
+    #     kubernetes: { mode: kubeconfig, context: prod-eks }   # aws eks get-token
+    #     prometheus: { reach: k8s_proxy, namespace: monitoring,
+    #                   service: kube-prometheus-stack-prometheus, port: 9090 }
 
 # --- API workload ------------------------------------------------------------
 api:
@@ -78,6 +89,14 @@ api:
       value: us-east-1
     - name: AWS_DEFAULT_REGION
       value: us-east-1
+  # Multiple replicas below -> share rate-limit state across pods via Redis
+  # (memory backend is per-pod). Redis is REQUIRED with backend=redis: the API
+  # PINGs OPSRAG_REDIS_URL at boot and fails fast if unreachable. Provide the
+  # URL via the envFromSecret below (key OPSRAG_REDIS_URL); `redis` is an extra
+  # (e.g. an ElastiCache endpoint: rediss://<host>:6379).
+  rateLimit:
+    backend: redis
+    redisUrlEnv: OPSRAG_REDIS_URL
   service:
     type: ClusterIP
     port: 80

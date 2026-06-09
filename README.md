@@ -110,18 +110,21 @@ helm install opsrag deploy/helm/opsrag \
   --namespace opsrag --create-namespace
 ```
 
-Every MCP flag from `config.yaml` is exposed through `values.yaml`. See
-the chart README at `deploy/helm/opsrag/README.md` (forthcoming).
+Ready-made scenario values live in `deploy/helm/opsrag/`: `values-gcp.yaml`,
+`values-aws.yaml`, `values-mcp.yaml`, `values-multi-env.yaml`,
+`values-minimal.yaml`. See the [Helm chart reference](docs/helm-chart.md) and
+the [Deployment guide](docs/deployment.md).
 
 ## Project layout
 
 ```text
 opsrag/                  Python backend package
-  agent/                 Core LangGraph agent
-  agents/investigation/  Multi-hop investigation agent
+  agent/                 Core LangGraph RAG agent (4 topologies)
+  investigations/        Event-driven incident-investigation engine
   api/                   FastAPI surface (HTTP + SSE + webhooks)
-  auth/                  OIDC Bearer-token verification
-  mcp/                   14 MCP integrations, each opt-in
+  auth/                  OIDC / SSO / first-party login
+  mcp/                   20 MCP integrations, each opt-in
+  environments.py        Multi-environment registry resolver
   ...
 ui/                      React single-page UI (Vite)
 deploy/
@@ -134,10 +137,12 @@ tests/                   contract / integration / unit
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) *(coming soon)*
-- [MCP integrations](docs/mcp-integrations.md) *(coming soon)*
-- [Helm chart values](docs/helm-chart.md) *(coming soon)*
-- [OIDC setup](docs/auth.md) *(coming soon)*
+Full documentation is in [`docs/`](docs/README.md). Highlights:
+
+- [Getting started](docs/getting-started.md) | [Configuration](docs/configuration.md) | [Deployment](docs/deployment.md)
+- [Architecture](docs/architecture.md) | [RAG pipeline](docs/rag-pipeline.md) | [Investigations](docs/investigations.md)
+- [MCP integrations](docs/mcp-integrations.md) | [Multi-environment](docs/multi-environment.md)
+- [Authentication](docs/auth.md) | [Operations](docs/operations.md) | [API reference](docs/api-reference.md)
 
 ## Contributing
 

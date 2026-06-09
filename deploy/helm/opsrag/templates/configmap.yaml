@@ -16,6 +16,21 @@ data:
       issuer: {{ .Values.auth.issuer | quote }}
       audience: {{ .Values.auth.audience | quote }}
       jwks_cache_seconds: {{ .Values.auth.jwksCacheSeconds | default 300 }}
+    {{- /* api block: only the rate-limit knobs are config-surfaced here.
+           rate_limit_backend=redis is fail-fast -- the API PINGs Redis at
+           boot (redis_url_env), so only set it when Redis is reachable. */}}
+    {{- if .Values.api.rateLimit }}
+    api:
+      {{- with .Values.api.rateLimit.backend }}
+      rate_limit_backend: {{ . }}
+      {{- end }}
+      {{- with .Values.api.rateLimit.redisUrlEnv }}
+      redis_url_env: {{ . }}
+      {{- end }}
+      {{- with .Values.api.rateLimit.rpm }}
+      rate_limit_rpm: {{ . }}
+      {{- end }}
+    {{- end }}
     llm:
       provider: {{ .Values.config.llm.provider }}
       model: {{ .Values.config.llm.model }}
@@ -82,3 +97,16 @@ data:
       {{ $name }}:
         enabled: {{ $cfg.enabled }}
       {{- end }}
+    {{- /* Unified multi-environment registry (Settings.environments). Each
+           target's kubernetes / prometheus / elasticsearch block is rendered
+           verbatim, so the keys MUST match config.py's K8sTarget /
+           PrometheusTarget / EsTarget (extra="forbid"). Omitted entirely when
+           unset -> the engine synthesizes a registry from legacy blocks. */}}
+    {{- with .Values.config.environments }}
+    environments:
+      {{- with .default }}
+      default: {{ . }}
+      {{- end }}
+      targets:
+        {{- toYaml .targets | nindent 8 }}
+    {{- end }}
