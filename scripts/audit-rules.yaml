@@ -96,7 +96,6 @@ non_english_exempt_paths:
   - specs/                           # spec-kit feature docs (em-dashes in prose)
   - .specify/                        # spec-kit metadata + templates
   - .claude/                         # claude-code plugin scaffolding
-  - docs/superpowers/                # brainstorm/design docs (· § ↔ — in prose)
   - scripts/audit-rules.yaml         # this file (em-dashes in section headers)
   - CHANGELOG.md
   - CONTRIBUTING.md
@@ -126,7 +125,6 @@ non_english_exempt_paths:
 hardcoded_hosts_exempt_paths:
   - specs/                           # spec-kit feature docs (schema/example URLs)
   - .specify/                        # spec-kit metadata
-  - docs/superpowers/                # design docs (reference public vendor API hosts)
   - tests/                           # test fixtures use throwaway hosts/emails (a@b.com, jane@corp.com)
   - scripts/audit-rules.yaml         # this file (denylist tokens shaped like hosts)
   - CHANGELOG.md                     # external doc links

@@ -108,3 +108,6 @@ design-scratch/
 
 # Audit-test probe fixtures (created/removed by tests/contract/test_audit_*.sh)
 _audit_probe_*
+
+# Brainstorm/design scratch (superpowers plugin) — not shipped
+docs/superpowers/
