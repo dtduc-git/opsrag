@@ -212,6 +212,7 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             api_key=_env(config.vector_store.api_key_env) if config.vector_store.api_key_env else None,
             collection_name=config.vector_store.collection,
             dimension=embedder.dimension,
+            allow_dimension_change=config.vector_store.allow_dimension_change,
         )
     elif config.vector_store.provider == "pgvector":
         from opsrag.vectorstores.pgvector import PgVectorStore
@@ -555,6 +556,7 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             api_key=_env(cv_cfg.api_key_env) if cv_cfg.api_key_env else None,
             collection_name=cv_cfg.collection,
             dimension=code_embedder_provider.dimension,
+            allow_dimension_change=cv_cfg.allow_dimension_change,
         )
 
     # (PurposeRouter is built earlier, before the entity extractor.)

@@ -66,7 +66,11 @@ class SCMConfig(BaseModel):
 
 
 class ChunkingConfig(BaseModel):
-    strategy: Literal["fixed_size", "parent_child", "semantic"] = "parent_child"
+    # Only the strategies the chunker factory can actually build (see
+    # opsrag/factory.py). "semantic" was accepted here but unimplemented,
+    # so a bad config deferred to a runtime NotImplementedError -- now it
+    # fails fast at config-load with a clear pydantic ValidationError.
+    strategy: Literal["fixed_size", "parent_child"] = "parent_child"
     chunk_size: int = 512
     overlap: int = 64
     child_size: int = 256
@@ -191,6 +195,13 @@ class AgentConfig(BaseModel):
     top_k: int = 10
     rerank_top_k: int = 5
     max_retries: int = 3
+    # Post-rerank MMR diversity penalty, the (1 - lambda) weight in [0, 1].
+    # 0.0 == DISABLED (default): the rerank output is a pure pass-through and
+    # behaviour is unchanged. >0 re-orders the kept top_k via Maximal Marginal
+    # Relevance so near-duplicate config variants don't crowd out distinct
+    # docs. ~0.3 is a gentle nudge; 1.0 is pure diversity. See
+    # opsrag/rerankers/mmr.py.
+    rerank_diversity: float = 0.0
     # Phase 03 Pillar 3 -- Flash/Pro hybrid routing.
     # When set (e.g. "gemini-2.5-pro"), complex queries (root-cause /
     # cross-source / multi-step) escalate to Pro for synthesis;

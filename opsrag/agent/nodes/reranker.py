@@ -20,6 +20,7 @@ from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.reranker import Reranker
 from opsrag.interfaces.vectorstore import SearchResult
+from opsrag.rerankers.mmr import mmr_reorder
 
 _log = logging.getLogger("opsrag.agent.reranker")
 
@@ -38,7 +39,12 @@ _DEFAULT_MIN_RERANK_SCORE = 0.05
 _DEFAULT_TRUST_RERANK_SCORE = 0.65
 
 
-def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k: int = 5):
+def rerank_node(
+    reranker: Reranker,
+    observability: ObservabilityProvider,
+    top_k: int = 5,
+    diversity: float = 0.0,
+):
     async def _rerank(state: dict) -> dict:
         query = state["query"]
         chunks: list[Chunk] = state.get("merged_results") or state.get("retrieved_chunks") or []
@@ -133,7 +139,24 @@ def rerank_node(reranker: Reranker, observability: ObservabilityProvider, top_k:
             boosted.append((score, base, chunk))
         boosted.sort(key=lambda t: t[0], reverse=True)
 
-        kept = [c for _s, _b, c in boosted[:effective_top_k]]
+        # Optional post-rerank MMR diversity re-ordering (default OFF).
+        # When state["rerank_diversity"] / the node's `diversity` arg is 0,
+        # this is a strict pass-through (mmr_reorder returns input order), so
+        # default output is unchanged. When >0 it breaks up near-duplicate
+        # config variants the cross-encoder stacked at the top, using the
+        # boosted rerank score as relevance and chunk content for similarity.
+        active_diversity = float(state.get("rerank_diversity", diversity) or 0.0)
+        if active_diversity > 0.0 and len(boosted) > 1:
+            reordered = mmr_reorder(
+                boosted,
+                relevance=[s for s, _b, _c in boosted],
+                diversity=active_diversity,
+                text_of=lambda t: t[2].content,
+                top_k=effective_top_k,
+            )
+            kept = [c for _s, _b, c in reordered]
+        else:
+            kept = [c for _s, _b, c in boosted[:effective_top_k]]
         best_base_score = max((b for _s, b, _c in boosted), default=0.0)
         anchors_in_kept = any(
             path_matches_any_anchor(c.source_path, c.repo, anchors) for c in kept

@@ -116,3 +116,81 @@ async def test_fallback_existence_via_get_collections():
     await assert_dimension_compatible(
         _NoCheckerClient(), "opsrag", expected_dim=1024, allow_change=False,
     )
+
+
+# --- QdrantVectorStore.ensure_collection() in-store guard -------------------
+# The API server runs assert_dimension_compatible in its lifespan, but the
+# ingestion/indexer Job builds its own providers and writes WITHOUT that
+# lifespan. These tests prove ensure_collection() now fails closed on a
+# dimension mismatch (and that allow_dimension_change bypasses it), so a
+# 3072 -> 768 embedder swap no longer surfaces as a cryptic upsert error.
+
+
+class _Col:
+    def __init__(self, name):
+        self.name = name
+
+
+class _Cols:
+    def __init__(self, names):
+        self.collections = [_Col(n) for n in names]
+
+
+class _StoreFakeQdrant:
+    """Mock AsyncQdrantClient covering both ensure_collection() paths:
+    get_collections() (name listing) and get_collection() (named-vector
+    size for the guard). Records whether create_collection was called."""
+
+    def __init__(self, *, existing_name: str, existing_dim: int):
+        self._existing_name = existing_name
+        self._existing_dim = existing_dim
+        self.create_called = False
+
+    async def get_collections(self):
+        return _Cols([self._existing_name])
+
+    async def collection_exists(self, collection):
+        return collection == self._existing_name
+
+    async def get_collection(self, collection):
+        return _CollectionInfo({"dense": _VP(self._existing_dim)})
+
+    async def create_collection(self, **kwargs):
+        self.create_called = True
+
+    async def create_payload_index(self, **kwargs):  # pragma: no cover - unused on existing path
+        pass
+
+
+@pytest.mark.asyncio
+async def test_ensure_collection_raises_on_dim_mismatch(monkeypatch):
+    from opsrag.vectorstores import qdrant as qdrant_mod
+
+    # Don't construct a real AsyncQdrantClient (no network) -- swap our fake in.
+    fake = _StoreFakeQdrant(existing_name="opsrag", existing_dim=3072)
+    monkeypatch.setattr(
+        qdrant_mod, "AsyncQdrantClient", lambda *a, **k: fake
+    )
+    store = qdrant_mod.QdrantVectorStore(collection_name="opsrag", dimension=768)
+    with pytest.raises(DimensionMismatchError) as exc:
+        await store.ensure_collection()
+    assert "DIMENSION_MISMATCH" in str(exc.value)
+    assert "3072" in str(exc.value) and "768" in str(exc.value)
+    assert fake.create_called is False  # never recreate an existing collection
+
+
+@pytest.mark.asyncio
+async def test_ensure_collection_allow_change_bypasses(monkeypatch):
+    from opsrag.vectorstores import qdrant as qdrant_mod
+
+    fake = _StoreFakeQdrant(existing_name="opsrag", existing_dim=3072)
+    monkeypatch.setattr(
+        qdrant_mod, "AsyncQdrantClient", lambda *a, **k: fake
+    )
+    store = qdrant_mod.QdrantVectorStore(
+        collection_name="opsrag", dimension=768, allow_dimension_change=True,
+    )
+    # Operator opted into a reindex -> warn + continue, no raise.
+    await store.ensure_collection()
+    assert store._ensured is True
+    assert fake.create_called is False
