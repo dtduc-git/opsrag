@@ -7,6 +7,8 @@ break up near-duplicate candidates when it's on.
 """
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from opsrag.agent.nodes.reranker import rerank_node
@@ -56,6 +58,96 @@ def test_mmr_reorders_near_duplicates():
     # least one near-duplicate config -- that is the whole point of MMR.
     assert "runbook" in out
     assert len(out) == 3
+
+
+def test_mmr_nan_relevance_does_not_crash():
+    """A NaN (or +/-inf) relevance score must NOT poison the MMR objective.
+
+    Regression guard for the `best_idx == None -> items[None]` TypeError:
+    `NaN > best_score` is always False, so without sanitization best_idx
+    stayed None and the final `items[i]` comprehension raised. The helper
+    must sanitize non-finite scores and still return a valid re-ordering of
+    the requested length."""
+    items = ["a", "b", "c", "d"]
+    texts = {
+        "a": "alpha config replicas three",
+        "b": "beta config replicas three",
+        "c": "gamma runbook oncall escalation",
+        "d": "delta dashboard metrics latency",
+    }
+    # A NaN plus a finite spread (-inf clamps to the floor, the two finite
+    # scores define the [lo, hi] range) -- the worst poisoning case for the
+    # MMR objective, where the NaN candidate could leave best_idx == None.
+    relevance = [float("nan"), 0.9, float("-inf"), 0.5]
+
+    out = mmr_reorder(
+        items,
+        relevance=relevance,
+        diversity=0.5,
+        text_of=lambda i: texts[i],
+        top_k=4,
+    )
+
+    # No crash, every item returned exactly once, all are real items.
+    assert sorted(out) == sorted(items)
+    assert None not in out
+    assert len(out) == 4
+    # The only genuinely-high finite score (0.9 -> "b") normalizes to the
+    # ceiling, so it must be the seed (MMR's first pick is pure relevance).
+    assert out[0] == "b"
+    # Sanity: the NaN candidate was sanitized to a finite value, so the
+    # internal scores never went non-finite.
+    assert all(isinstance(x, str) for x in out)
+
+
+def test_mmr_all_nan_relevance_degrades_gracefully():
+    """If EVERY relevance is non-finite, MMR must still return a valid
+    re-ordering (degrading to pure-diversity selection) rather than crash."""
+    items = ["a", "b", "c"]
+    texts = {"a": "x x x", "b": "y y y", "c": "z z z"}
+    relevance = [float("nan"), float("nan"), float("-inf")]
+
+    out = mmr_reorder(
+        items, relevance=relevance, diversity=0.5,
+        text_of=lambda i: texts[i], top_k=3,
+    )
+    assert sorted(out) == sorted(items)
+    assert None not in out
+    assert not any(isinstance(x, float) and math.isnan(x) for x in out)
+
+
+def test_mmr_normalization_is_scale_invariant():
+    """The same `diversity` must produce the SAME selection whether the
+    reranker emits compressed-low scores (Cohere ~0.02-0.4) or full-range
+    sigmoid scores (FastEmbed 0-1). min-max normalization makes lambda
+    provider-agnostic; without it the penalty would dominate one scale and
+    barely register on the other."""
+    items = ["cfg-a", "cfg-b", "cfg-c", "runbook"]
+    texts = {
+        "cfg-a": "replicas 3 image nginx port 8080 env prod",
+        "cfg-b": "replicas 3 image nginx port 8080 env staging",
+        "cfg-c": "replicas 3 image nginx port 8080 env dev",
+        "runbook": "oncall escalation pagerduty severity rollback steps",
+    }
+
+    # FastEmbed-like full-range scores and a Cohere-like compressed copy.
+    # Both share the SAME relative order/spacing after min-max, so MMR must
+    # make identical picks.
+    fastembed_scores = [0.90, 0.89, 0.88, 0.50]
+    cohere_scores = [0.40, 0.39, 0.38, 0.00]
+
+    out_fast = mmr_reorder(
+        items, relevance=fastembed_scores, diversity=0.7,
+        text_of=lambda i: texts[i], top_k=3,
+    )
+    out_cohere = mmr_reorder(
+        items, relevance=cohere_scores, diversity=0.7,
+        text_of=lambda i: texts[i], top_k=3,
+    )
+
+    assert out_fast == out_cohere
+    # And the diversity rescue still fires on both scales.
+    assert "runbook" in out_fast
 
 
 def test_mmr_disabled_is_passthrough():

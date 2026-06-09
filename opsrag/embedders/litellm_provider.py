@@ -22,6 +22,13 @@ import time
 from opsrag.tokenization import estimate_tokens
 from opsrag.usage import tracker as _usage_tracker
 
+# Cap on in-flight embedding batches during a bulk index. Without it an
+# unbounded ``asyncio.gather`` over the whole corpus fires every batch at
+# once -> a provider rate-limit storm (429) that the per-call ``num_retries``
+# can't fully absorb, dropping vectors. 8 keeps the pipe busy without melting
+# the provider's per-minute quota.
+_MAX_CONCURRENT_BATCHES = 8
+
 
 class LiteLLMEmbeddings:
     def __init__(
@@ -111,7 +118,16 @@ class LiteLLMEmbeddings:
         t0 = time.perf_counter()
         bs = self._batch_size
         batches = [texts[i : i + bs] for i in range(0, len(texts), bs)]
-        batch_vecs = await asyncio.gather(*(self._aembed(b, "document") for b in batches))
+        # Bound concurrency: a raw gather over every batch fans the whole
+        # corpus at the provider at once -> rate-limit storm. The semaphore
+        # caps in-flight requests so bulk indexing degrades gracefully.
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_BATCHES)
+
+        async def _bounded(batch: list[str]) -> list[list[float]]:
+            async with sem:
+                return await self._aembed(batch, "document")
+
+        batch_vecs = await asyncio.gather(*(_bounded(b) for b in batches))
         vectors = [v for bv in batch_vecs for v in bv]
         latency_ms = (time.perf_counter() - t0) * 1000
         _usage_tracker.record(

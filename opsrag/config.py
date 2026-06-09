@@ -82,7 +82,12 @@ class ChunkingConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    provider: Literal["openai", "vertex", "bedrock", "fastembed", "cohere", "ollama", "litellm"] = "openai"
+    # Only the providers the embedder factory can actually build (see
+    # opsrag/factory.py). "cohere"/"ollama" were accepted here but
+    # unimplemented, so a bad config deferred to a runtime
+    # NotImplementedError -- now it fails fast at config-load with a clear
+    # pydantic ValidationError (matches ChunkingConfig.strategy above).
+    provider: Literal["openai", "vertex", "bedrock", "fastembed", "litellm"] = "openai"
     model: str = "text-embedding-3-large"
     dimension: int | None = None
     api_key_env: str = "OPENAI_API_KEY"
