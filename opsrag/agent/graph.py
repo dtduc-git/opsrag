@@ -1028,9 +1028,15 @@ async def query_with_session(
     # old `"hallucination_decision" in result` was always False, so an ungrounded
     # answer that shipped via max_retries_hit got cached as grounded (forensic TTL
     # = 90 days) and re-served. Gate on the node's actual outputs instead.
+    # NOTE: do NOT key on current_step == "hallucination_checked" -- the terminal
+    # save_memory node overwrites current_step to "memory_saved", so with memory
+    # enabled that guard is ~always False and ungrounded (max-retries) answers
+    # leaked back into the cache. `grounding_checked` is a DURABLE flag set by the
+    # hallucination node and never clobbered downstream; it also stays False in
+    # minimal mode (no hallucination check) so absent-check answers still cache.
     grounded_explicitly_failed = (
         result.get("generation_grounded") is False
-        and result.get("current_step") == "hallucination_checked"
+        and result.get("grounding_checked") is True
     )
     tool_path_answer = bool(result.get("tool_path_active"))
     if (
@@ -1396,11 +1402,12 @@ async def query_with_session_events(
     source_urls_list: list[str | None] = [_src_to_url.get(s) for s in sources_list]
 
     # See the non-streaming path: `hallucination_decision` is a routing fn, not a
-    # state key -- gate on the node's actual output so ungrounded answers aren't
-    # cached as grounded.
+    # state key, and current_step is clobbered to "memory_saved" by the terminal
+    # save_memory node -- so gate on the DURABLE `grounding_checked` flag instead,
+    # otherwise ungrounded (max-retries) answers leak into the cache as grounded.
     grounded_explicitly_failed = (
         result.get("generation_grounded") is False
-        and result.get("current_step") == "hallucination_checked"
+        and result.get("grounding_checked") is True
     )
     tool_path_answer = bool(result.get("tool_path_active"))
     if (

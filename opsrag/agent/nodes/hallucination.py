@@ -35,6 +35,7 @@ def check_hallucination_node(llm: LLMProvider, observability: ObservabilityProvi
             return {
                 "generation_grounded": False,
                 "current_step": "hallucination_checked",
+                "grounding_checked": True,
                 "regen_count": state.get("regen_count", 0) + 1,
             }
 
@@ -61,6 +62,7 @@ def check_hallucination_node(llm: LLMProvider, observability: ObservabilityProvi
         out: dict = {
             "generation_grounded": grounded,
             "current_step": "hallucination_checked",
+            "grounding_checked": True,
         }
         # Bound the regenerate loop on its OWN counter (regen_count), not the
         # shared retry_count -- otherwise CRAG rewrites spend the same budget and

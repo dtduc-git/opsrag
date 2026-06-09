@@ -47,6 +47,11 @@ class OpsRAGState(TypedDict, total=False):
     # Generation
     generation: str
     generation_grounded: bool
+    # Durable signal that the hallucination/grounding check actually ran. Unlike
+    # `current_step` (clobbered to "memory_saved" by the terminal save_memory
+    # node), this flag survives downstream nodes, so the cache-write gate can
+    # tell "ungrounded, verified" apart from "never checked" (minimal mode).
+    grounding_checked: bool
     final_chunks: list[Chunk]      # Post parent-substitution; what the LLM saw
 
     # T1.2 -- code-grounded answer verification verdict
@@ -99,6 +104,7 @@ class OpsRAGState(TypedDict, total=False):
 
     # Phase 03 Pillar 2 -- agentic tool-calling loop state
     tool_call_count: int                 # total tools executed this query (loop bound)
+    turn_started_at: float               # time.monotonic() at triage; reasoner's per-turn wall-clock breaker (MAX_TURN_WALL_CLOCK_SEC)
     tool_message_history: list[dict]     # role/content + tool_call/tool_result entries for the LLM
     tool_path_active: bool               # set when tool_decide chose tools over retrieval
     tool_call_audit: list[dict]          # per-call: name, args, latency_ms, error?, timestamp
