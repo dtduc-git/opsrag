@@ -18,6 +18,13 @@ _log = logging.getLogger("opsrag.agent.grader")
 # become the default.
 _TRUST_RERANK_SCORE = 0.65
 
+# Max simultaneous per-chunk grade LLM calls. The grader fans out one call per
+# candidate (up to ~50 after retrieval/merge); an unbounded asyncio.gather would
+# fire all of them at once and trip provider 429 rate limits. Bound it like the
+# other fan-outs in the codebase (ingestion/rerank use a Semaphore). State key
+# `grader_concurrency` overrides it for tuning without a code change.
+_GRADE_CONCURRENCY = 6
+
 from opsrag.agent.prompts import GRADER_SYSTEM
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.llm import LLMProvider
@@ -61,8 +68,18 @@ def grade_documents_node(
                 "current_step": "graded",
             }
 
+        # Bound concurrency: one grade call per candidate can be up to ~50, and an
+        # unbounded gather would issue them all at once -> 429 cascades. Gate each
+        # coroutine behind a semaphore so at most N run in flight.
+        cap = max(1, int(state.get("grader_concurrency") or _GRADE_CONCURRENCY))
+        sem = asyncio.Semaphore(cap)
+
+        async def _grade_bounded(c: Chunk) -> bool:
+            async with sem:
+                return await _grade_one(llm, query, c)
+
         verdicts = await asyncio.gather(
-            *(_grade_one(llm, query, c) for c in candidates)
+            *(_grade_bounded(c) for c in candidates)
         )
         kept = [c for c, ok in zip(candidates, verdicts) if ok]
 

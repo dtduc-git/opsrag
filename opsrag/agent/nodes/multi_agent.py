@@ -102,6 +102,19 @@ async def _reason_streaming(chosen_llm, history: list[dict], state: dict):
     return final_response
 
 MAX_TOOL_CALLS = 10  # bumped 3->10 2026-05-09 per user direction (testing deeper drilling)
+
+# Per-TURN wall-clock breaker. MAX_TOOL_CALLS bounds the *number* of hops
+# but nothing bounds their *duration*: 10 back-to-back Pro calls (each
+# tens of seconds) could burn unbounded latency/cost on a single chat
+# turn. The investigation lane has budget.py for this; the chat lane had
+# nothing. This is a GENEROUS hard stop -- a normal multi-hop turn
+# finishes well under it; it only catches a runaway. On breach the
+# reasoner stops looping and hands off to the generator with whatever
+# evidence already exists (clean termination, never a crash). Seeded once
+# at triage as `turn_started_at` (time.monotonic()) and checked at the top
+# of every reasoner hop.
+MAX_TURN_WALL_CLOCK_SEC = 120.0
+
 # Bumped 32KB -> 64KB so a long failure-test job trace (50+ failed tests
 # at ~80 chars each + stack/log lines) survives intact for exhaustive
 # generator enumeration. Pro and Flash both handle 64KB cheaply.
@@ -1355,6 +1368,12 @@ def triage_node(llm, observability: ObservabilityProvider, model_router=None):
 
     async def _triage(state: dict) -> dict:
         query = state.get("query") or ""
+        # Seed the per-turn wall-clock breaker (MAX_TURN_WALL_CLOCK_SEC).
+        # Recorded once here -- the start of the tool path -- and read by
+        # the reasoner at every hop. Monotonic so it's immune to clock
+        # adjustments. Persisted into shared state so it survives across
+        # the tool_caller<->reasoner loop without being re-emitted.
+        turn_started_at = time.monotonic()
         # Classify complexity for downstream agents.
         decision = None
         if model_router is not None:
@@ -1482,6 +1501,7 @@ def triage_node(llm, observability: ObservabilityProvider, model_router=None):
                 "tool_message_history": history,
                 "tool_path_active": True,
                 "tool_call_count": 0,
+                "turn_started_at": turn_started_at,
                 "current_step": "triage",
                 "model_route_decision": (
                     {
@@ -1528,6 +1548,7 @@ def triage_node(llm, observability: ObservabilityProvider, model_router=None):
             "tool_calls": pending,
             "tool_message_history": history,
             "tool_path_active": True,
+            "turn_started_at": turn_started_at,
             "current_step": "triage",
             "model_route_decision": (
                 {
@@ -1841,6 +1862,37 @@ def reasoner_node(llm, observability: ObservabilityProvider, model_router=None):
                     cap_reached=True,
                 ),
             }
+
+        # Wall-clock breaker -- MAX_TOOL_CALLS bounds the hop COUNT, not the
+        # turn DURATION. A run where each hop is a slow Pro call could burn
+        # unbounded latency/cost before the hop cap trips. If the turn has
+        # been running longer than MAX_TURN_WALL_CLOCK_SEC, stop looping and
+        # hand whatever evidence we have to the generator -- clean
+        # termination, not a crash. `turn_started_at` is seeded at triage;
+        # fall back to "now" if absent (e.g. reasoner invoked in isolation)
+        # so a missing key never trips the breaker spuriously.
+        turn_started_at = state.get("turn_started_at")
+        if turn_started_at is not None:
+            elapsed = time.monotonic() - float(turn_started_at)
+            if elapsed >= MAX_TURN_WALL_CLOCK_SEC:
+                _log.warning(
+                    "reasoner wall-clock breaker hit (%.1fs >= %.1fs, "
+                    "hop %d/%d) -- hand off to generator with current evidence",
+                    elapsed, MAX_TURN_WALL_CLOCK_SEC, call_count, MAX_TOOL_CALLS,
+                )
+                return {
+                    "tool_calls": [],
+                    "tool_message_history": history,
+                    "tool_path_active": True,
+                    "current_step": "reasoner",
+                    "agent_event": _agent_event(
+                        "reasoner", "completed",
+                        f"Time budget {MAX_TURN_WALL_CLOCK_SEC:.0f}s exceeded "
+                        f"({elapsed:.0f}s) -- handing to generator",
+                        wall_clock_exceeded=True,
+                        elapsed_sec=round(elapsed, 1),
+                    ),
+                }
 
         # Stuck-detector: if the LAST 3 reasoner hops all called the
         # SAME tool, the reasoner is stuck re-reading the same evidence
