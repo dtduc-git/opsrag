@@ -87,6 +87,11 @@ class MCPIntegration:
     health_url_template: str | None = None
     factory: Callable[..., Any] | None = None
     fake_factory: Callable[..., Any] | None = None
+    # Optional custom validator: (settings, env) -> missing-item str | None.
+    # When set it REPLACES the required_env / required_config checks, so an
+    # integration can accept EITHER legacy config OR the new `environments:`
+    # registry (an OR the flat required_* tuples can't express).
+    validate: Callable[[Any, Any], str | None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +111,42 @@ class MCPIntegration:
 # health_url_template: when set, ``/readyz`` substitutes
 # ``{endpoint}`` / ``{api_key_env}`` / ``$ENV_NAME`` style tokens at
 # probe time. Absent => no upstream probe.
+# --- Custom validators (accept the new `environments:` registry) ----------
+
+
+def _env_targets(settings: Any) -> dict:
+    environments = getattr(settings, "environments", None)
+    return getattr(environments, "targets", {}) or {}
+
+
+def _has_legacy_cluster_source(settings: Any, env: Any) -> bool:
+    """A cluster is reachable via a legacy (pre-`environments:`) mechanism."""
+    if env.get("KUBECONFIG") or env.get("KUBERNETES_SERVICE_HOST"):
+        return True  # explicit kubeconfig, or an in-cluster ServiceAccount
+    if getattr(getattr(settings, "k8s", None), "clusters", None):
+        return True
+    depk = getattr(getattr(settings, "deployment", None), "kubernetes", None)
+    if getattr(depk, "clusters", None):
+        return True
+    return False
+
+
+def _validate_prometheus(settings: Any, env: Any) -> str | None:
+    """Prometheus is reachable if any environment declares a prometheus
+    target (direct URL, or k8s_proxy backed by a kubernetes target), OR a
+    legacy cluster source exists (which is synthesized into a prometheus
+    target at startup). Only the truly-empty case fails fast."""
+    targets = _env_targets(settings)
+    if any(getattr(t, "prometheus", None) for t in targets.values()):
+        return None
+    if any(getattr(t, "kubernetes", None) for t in targets.values()):
+        return None  # a k8s_proxy prometheus can ride any kubernetes target
+    if _has_legacy_cluster_source(settings, env):
+        return None
+    return ("environments[*].prometheus / environments[*].kubernetes / "
+            "k8s.clusters / deployment.kubernetes.clusters / KUBECONFIG")
+
+
 REGISTRY: dict[str, MCPIntegration] = {
     "aws": MCPIntegration(
         name="aws",
@@ -352,8 +393,12 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="prometheus",
         display_name="Prometheus (multi-cluster)",
         config_type=MCP_CONFIG_TYPES["prometheus"],
+        # `validate` supersedes these: prometheus is valid via the
+        # `environments:` registry OR any legacy cluster source (KUBECONFIG /
+        # k8s.clusters / deployment.kubernetes.clusters / in-cluster).
         required_env=("KUBECONFIG",),
         required_config=("deployment.kubernetes.clusters",),
+        validate=_validate_prometheus,
         tool_names=(
             "prometheus_alerts",
             "prometheus_label_values",
@@ -526,6 +571,14 @@ def validate_enabled_mcps(settings: Any, env: dict[str, str] | None = None) -> N
             # Unknown names are rejected earlier by the Settings validator;
             # be defensive here regardless.
             raise MCPMisconfigured(name, "unknown_integration")
+        # A custom validator (when present) is authoritative -- it expresses
+        # OR semantics the flat required_* tuples can't (e.g. accept either
+        # the `environments:` registry OR legacy cluster config).
+        if integration.validate is not None:
+            missing = integration.validate(settings, resolved_env)
+            if missing:
+                raise MCPMisconfigured(name, missing)
+            continue
         for var in integration.required_env:
             if not resolved_env.get(var):
                 raise MCPMisconfigured(name, var)
