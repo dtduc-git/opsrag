@@ -59,6 +59,12 @@ CHARS_PER_TOKEN = 3
 # NB: changing these reshapes chunk char-budgets -> chunk boundaries -> chunk IDs,
 # so a corpus indexed under the old flat 3 must be RE-INDEXED for the new sizing
 # to take effect (existing chunks keep their old boundaries until re-ingested).
+#
+# !! RE-INDEX CAVEAT !! If you edit ANY value below (or add/remove a doc type),
+# bump RATIOS_VERSION so the change is visible, and re-index every corpus --
+# old chunks keep their stale boundaries/IDs and will silently mis-rank against
+# the new sizing until re-ingested. The ingestion pipeline logs the active
+# ratios + version at index start (see `log_active_ratios`) as a reminder.
 _CHARS_PER_TOKEN_BY_TYPE: dict[str, float] = {
     # config / structured (dense)
     "terraform": 2.5, "helm": 2.5, "kubernetes": 2.5, "dockerfile": 2.5,
@@ -71,6 +77,14 @@ _CHARS_PER_TOKEN_BY_TYPE: dict[str, float] = {
     "generic_markdown": 4.0,
 }
 
+# Stamp for the ratio table above. Bump this WHENEVER you change any value in
+# `_CHARS_PER_TOKEN_BY_TYPE` (or `CHARS_PER_TOKEN`). It is not a hard guard --
+# nothing blocks on it -- it exists so the "did this change require a re-index?"
+# answer is a single greppable constant, surfaced in the index-start log line.
+RATIOS_VERSION = "1"
+
+_log = logging.getLogger("opsrag.tokenization")
+
 
 def chars_per_token_for(doc_type) -> float:
     """Chars/token for chunker sizing, by doc type (a DocType enum or its str
@@ -80,7 +94,23 @@ def chars_per_token_for(doc_type) -> float:
     key = getattr(doc_type, "value", doc_type)
     return _CHARS_PER_TOKEN_BY_TYPE.get(str(key), float(CHARS_PER_TOKEN))
 
-_log = logging.getLogger("opsrag.tokenization")
+
+def log_active_ratios(logger: logging.Logger | None = None) -> None:
+    """Emit a one-line WARNING naming the active chars/token sizing ratios +
+    `RATIOS_VERSION` at index start.
+
+    Lightweight reminder, NOT a guard: these ratios decide chunk char-budgets ->
+    chunk boundaries -> chunk IDs, so changing one silently invalidates every
+    previously-indexed chunk until a FULL re-index. Logging them here makes that
+    coupling visible in the indexing logs so an operator who tweaked a ratio is
+    reminded to re-index instead of corrupting retrieval silently."""
+    (logger or _log).warning(
+        "chunk sizing ratios active (version=%s): flat=%s, by_type=%s "
+        "-- changing any of these requires a FULL re-index (chunk boundaries/IDs "
+        "shift; old chunks keep stale boundaries until re-ingested)",
+        RATIOS_VERSION, CHARS_PER_TOKEN, _CHARS_PER_TOKEN_BY_TYPE,
+    )
+
 
 # Which Gemini model to fetch the tokenizer for. The Gemini family shares
 # a sentencepiece base; the `gemini-1.5-flash-001` tokenizer is the most

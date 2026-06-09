@@ -34,6 +34,7 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+from opsrag import tokenization
 from opsrag.indexed_files.noop import NoopIndexedFilesTracker
 from opsrag.ingestion import contextual
 from opsrag.ingestion.enrich import enrich_metadata
@@ -481,6 +482,12 @@ class IngestionPipeline:
             "index_repo repo=%s branch=%s files=%d file_parallel=%d",
             repo, branch, len(paths), file_parallel,
         )
+        # Reminder (not a guard): surface the active chunk-sizing chars/token
+        # ratios + their version at index start. These ratios drive chunk
+        # boundaries/IDs, so changing one silently invalidates the existing
+        # index until a full re-index -- logging them here keeps that coupling
+        # visible. See opsrag.tokenization for the ratio table + RATIOS_VERSION.
+        tokenization.log_active_ratios(_log)
 
         # Bounded producer/consumer pipeline.
         #
