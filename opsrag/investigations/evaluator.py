@@ -63,6 +63,14 @@ class HypothesisVerdict(BaseModel):
         le=1.0,
         description="0.0 = no signal, 0.5 = ambiguous, 1.0 = ironclad.",
     )
+    supporting_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence-pool refs that justify this verdict, e.g. "
+            "['#1 k8s_list_pods', '#3 prometheus_query']. Use the exact "
+            "'#N [tool]' tags from the EVIDENCE POOL. Empty when untested."
+        ),
+    )
 
 
 class HypothesisVerdictBatch(BaseModel):
@@ -118,6 +126,12 @@ Pick 'confirmed' only when EITHER:
 Evidence must be a SENTENCE QUOTING (or paraphrasing) the tool result.
 Do NOT invent. confidence in [0,1] reflects strength: absence-only or
 single-source = at most 0.4; corroborated signals = 0.7+.
+
+For each verdict, also fill `supporting_tools` with the exact '#N [tool]'
+ref(s) from the EVIDENCE POOL that justify the status (e.g.
+['#1 k8s_list_pods']). Leave it empty for 'untested'. This is the
+per-hypothesis citation trail -- cite only refs that actually appear in
+the pool, never invent one.
 
 Output: a JSON object matching the HypothesisVerdictBatch schema. No prose."""
 
