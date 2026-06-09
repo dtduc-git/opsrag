@@ -52,6 +52,34 @@ from opsrag.investigations.store import (
 _log = logging.getLogger("opsrag.investigations.runner")
 
 
+# -- Per-investigation hard budget --------------------------------------
+# Engine B previously had NO cost/latency ceiling beyond a 3-round cap, so a
+# pathological run (slow tools + thrashing reasoner) could burn unbounded
+# time. These mirror the hypothesis-tree engine's circuit breakers.
+MAX_INVESTIGATION_WALL_CLOCK_SEC = 240.0   # hard-stop the reasoner loop past this
+MAX_INVESTIGATION_TOOL_CALLS = 40          # cumulative live tool dispatches per run
+PER_TOOL_TIMEOUT_SEC = 45.0                # a hung MCP tool can't stall a round
+
+
+@dataclass
+class _RunBudget:
+    """Lightweight per-run budget. Constructed per investigation in
+    `_run_pipeline` (the runner instance is shared across requests, so this
+    is NEVER stored on self)."""
+
+    started_at: float
+    tool_calls: int = 0
+
+    def wall_clock_exceeded(self) -> bool:
+        return (time.monotonic() - self.started_at) >= MAX_INVESTIGATION_WALL_CLOCK_SEC
+
+    def tool_budget_exhausted(self) -> bool:
+        return self.tool_calls >= MAX_INVESTIGATION_TOOL_CALLS
+
+    def elapsed_sec(self) -> float:
+        return time.monotonic() - self.started_at
+
+
 # -- Pydantic schemas for structured LLM output -------------------------
 
 class InsightCard(BaseModel):
@@ -832,14 +860,30 @@ class InvestigationRunner:
         # we hit the round cap. The cap is small (3) because each round
         # is a Pro call + <=6 tools -- past 3, we're usually thrashing.
         MAX_REASONER_ROUNDS = 3
+        budget = _RunBudget(started_at=time.monotonic())
         accumulated_history: list[dict[str, Any]] = []
         verdicts: HypothesisVerdictBatch | None = None
         for round_idx in range(MAX_REASONER_ROUNDS):
+            if budget.wall_clock_exceeded() or budget.tool_budget_exhausted():
+                _log.warning(
+                    "investigation %s budget hit (%.0fs / %d tool calls) -- "
+                    "stopping reasoner loop, synthesizing with evidence so far",
+                    inv_id, budget.elapsed_sec(), budget.tool_calls,
+                )
+                await emit_event(
+                    s, investigation_id=inv_id,
+                    event_type=EventType.REASONER_STEP,
+                    payload={"note": "budget_exhausted",
+                             "elapsed_sec": round(budget.elapsed_sec(), 1),
+                             "tool_calls": budget.tool_calls},
+                )
+                break
             new_history = await self._reasoner_tool_round(
                 inv_id, alert_text, hypotheses, target, insight, env, namespace,
                 prior_history=accumulated_history,
                 prior_verdicts=verdicts,
                 round_idx=round_idx,
+                budget=budget,
             )
             if not new_history:
                 _log.info("reasoner round %d emitted no tool calls -- stopping", round_idx)
@@ -1208,6 +1252,7 @@ class InvestigationRunner:
         prior_history: list[dict[str, Any]] | None = None,
         prior_verdicts: HypothesisVerdictBatch | None = None,
         round_idx: int = 0,
+        budget: "_RunBudget | None" = None,
     ) -> list[dict[str, Any]]:
         """One round of Pro reasoner picks discriminating tools + we
         execute them. Returns the tool call history as a list of
@@ -1547,6 +1592,11 @@ class InvestigationRunner:
         # tool doesn't sink the round.
         history: list[dict[str, Any]] = []
         for tc in tool_calls[:6]:  # hard cap per round
+            if budget is not None and budget.tool_budget_exhausted():
+                _log.warning("tool-call budget exhausted -- skipping remaining tools this round")
+                break
+            if budget is not None:
+                budget.tool_calls += 1
             name = tc.name
             args = _scrub_placeholder_args(tc.args or {})
             # Second pass: drop any scope-narrowing arg whose value isn't
@@ -1580,7 +1630,11 @@ class InvestigationRunner:
                     raise RuntimeError(
                         "GitLab client unavailable -- gitlab_* tool skipped"
                     )
-                result = await tool.call(client_for_tool, args)
+                # Per-tool hard timeout: a hung MCP tool can't stall the whole
+                # round (the except-clause below records it as a tool error).
+                result = await asyncio.wait_for(
+                    tool.call(client_for_tool, args), timeout=PER_TOOL_TIMEOUT_SEC,
+                )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 history.append({"name": name, "args": args, "result": result, "latency_ms": latency_ms})
                 # Add the result to the grounding corpus so the NEXT
