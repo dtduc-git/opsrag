@@ -1,46 +1,102 @@
-# opsrag
+<div align="center">
 
-> Agentic GraphRAG for DevOps and SRE — query your runbooks, Terraform
-> modules, Helm charts, Kubernetes manifests, and incident postmortems.
-> Every answer cited, every source linked.
+# OpsRAG
 
-opsrag is an open-source, vendor-neutral, Apache-2.0-licensed agentic
-retrieval system designed for SRE workflows. It bundles a LangGraph agent,
-a pluggable retrieval pipeline (vector + optional knowledge graph + 14
-opt-in MCP integrations), a FastAPI surface with OIDC auth, a React UI, a
-Slack bot, an evaluation harness, a Helm chart, and a local compose stack.
+### Agentic GraphRAG for DevOps & SRE
 
-A new evaluator should reach a cited answer in **under fifteen minutes**.
+Turn your runbooks, Terraform, Helm charts, Kubernetes manifests, and incident
+postmortems into **cited, trustworthy answers** — and let an agent run
+**autonomous incident investigations** against your live telemetry.
 
-## Status
+<br/>
 
-> :warning: **Pre-release.** The first public release is being assembled
-> on the `001-port-opsrag-opensource` branch. Tasks and design artefacts
-> live under [`specs/001-port-opsrag-opensource/`](specs/001-port-opsrag-opensource/).
-> Interfaces and configuration keys may change without notice until
-> `v0.1.0-alpha`.
+[![CI](https://github.com/dtduc-git/opsrag/actions/workflows/ci.yml/badge.svg)](https://github.com/dtduc-git/opsrag/actions/workflows/ci.yml)
+[![Security](https://github.com/dtduc-git/opsrag/actions/workflows/security.yml/badge.svg)](https://github.com/dtduc-git/opsrag/actions/workflows/security.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-## Quickstart
+<br/>
 
-A new evaluator can go from clone to a cited answer in under fifteen minutes.
-The full reference is
-[`specs/001-port-opsrag-opensource/quickstart.md`](specs/001-port-opsrag-opensource/quickstart.md);
-this is the same flow, end to end.
+**[Quickstart](#-quickstart)** &nbsp;·&nbsp;
+**[Documentation](docs/README.md)** &nbsp;·&nbsp;
+**[Architecture](docs/architecture.md)** &nbsp;·&nbsp;
+**[Configuration](docs/configuration.md)** &nbsp;·&nbsp;
+**[Deploy](docs/deployment.md)**
+
+</div>
+
+---
+
+OpsRAG is an open-source, vendor-neutral retrieval system built for SRE and
+platform teams. It bundles a LangGraph agent, a pluggable retrieval pipeline
+(vector + optional knowledge graph + 20 opt-in MCP integrations), a FastAPI
+surface with OIDC/SSO auth, a React UI, a Slack bot, an evaluation harness, a
+first-class Helm chart, and a one-command local stack.
+
+Every answer is **grounded and cited**. A new evaluator goes from `git clone`
+to a cited answer in **under fifteen minutes** — no Kubernetes, no cloud
+account, and no external identity provider required.
+
+## ✨ Features
+
+|  |  |
+|---|---|
+| 🔎 **Hybrid retrieval** | Dense + BM25 + a code-aware lane, fused with Reciprocal Rank Fusion and diversified with MMR. |
+| 🧠 **Agentic RAG** | LangGraph agent with CRAG / Self-RAG, anti-hallucination grounding gates, and a semantic answer cache. |
+| 🕵️ **Incident investigations** | An event-driven engine that forms hypotheses and verifies them against live telemetry, with resumable SSE and a hard budget. |
+| 🔌 **20 MCP integrations** | Read-only, opt-in connectors — Datadog, Prometheus, Kubernetes, Elasticsearch, GitHub, GitLab, Sentry, Grafana, Loki, Splunk, Rootly, Slack, and more. |
+| 🌍 **Multi-environment** | One instance targeting many environments' Kubernetes / Prometheus / Elasticsearch via a single `environments:` registry. |
+| 🔐 **Auth built in** | `open` / `oidc` / first-party `login` modes, SSO (Google · GitHub · Microsoft), per-session ownership, optional Redis rate limiting. |
+| 🧩 **Pluggable everything** | Vector store, knowledge graph, and LLM / embedding / reranker providers are all swappable from config — no rebuild. |
+| 📊 **Observability** | Per-request token + cost telemetry, Phoenix / OTLP traces, and an evaluation harness wired into CI gates. |
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart LR
+    subgraph SRC ["Knowledge sources"]
+        direction TB
+        A[Git repos<br/>runbooks · IaC · manifests]
+        B[Confluence · Slack<br/>Rootly · postmortems]
+    end
+
+    SRC --> ING[Ingestion<br/>parent-child chunking<br/>contextual embeddings]
+    ING --> VS[(Vector store<br/>Qdrant · pgvector)]
+    ING --> KG[(Knowledge graph<br/>Neo4j · optional)]
+
+    VS --> AGENT
+    KG --> AGENT
+    MCP[20 read-only<br/>MCP integrations] --> AGENT
+
+    AGENT{{LangGraph agent<br/>hybrid retrieval · RRF · MMR<br/>CRAG / Self-RAG · grounding gates}}
+
+    AGENT --> API[FastAPI<br/>HTTP · SSE · webhooks]
+    API --> UI[React UI]
+    API --> SLACK[Slack bot]
+    API --> INV[Incident<br/>investigations]
+```
+
+See [docs/architecture.md](docs/architecture.md) for the request flow, the
+provider seams, and the investigation engine.
+
+## 🚀 Quickstart
 
 **Prerequisites:** Docker (Compose v2), `curl`, `jq`, and one LLM API key
-(default: Anthropic). You do **not** need Kubernetes, an external OIDC
-provider (Dex is bundled), or any cloud account (the default config uses the
-null graph backend and zero MCP integrations).
+(default: Anthropic). You do **not** need Kubernetes, an external OIDC provider
+(Dex is bundled), or any cloud account.
 
 ```sh
 # 1. Clone and set your LLM key
-git clone https://github.com/OWNER/opsrag.git
+git clone https://github.com/dtduc-git/opsrag.git
 cd opsrag
 cp .env.example .env
 # Edit .env: set ANTHROPIC_API_KEY=...   (every other value can stay default)
 
-# 2. Bring up backend (:8080), UI (:5173), Qdrant, Postgres, Dex (OIDC :5556), Phoenix (:6006)
-docker compose -f deploy/compose/docker-compose.yaml up -d
+# 2. Bring up the stack:
+#    API :8080 · UI :5173 · Qdrant · Postgres · Dex (OIDC :5556) · Phoenix :6006
+docker compose -f deploy/compose/docker-compose.yaml up -d --build
 
 # 3. Verify health (readiness flips to 200 once Postgres + Qdrant are up)
 curl -sf http://localhost:8080/healthz
@@ -58,34 +114,45 @@ TOKEN=$(curl -sf -X POST \
   -d 'scope=openid profile email' \
   http://localhost:5556/dex/token | jq -r .access_token)
 
-# 6. Ask a question — every endpoint except /healthz and /readyz needs the Bearer token
+# 6. Ask a question — every endpoint except /healthz and /readyz needs the token
 curl -sf -X POST http://localhost:8080/query \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"query":"How do I roll back an Acme Notes deployment?"}' | jq
 ```
 
-You get back a cited English answer drawn from the indexed `samples/` corpus
-(e.g. the Acme Notes deploy/rollback runbook), plus a `session_id` and a
-`trace_id`. Open the Phoenix UI at <http://localhost:6006> to inspect the full
-LangGraph trace, or the web UI at <http://localhost:5173> (it performs its own
-OIDC handshake against Dex).
+You get back a cited answer drawn from the indexed `samples/` corpus, plus a
+`session_id` and a `trace_id`. Open the web UI at <http://localhost:5173>, or
+inspect the full LangGraph trace in Phoenix at <http://localhost:6006>.
 
-Requests without a valid Bearer token are rejected with a stable error
-envelope: `{"error":"unauthenticated","reason":"missing_bearer","request_id":"..."}`.
+> **Heads-up:** the bundled Dex advertises its issuer as
+> `http://localhost:5556/dex` while the API reaches it in-cluster at
+> `http://dex:5556/dex`. On an issuer-mismatch error, align both sides — see
+> [docs/auth.md](docs/auth.md).
 
-> **Local Dex note:** Dex advertises its issuer as `http://localhost:5556/dex`
-> while the API reaches it in-cluster at `http://dex:5556/dex`. If you hit an
-> issuer-mismatch error, align both sides on the same host — see the auth docs.
+The full walkthrough lives in
+[`docs/getting-started.md`](docs/getting-started.md).
 
-## Configuration
+## 🧭 Documentation
 
-opsrag is configured by a single `config.yaml` (Pydantic-v2 validated) plus
-environment variables for secrets. The default `config.yaml` boots a
-healthy service with **zero MCP integrations enabled** and a built-in
-**null knowledge-graph backend** — only an LLM API key and the bundled
-local OIDC issuer are required.
+Full docs are in **[`docs/`](docs/README.md)**. Start here:
 
-Each of the fourteen MCP integrations is opt-in:
+| Guide | What it covers |
+|---|---|
+| [Getting started](docs/getting-started.md) | Clone → run → index → first query → enable auth → first investigation. |
+| [Configuration](docs/configuration.md) | The config model, `env > YAML > bundle` precedence, secrets, and every config block. |
+| [Architecture](docs/architecture.md) | Component map, the `/query` request flow, and the provider seams. |
+| [RAG pipeline](docs/rag-pipeline.md) | Ingestion, chunking, hybrid retrieval, reranking, CRAG/Self-RAG, and the answer cache. |
+| [Investigations](docs/investigations.md) | The event-driven incident-investigation engine. |
+| [MCP integrations](docs/mcp-integrations.md) | The 20 read-only integrations, their env vars, and the safety model. |
+| [Multi-environment](docs/multi-environment.md) | One instance, many environments' Kubernetes / Prometheus / Elasticsearch. |
+| [Authentication](docs/auth.md) · [Operations](docs/operations.md) · [API reference](docs/api-reference.md) | Auth modes + SSO, day-2 ops, and the HTTP/SSE surface. |
+
+## ⚙️ Configuration
+
+OpsRAG is driven by a single `config.yaml` (Pydantic-v2 validated) plus
+environment variables for secrets. The default config boots a healthy service
+with **zero MCP integrations** and a **null knowledge graph** — only an LLM API
+key and the bundled local OIDC issuer are required. Each integration is opt-in:
 
 ```yaml
 mcp:
@@ -93,21 +160,17 @@ mcp:
     enabled: true   # required env: PROMETHEUS_URL, PROMETHEUS_BEARER_TOKEN
   datadog:
     enabled: false
-  # ...
 ```
 
-Missing required credentials for an enabled integration cause a named,
-fail-fast startup error (`MCP_MISCONFIGURED:<name>:<env>`).
+Missing credentials for an enabled integration produce a named, fail-fast
+startup error (`MCP_MISCONFIGURED:<name>:<env>`). See
+[docs/configuration.md](docs/configuration.md).
 
-The full schema is in
-[`specs/001-port-opsrag-opensource/contracts/config-schema.md`](specs/001-port-opsrag-opensource/contracts/config-schema.md).
-
-## Deploying with Helm
+## ☸️ Deploying with Helm
 
 ```sh
 helm install opsrag deploy/helm/opsrag \
-  -f my-values.yaml \
-  --namespace opsrag --create-namespace
+  -f my-values.yaml --namespace opsrag --create-namespace
 ```
 
 Ready-made scenario values live in `deploy/helm/opsrag/`: `values-gcp.yaml`,
@@ -115,7 +178,7 @@ Ready-made scenario values live in `deploy/helm/opsrag/`: `values-gcp.yaml`,
 `values-minimal.yaml`. See the [Helm chart reference](docs/helm-chart.md) and
 the [Deployment guide](docs/deployment.md).
 
-## Project layout
+## 🗂️ Project layout
 
 ```text
 opsrag/                  Python backend package
@@ -125,36 +188,31 @@ opsrag/                  Python backend package
   auth/                  OIDC / SSO / first-party login
   mcp/                   20 MCP integrations, each opt-in
   environments.py        Multi-environment registry resolver
-  ...
 ui/                      React single-page UI (Vite)
 deploy/
   helm/opsrag/           First-class Helm chart
   compose/               Local docker-compose stack (incl. Dex)
 samples/                 Synthetic corpus for the quickstart
-scripts/                 Audit, seed, helper scripts
+scripts/                 Audit, seed, and helper scripts
 tests/                   contract / integration / unit
 ```
 
-## Documentation
+## Status
 
-Full documentation is in [`docs/`](docs/README.md). Highlights:
+> **Pre-release (`0.1.0a0`).** The first public release is being assembled on
+> `master`. Interfaces and configuration keys may change without notice until
+> `v0.1.0`.
 
-- [Getting started](docs/getting-started.md) | [Configuration](docs/configuration.md) | [Deployment](docs/deployment.md)
-- [Architecture](docs/architecture.md) | [RAG pipeline](docs/rag-pipeline.md) | [Investigations](docs/investigations.md)
-- [MCP integrations](docs/mcp-integrations.md) | [Multi-environment](docs/multi-environment.md)
-- [Authentication](docs/auth.md) | [Operations](docs/operations.md) | [API reference](docs/api-reference.md)
+## 🤝 Contributing
 
-## Contributing
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow and the mandatory
+checks (lint, types, tests, vendor-neutrality audit, helm-lint, eval-regression).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow and the
-mandatory checks (lint, types, tests, vendor-neutrality audit, helm-lint,
-eval-regression).
+## 🔒 Security
 
-## Security
-
-Vulnerability reports go through the process in [SECURITY.md](SECURITY.md).
+Report vulnerabilities through the process in [SECURITY.md](SECURITY.md).
 Please do not file public issues for security findings.
 
-## License
+## 📄 License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
