@@ -31,6 +31,7 @@ import gc
 import hashlib
 import logging
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 from opsrag.indexed_files.noop import NoopIndexedFilesTracker
@@ -348,6 +349,73 @@ class IngestionPipeline:
                 exc,
             )
 
+    async def _sweep_deleted_files(
+        self, repo: str, branch: str, run_started_at: datetime
+    ) -> None:
+        """Repo-level deletion sweep -- run ONLY after a fully-completed
+        ``index_repo`` pass. Files tracked for this (repo, branch) whose
+        ``last_seen_at`` predates this run were present before but NOT seen
+        this run (deleted/renamed in source). For each, purge its chunks from
+        the vector store (+ code collection + graph lanes, reusing the same
+        per-file orphan-delete paths as the changed-file sweep) and drop its
+        tracker row.
+
+        Guarded by the caller so a partial / aborted index never purges --
+        otherwise a transient SCM error mid-listing would look like every
+        un-streamed file was deleted and wipe the index. Non-fatal: a sweep
+        failure is logged and swallowed so it can't fail an otherwise-good
+        index run.
+        """
+        try:
+            stale = await self.indexed_files.sweep_deleted(
+                repo, branch, run_started_at
+            )
+        except Exception as exc:
+            _log.warning(
+                "deletion sweep query failed repo=%s branch=%s: %s -- skipping",
+                repo, branch, exc,
+            )
+            return
+        if not stale:
+            return
+        _log.info(
+            "deletion sweep repo=%s branch=%s removing %d file(s) gone from source",
+            repo, branch, len(stale),
+        )
+        for path in stale:
+            try:
+                await self.vector_store.delete_by_filter(
+                    {"repo": repo, "source_path": path}
+                )
+            except Exception as exc:
+                _log.warning(
+                    "deletion sweep vector delete failed repo=%s path=%s: %s",
+                    repo, path, exc,
+                )
+            if self.code_vector_store is not None:
+                try:
+                    await self.code_vector_store.delete_by_filter(
+                        {"repo": repo, "source_path": path}
+                    )
+                except Exception as exc:
+                    _log.warning(
+                        "deletion sweep code-collection delete failed "
+                        "repo=%s path=%s: %s",
+                        repo, path, exc,
+                    )
+            # Reference-counted graph + light-graph orphan sweeps, mirroring
+            # the changed-file path. Both non-fatal / no-op when unwired.
+            await self._graph_delete_by_source(repo, path)
+            if self.light_graph is not None:
+                try:
+                    await self.light_graph.delete_by_source(repo, path)
+                except Exception as exc:
+                    _log.warning(
+                        "deletion sweep light-graph delete failed "
+                        "repo=%s path=%s: %s",
+                        repo, path, exc,
+                    )
+
     async def index_repo(
         self,
         repo: str,
@@ -385,6 +453,12 @@ class IngestionPipeline:
             # Shell + env templates (often part of service deployment)
             "**/*.sh", "**/*.bash",
         ]
+        # Captured BEFORE any file is processed so it predates every
+        # last_seen_at bump this run makes. The end-of-run deletion sweep
+        # purges tracker rows still older than this -- i.e. files not seen
+        # this pass because they were removed from source. Timezone-aware
+        # (the column is TIMESTAMPTZ).
+        run_started_at = datetime.now(UTC)
         # Idempotent -- auto-index path queues earlier; manual / webhook paths
         # need this so start_listing/start_indexing don't no-op.
         indexing_tracker.ensure_queued(repo, branch)
@@ -494,7 +568,27 @@ class IngestionPipeline:
         finally:
             # Workers received sentinels via the producer's finally block;
             # gather them so any worker exception surfaces.
-            await asyncio.gather(*workers, return_exceptions=True)
+            worker_results = await asyncio.gather(
+                *workers, return_exceptions=True
+            )
+
+        # Repo-level deletion sweep -- ONLY when the run completed fully. We
+        # reach here only if `_producer()`/`queue.join()` did not raise (a
+        # mid-listing SCM error propagates out of the try above and skips
+        # this), AND no worker crashed. A partial run must NOT purge: if the
+        # producer streamed only half the files, the un-streamed half would
+        # look "not seen this run" and get wrongly deleted.
+        run_completed = not any(
+            isinstance(r, BaseException) for r in worker_results
+        )
+        if run_completed:
+            await self._sweep_deleted_files(repo, branch, run_started_at)
+        else:
+            _log.warning(
+                "skipping deletion sweep repo=%s branch=%s -- a worker "
+                "crashed; run may be partial",
+                repo, branch,
+            )
 
         indexing_tracker.repo_done(repo, branch)
         return total_chunks

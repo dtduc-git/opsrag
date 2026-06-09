@@ -66,7 +66,11 @@ _ENV_TOKENS: dict[str, str] = {
     "live": "prod",
     "staging": "staging",
     "stage": "staging",
-    "preprod": "staging",
+    # preprod is its own canonical env (see metadata.ENVIRONMENTS), NOT a
+    # staging alias -- contextual.py also emits "preprod", so folding it here
+    # would tag the same chunk's filterable `environment` (staging) out of
+    # sync with its embedded context prefix (preprod).
+    "preprod": "preprod",
     "dev": "dev",
     "develop": "dev",
     "development": "dev",

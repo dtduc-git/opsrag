@@ -75,10 +75,15 @@ SOURCE_SYSTEMS: frozenset[str] = frozenset({
     "unknown",
 })
 
-# Deployment environment scope.
+# Deployment environment scope. `preprod` is a first-class canonical env
+# (per data-model.md), NOT a fold-into-staging alias -- a preprod
+# `values.yaml` carries different config than staging, so collapsing them
+# would tag preprod chunks inconsistently (enrich vs contextual) and make
+# the `environment` filter mismatch.
 ENVIRONMENTS: frozenset[str] = frozenset({
     "prod",
     "staging",
+    "preprod",
     "dev",
     "test",
     "qa",

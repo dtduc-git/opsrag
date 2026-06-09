@@ -14,13 +14,16 @@ Schema (created on first ``open()`` call -- idempotent):
       PRIMARY KEY (repo, branch, path)
     );
 
-The ``last_seen_at`` column is bookkeeping for a future deletion sweep --
-phase 1 doesn't act on it yet.
+The ``last_seen_at`` column drives the repo-level deletion sweep: at the END
+of a successful ``index_repo`` run, rows whose ``last_seen_at`` predates the
+run start were not seen this pass (deleted from source) and are purged --
+see ``sweep_deleted`` and ``IngestionPipeline.index_repo``.
 """
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from datetime import datetime
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -156,3 +159,28 @@ class PostgresIndexedFilesTracker:
                     "WHERE repo = %s AND branch = %s AND path = ANY(%s)",
                     (repo, branch, path_list),
                 )
+
+    async def sweep_deleted(
+        self, repo: str, branch: str, run_started_at: datetime
+    ) -> list[str]:
+        """Purge tracker rows for files that vanished from source this run.
+
+        A file present last run but NOT seen this run keeps its older
+        ``last_seen_at`` (every seen file -- re-indexed via ``record`` or
+        skipped via ``mark_seen`` -- gets bumped to NOW()). So rows with
+        ``last_seen_at < run_started_at`` are exactly the deleted files.
+        DELETE...RETURNING gives us their paths in one round-trip so the
+        caller can drop the matching chunks from the vector store.
+        """
+        if not self._ready:
+            return []
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM indexed_files "
+                    "WHERE repo = %s AND branch = %s AND last_seen_at < %s "
+                    "RETURNING path",
+                    (repo, branch, run_started_at),
+                )
+                rows = await cur.fetchall()
+        return [r[0] for r in rows]
