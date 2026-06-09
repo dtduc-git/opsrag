@@ -189,7 +189,12 @@ class QdrantVectorStore:
                     _BM25: qm.SparseVectorParams(modifier=qm.Modifier.IDF),
                 },
             )
-            for field in ("repo", "source_path", "doc_type", "entity_ids"):
+            # `chunk_type` is KEYWORD-indexed because EVERY search lane carries a
+            # `must_not chunk_type == "parent"` filter (see _search_filter /
+            # search_by_text / search_by_path). Without the index Qdrant scans
+            # the payload for that exclusion on every query -- latency + recall
+            # degradation at scale. Mirrors the other KEYWORD fields.
+            for field in ("repo", "source_path", "doc_type", "entity_ids", "chunk_type"):
                 try:
                     await self._client.create_payload_index(
                         collection_name=self._collection,

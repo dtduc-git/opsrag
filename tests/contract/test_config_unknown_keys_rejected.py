@@ -41,3 +41,21 @@ def test_implemented_chunking_strategies_still_accepted() -> None:
     for strategy in ("parent_child", "fixed_size"):
         settings = Settings.model_validate({"chunking": {"strategy": strategy}})
         assert settings.chunking.strategy == strategy
+
+
+@pytest.mark.parametrize("provider", ["cohere", "ollama"])
+def test_unimplemented_embedding_provider_rejected_at_load(provider: str) -> None:
+    # "cohere"/"ollama" are NOT built by the embedder factory
+    # (opsrag/factory.py) -- they fell through to a runtime
+    # NotImplementedError. They must be rejected at config-load with a clear
+    # pydantic error naming the field, mirroring the chunking.strategy guard.
+    with pytest.raises(ValidationError) as exc_info:
+        Settings.model_validate({"embedding": {"provider": provider}})
+    assert "embedding.provider" in str(exc_info.value)
+
+
+def test_implemented_embedding_providers_still_accepted() -> None:
+    # Every provider the factory can build remains valid at load.
+    for provider in ("openai", "vertex", "bedrock", "fastembed", "litellm"):
+        settings = Settings.model_validate({"embedding": {"provider": provider}})
+        assert settings.embedding.provider == provider

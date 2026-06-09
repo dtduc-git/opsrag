@@ -47,6 +47,33 @@ _MODEL_DIMENSIONS: dict[str, int] = {
 _MAX_RETRIES = 6
 _BASE_BACKOFF = 1.5  # seconds; 1.5, 3, 6, 12, 24, 48 -> ~94s worst case
 
+
+def _retryable_exc_types() -> tuple[type[Exception], ...]:
+    """Typed google-api-core exceptions that warrant a retry.
+
+    Resolved lazily because ``google.api_core`` ships with the optional
+    ``vertex`` extra -- importing it at module load would break the bare
+    install. Returns an empty tuple if the package is absent, in which case
+    ``_is_retryable`` falls back to string matching alone.
+    """
+    try:
+        from google.api_core import exceptions as gexc
+    except Exception:  # pragma: no cover - only when the extra is absent
+        return ()
+    # 429 quota, 503 unavailable, 504/deadline, 500 internal. TooManyRequests
+    # is the HTTP-transport sibling of the gRPC ResourceExhausted.
+    return tuple(
+        t
+        for t in (
+            getattr(gexc, "ResourceExhausted", None),
+            getattr(gexc, "TooManyRequests", None),
+            getattr(gexc, "ServiceUnavailable", None),
+            getattr(gexc, "DeadlineExceeded", None),
+            getattr(gexc, "InternalServerError", None),
+        )
+        if t is not None
+    )
+
 # Vertex text-embedding-005 limits per request:
 #   - max 250 inputs (count)
 #   - max 20,000 tokens summed across inputs
@@ -64,6 +91,13 @@ _CHARS_PER_TOKEN = CHARS_PER_TOKEN
 
 
 def _is_retryable(exc: Exception) -> bool:
+    # Prefer typed google-api-core exceptions -- robust to message wording /
+    # localization changes that fragile string matching misses. The string
+    # match below is kept only as a fallback for transports that raise a bare
+    # Exception (or when the api-core extra isn't importable).
+    retryable_types = _retryable_exc_types()
+    if retryable_types and isinstance(exc, retryable_types):
+        return True
     msg = str(exc).lower()
     return (
         "429" in msg

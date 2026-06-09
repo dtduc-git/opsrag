@@ -194,3 +194,53 @@ async def test_ensure_collection_allow_change_bypasses(monkeypatch):
     await store.ensure_collection()
     assert store._ensured is True
     assert fake.create_called is False
+
+
+# --- New-collection payload-index coverage ----------------------------------
+# Every search lane carries a `must_not chunk_type == "parent"` filter, so
+# `chunk_type` MUST be KEYWORD-indexed at create time -- otherwise Qdrant
+# scans the payload for that exclusion on every query (latency + recall
+# degradation at scale). This fake exercises the NEW-collection branch and
+# records each create_payload_index(field_name=...) call.
+
+
+class _NewCollectionFakeQdrant:
+    """Mock AsyncQdrantClient for ensure_collection()'s create path: the
+    target collection does NOT exist yet, so create_collection + the
+    create_payload_index loop run. Records every payload-index field name."""
+
+    def __init__(self):
+        self.create_called = False
+        self.payload_index_fields: list[str] = []
+
+    async def get_collections(self):
+        return _Cols(["some_other_collection"])
+
+    async def collection_exists(self, collection):
+        return False
+
+    async def create_collection(self, **kwargs):
+        self.create_called = True
+
+    async def create_payload_index(self, **kwargs):
+        self.payload_index_fields.append(kwargs.get("field_name"))
+
+
+@pytest.mark.asyncio
+async def test_ensure_collection_indexes_chunk_type(monkeypatch):
+    from opsrag.vectorstores import qdrant as qdrant_mod
+
+    fake = _NewCollectionFakeQdrant()
+    monkeypatch.setattr(
+        qdrant_mod, "AsyncQdrantClient", lambda *a, **k: fake
+    )
+    store = qdrant_mod.QdrantVectorStore(collection_name="opsrag", dimension=768)
+    await store.ensure_collection()
+
+    assert fake.create_called is True
+    # chunk_type must be among the KEYWORD payload indexes created so the
+    # per-search must_not parent exclusion hits an index, not a scan.
+    assert "chunk_type" in fake.payload_index_fields
+    # The pre-existing KEYWORD indexes are still created (no regression).
+    for field in ("repo", "source_path", "doc_type", "entity_ids"):
+        assert field in fake.payload_index_fields

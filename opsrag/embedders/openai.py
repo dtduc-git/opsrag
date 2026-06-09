@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 
 from openai import (
     APIConnectionError,
@@ -12,6 +13,9 @@ from openai import (
     InternalServerError,
     RateLimitError,
 )
+
+from opsrag.tokenization import estimate_tokens
+from opsrag.usage import tracker as _usage_tracker
 
 _log = logging.getLogger("opsrag.embedders.openai")
 
@@ -94,16 +98,47 @@ class OpenAIEmbeddings:
                 await asyncio.sleep(delay)
         raise last_exc  # type: ignore[misc]
 
+    @staticmethod
+    def _resp_tokens(resp, fallback_texts: list[str]) -> int:
+        """Prefer the API-reported prompt token count; fall back to our
+        estimate when the response omits usage (mirrors bedrock/vertex)."""
+        usage = getattr(resp, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        if prompt_tokens:
+            return int(prompt_tokens)
+        return sum(estimate_tokens(t) for t in fallback_texts)
+
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        t0 = time.perf_counter()
         vectors: list[list[float]] = []
+        total_tokens = 0
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
             resp = await self._create_with_retry(batch)
             vectors.extend(d.embedding for d in resp.data)
+            total_tokens += self._resp_tokens(resp, batch)
+        latency_ms = (time.perf_counter() - t0) * 1000
+        # `embed-index` -> the indexing cost bucket in Usage & Cost.
+        _usage_tracker.record(
+            model=self._model,
+            input_tokens=total_tokens,
+            output_tokens=0,
+            latency_ms=latency_ms,
+            purpose="embed-index",
+        )
         return vectors
 
     async def embed_query(self, query: str) -> list[float]:
+        t0 = time.perf_counter()
         resp = await self._create_with_retry([query])
+        latency_ms = (time.perf_counter() - t0) * 1000
+        _usage_tracker.record(
+            model=self._model,
+            input_tokens=self._resp_tokens(resp, [query]),
+            output_tokens=0,
+            latency_ms=latency_ms,
+            purpose="embed-query",
+        )
         return resp.data[0].embedding

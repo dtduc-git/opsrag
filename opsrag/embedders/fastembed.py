@@ -11,6 +11,8 @@ Requires: pip install fastembed
 """
 from __future__ import annotations
 
+import asyncio
+
 from fastembed import TextEmbedding
 
 _MODEL_DIMENSIONS: dict[str, int] = {
@@ -70,10 +72,16 @@ class FastEmbedEmbeddings:
             return []
         if self._doc_prefix:
             texts = [self._doc_prefix + t for t in texts]
-        embeddings = list(self._engine.embed(texts, batch_size=self._batch_size))
+        # The ONNX embed() is a SYNC, CPU-bound call. Run it off the event
+        # loop so a bulk index doesn't block every other concurrent request
+        # (e.g. live queries) for the duration of the embedding.
+        embeddings = await asyncio.to_thread(
+            lambda: list(self._engine.embed(texts, batch_size=self._batch_size))
+        )
         return [emb.tolist() for emb in embeddings]
 
     async def embed_query(self, query: str) -> list[float]:
         text = (self._query_prefix + query) if self._query_prefix else query
-        result = list(self._engine.embed([text]))
+        # Offload the sync ONNX inference to a thread (see embed_texts).
+        result = await asyncio.to_thread(lambda: list(self._engine.embed([text])))
         return result[0].tolist()

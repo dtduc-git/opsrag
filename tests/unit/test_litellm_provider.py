@@ -7,12 +7,14 @@ usage with the right purpose tags.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 
 import pytest
 from pydantic import BaseModel
 
+import opsrag.embedders.litellm_provider as litellm_mod
 from opsrag.embedders.litellm_provider import LiteLLMEmbeddings
 from opsrag.llms.litellm_provider import LiteLLMLLM
 from opsrag.usage import tracker
@@ -96,6 +98,38 @@ async def test_embed_texts_empty_returns_empty(monkeypatch):
     _install_fake_litellm(monkeypatch, aembedding=fake_aembedding)
     emb = LiteLLMEmbeddings(model="voyage/voyage-3", dimension=8)
     assert await emb.embed_texts([]) == []
+
+
+async def test_embed_texts_caps_concurrent_batches(monkeypatch):
+    """Bulk indexing must NOT fire every batch at once -- in-flight batches are
+    bounded by the module's semaphore cap so we don't trigger a 429 storm."""
+    # Shrink batch size to 1 so N texts -> N batches, and tighten the cap so
+    # the test is fast and deterministic.
+    monkeypatch.setattr(litellm_mod, "_MAX_CONCURRENT_BATCHES", 3)
+
+    in_flight = 0
+    max_in_flight = 0
+
+    async def fake_aembedding(**kwargs):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        # Yield so other queued coroutines get a chance to start -- if there
+        # were no cap, all of them would be in-flight at this point.
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return _embed_response([[0.1] for _ in kwargs["input"]])
+
+    _install_fake_litellm(monkeypatch, aembedding=fake_aembedding)
+
+    emb = LiteLLMEmbeddings(model="voyage/voyage-3", dimension=1, batch_size=1)
+    texts = [f"chunk-{i}" for i in range(12)]  # 12 batches, cap of 3
+
+    vecs = await emb.embed_texts(texts)
+
+    assert len(vecs) == 12
+    assert max_in_flight <= 3, f"concurrency cap breached: {max_in_flight} > 3"
+    assert max_in_flight == 3, "cap should be saturated, not under-utilized"
 
 
 async def test_embed_passes_api_base_for_self_hosted(monkeypatch):
