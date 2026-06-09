@@ -69,6 +69,28 @@ MAX_LLM_TOKENS_PER_INVESTIGATION: int = 1_000_000
 """Safety net against runaway prompt growth. Realistic single
 investigation is ~50K tokens; cap is 20x headroom."""
 
+# -- Per-call timeouts (hard, interrupting) --------------------------
+# The wall-clock breaker (MAX_INVESTIGATION_DURATION_SEC) is only checked
+# at node boundaries, so a single hung provider await could block far
+# past it. These wrap each external await in asyncio.wait_for so one
+# stuck retrieval/LLM/embed call degrades gracefully instead of hanging
+# the whole investigation (and every other request on the event loop).
+PER_CALL_RETRIEVAL_TIMEOUT_SEC: float = 30.0
+"""Max wall-clock for a single retrieve()/embed() await. On timeout the
+call degrades to empty results rather than raising."""
+
+PER_CALL_LLM_TIMEOUT_SEC: float = 90.0
+"""Max wall-clock for a single LLM generate() await. On timeout the call
+degrades to an empty response (-> inconclusive verdict / no hypotheses)."""
+
+# -- Decoding --------------------------------------------------------
+HYPOTHESIS_GEN_TEMPERATURE: float = 0.7
+"""Temperature for ROOT + SUB hypothesis generation only. The judge and
+synthesis calls stay at 0.0 (deterministic). Hypothesis generation is the
+one place we WANT spread: a greedy temp-0 decoder collapses the 3-5
+"diverse" hypotheses toward one restated cause, fighting the prompt's
+diversity mandate. Keep this > 0 to actually get distinct candidates."""
+
 # -- Loop prevention -------------------------------------------------
 DUPLICATE_ANCESTOR_COSINE_THRESHOLD: float = 0.9
 """If a child statement embeds within this cosine of any ancestor on the
@@ -90,6 +112,11 @@ evidence-judge prompt should see focused context, not a dump."""
 
 BOOTSTRAP_TOP_K: int = 4
 """Chunks fetched for runbook + past-incident bootstrap query."""
+
+MAX_TOOL_CALLS_PER_HYPOTHESIS: int = 2
+"""How many LIVE telemetry tools (datadog/rootly/code/...) the agent may
+invoke to test ONE hypothesis. Bits-AI-style targeted telemetry: a couple
+of focused signals per hypothesis, never a dump-all-at-once."""
 
 # -- Confidence calibration ------------------------------------------
 INCONCLUSIVE_CONFIDENCE_CEILING: float = 0.5

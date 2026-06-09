@@ -37,16 +37,17 @@ HYPOTHESIS_GEN_PROMPT = """You are an SRE investigation agent. An alert just fir
 # Instructions
 Produce {max_hypotheses} distinct root-cause hypotheses. CRITICAL constraints:
 
-1. DIVERSITY -- each hypothesis MUST come from a different subsystem or causal layer. Avoid restating the same cause with synonyms. Spread across e.g.:
-   - workload / application (OOM, deadlock, slow query, leak)
-   - configuration (resource limits, env vars, feature flag)
-   - infrastructure (node, disk, network, DNS)
-   - upstream dependency (DB, cache, MQ, external API)
-   - recent change (deploy, rollout, gitops merge)
+1. ONE PER SUBSYSTEM (hard slot rule) -- assign each hypothesis to a DIFFERENT subsystem slot below; never spend two hypotheses on the same slot. Walk the slots in order and emit the single most likely failure mode for each, until you reach {max_hypotheses}:
+   (a) workload / application -- OOM, deadlock, slow query, memory leak, thread starvation
+   (b) configuration -- resource limits, env vars, feature flag, secret/cert expiry
+   (c) infrastructure -- node, disk, network, DNS, control-plane
+   (d) upstream dependency -- DB, cache, message queue, external API
+   (e) recent change -- deploy, rollout, gitops merge, config push
+   If a slot is clearly irrelevant to this alert, skip it and take the next-most-likely slot -- but never emit two hypotheses for the same slot.
 2. TESTABLE -- each must be falsifiable with retrieval against runbooks / past incidents / git history / Slack / Rootly.
 3. SPECIFIC -- name the subsystem and the failure mode in one sentence. No vague "service degradation".
 4. NO REPETITION -- never repeat or paraphrase one of the others.
-5. PRIOR-INVESTIGATION AWARENESS -- if any "Prior similar investigations" are listed above, INCLUDE at least one hypothesis that maps to the prior root cause (it's a real signal that pattern recurs). Do NOT blindly copy -- adapt to current alert. If priors are empty, ignore this rule.
+5. PRIOR-INVESTIGATION AWARENESS -- the "Prior similar investigations" above are PAST GUESSES, not ground truth (an earlier run may have been confidently wrong). Treat a prior root cause as ONE weak signal: emit a hypothesis matching it ONLY if it independently fits THIS alert's evidence. Do NOT force-include a prior cause, and never let it outrank a subsystem slot that better fits the current alert. If priors are empty, ignore this rule.
 
 # Output format (strict JSON)
 Return a JSON object with a `hypotheses` array, no prose:
@@ -97,6 +98,34 @@ Return a JSON object with a `hypotheses` array:
 """
 
 
+# -- 2b. Live-telemetry tool selection (P0-B) -----------------------
+
+TOOL_SELECT_PROMPT = """You are an SRE investigation agent choosing LIVE telemetry to test ONE hypothesis.
+
+# Alert
+- Alert: {alert_text}
+- Service: {service_hint}
+- Namespace: {namespace_hint}
+
+# Hypothesis to test
+{hypothesis_statement}
+
+# Available live tools
+{tool_catalog}
+
+# Instructions
+Pick AT MOST {max_calls} tool call(s) whose result would directly CONFIRM or REFUTE this hypothesis for THIS service with live data. Prefer the single most decisive signal -- a trace/span search, a monitor's current state, a recent deploy/change event, an incident timeline, or a targeted code/config lookup. Fill `args_json` with a JSON OBJECT (as a string) matching that tool's input schema, using the service/namespace above to scope it. If NO available tool meaningfully tests this hypothesis with live data, return an EMPTY `calls` list -- the agent will fall back to document retrieval.
+
+# Output format (strict JSON)
+{{
+  "calls": [
+    {{"tool": "<exact tool name from the catalog>", "args_json": "{{\\"key\\": \\"value\\"}}", "rationale": "<one line: what result confirms or refutes>"}}
+  ]
+}}
+Return ONLY the JSON object, no surrounding prose.
+"""
+
+
 # -- 3. Evidence judge ----------------------------------------------
 
 EVIDENCE_JUDGE_PROMPT = """You are an SRE evidence judge. Given a hypothesis and a set of retrieved snippets, classify whether the evidence VALIDATES, INVALIDATES, or is INCONCLUSIVE for the hypothesis.
@@ -115,8 +144,11 @@ EVIDENCE_JUDGE_PROMPT = """You are an SRE evidence judge. Given a hypothesis and
 
 # Decision rubric
 - validated     -- at least one snippet explicitly supports the mechanism named in the hypothesis FOR THIS SPECIFIC service/namespace. Cite the supporting chunk(s).
-- invalidated   -- at least one snippet explicitly refutes the mechanism (e.g. metric shows the opposite trend, runbook says this is not the cause for this alert pattern).
-- inconclusive  -- snippets are tangential, missing, or ambiguous. DO NOT validate without supporting evidence.
+- invalidated   -- the evidence weighs AGAINST the mechanism. This covers BOTH:
+    (i)  explicit contradiction -- a metric shows the opposite trend, or a runbook says this is not the cause for this alert pattern; OR
+    (ii) absence where it SHOULD appear -- a directly relevant on-service source (THIS service's runbook, its recent change log, or a past incident on THIS service) is present in the evidence yet says nothing that supports the mechanism. That conspicuous silence weighs against the hypothesis.
+  Cite the refuting / conspicuously-silent chunk(s). Use invalidated so the agent stops drilling a dead branch and looks elsewhere.
+- inconclusive  -- snippets are merely tangential, unrelated (off-service), missing, or ambiguous -- i.e. you cannot tell either way. DO NOT validate without supporting evidence, but also do NOT invalidate when the evidence is simply thin or off-topic (that's inconclusive, not a refutation).
 
 # CRITICAL SERVICE-ANCHOR RULES
 The investigation is about service `{service_hint}` in namespace `{namespace_hint}`.
@@ -131,7 +163,7 @@ The investigation is about service `{service_hint}` in namespace `{namespace_hin
 3. Only return `validated` with confidence > 0.6 when at least one citation is from:
    (a) the `{service_hint}` repo or a path containing `{service_hint}` / `{namespace_hint}`, OR
    (b) the linked runbook for THIS alert, OR
-   (c) live state evidence (Prometheus / k8s state describing `{service_hint}` directly).
+   (c) LIVE TELEMETRY -- a result from a live tool (its source id starts with `tool:` -- e.g. Datadog traces/monitors/events, a Rootly incident timeline, or a targeted code/config lookup) that describes `{service_hint}` directly. Live tool evidence is the STRONGEST signal: a trace/monitor/event/timeline that confirms the mechanism VALIDATES it; one that shows the opposite trend -- or in which the signal you'd expect for this mechanism is conspicuously ABSENT -- INVALIDATES it.
 
 4. Be strict: when in doubt, return `inconclusive`. Hallucinating validation across unrelated services costs the team hours.
 

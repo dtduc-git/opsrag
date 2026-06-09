@@ -43,6 +43,7 @@ Datadog Bits AI SRE quotes we honor here:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -62,9 +63,13 @@ from opsrag.agents.investigation.budget import (
 from opsrag.agents.investigation.limits import (
     BOOTSTRAP_TOP_K,
     EVIDENCE_TOP_K,
+    HYPOTHESIS_GEN_TEMPERATURE,
     INCONCLUSIVE_CONFIDENCE_CEILING,
     INVALIDATED_CONFIDENCE_FLOOR,
     MAX_DEPTH,
+    MAX_TOOL_CALLS_PER_HYPOTHESIS,
+    PER_CALL_LLM_TIMEOUT_SEC,
+    PER_CALL_RETRIEVAL_TIMEOUT_SEC,
     fanout_for_depth,
     threshold_for_depth,
 )
@@ -78,6 +83,7 @@ from opsrag.agents.investigation.prompts import (
     HYPOTHESIS_GEN_PROMPT,
     ROOT_CAUSE_SYNTH_PROMPT,
     SUB_HYPOTHESIS_GEN_PROMPT,
+    TOOL_SELECT_PROMPT,
 )
 from opsrag.agents.investigation.state import (
     Citation,
@@ -94,6 +100,13 @@ _log = logging.getLogger("opsrag.agents.investigation.graph")
 # (existing Confluence/Slack/Rootly/Git pipeline) without us needing
 # to import vector store directly.
 RetrieveFn = Callable[[str, int], Awaitable[list[dict[str, Any]]]]
+
+# Live-telemetry tool dispatch contract (P0-B). The route handler wraps
+# the enabled MCP registry as `dispatch(tool_name, args) -> {tool, data,
+# error}` so the graph never imports opsrag.mcp directly (same decoupling
+# as RetrieveFn). The companion `tool_catalog` is a list of
+# {name, description, input_schema} dicts the LLM picks from.
+ToolDispatchFn = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 # --- T1.1 -- structured-output schemas ------------------------------
@@ -124,6 +137,201 @@ class VerdictResponse(BaseModel):
     refuting_chunk_ids: list[str] = []
 
 
+class ToolCallSpec(BaseModel):
+    """One live-telemetry tool the LLM wants to run to test a hypothesis.
+    `args_json` is a JSON OBJECT encoded as a string -- keeping it a
+    string sidesteps Vertex response_schema's lack of free-form objects;
+    we json.loads it after parsing."""
+
+    tool: str
+    args_json: str = "{}"
+    rationale: str = ""
+
+
+class ToolPlan(BaseModel):
+    calls: list[ToolCallSpec] = []
+
+
+# --- per-call timeout guards ----------------------------------------
+
+
+async def _retrieve_guarded(
+    retrieve: RetrieveFn, query: str, top_k: int,
+) -> list[dict[str, Any]]:
+    """Run a retrieve() await under a hard per-call timeout.
+
+    The wall-clock circuit breaker is only evaluated at node boundaries,
+    so a single hung vector-store / embedder call would block far past
+    it (and stall every other request on the event loop). Wrap the await
+    and degrade to empty results on timeout -- the judge then sees
+    "(no snippets returned)" rather than the investigation hanging.
+    """
+    try:
+        return await asyncio.wait_for(
+            retrieve(query, top_k), timeout=PER_CALL_RETRIEVAL_TIMEOUT_SEC,
+        )
+    except (TimeoutError, asyncio.TimeoutError):
+        _log.warning(
+            "retrieve timed out after %ss for %r",
+            PER_CALL_RETRIEVAL_TIMEOUT_SEC, query[:60],
+        )
+        return []
+
+
+# --- live-telemetry tool evidence (P0-B) ----------------------------
+
+
+def _render_tool_catalog(tool_catalog: list[dict[str, Any]]) -> str:
+    """Compact, LLM-readable listing of the live tools available to test a
+    hypothesis -- name, one-line purpose, and arg names/types/required."""
+    lines: list[str] = []
+    for t in tool_catalog:
+        name = t.get("name", "")
+        desc = (t.get("description") or "").strip().splitlines()[0][:160] if t.get("description") else ""
+        schema = t.get("input_schema") or {}
+        props = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        arg_bits = [
+            f"{k}{'*' if k in required else ''}:{(v or {}).get('type', 'any')}"
+            for k, v in list(props.items())[:8]
+        ]
+        lines.append(f"- {name} -- {desc}\n    args: {', '.join(arg_bits) or '(none)'}")
+    return "\n".join(lines) or "(no live tools available)"
+
+
+def _summarize_tool_result(data: Any) -> str:
+    if data is None:
+        return "(empty result)"
+    try:
+        return json.dumps(data, default=str, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return str(data)
+
+
+def _parse_tool_plan(raw: str) -> list[dict[str, Any]]:
+    """Parse the ToolPlan envelope (tolerant of fences/prose). Returns a
+    list of {tool, args, rationale}; args is the json-decoded args_json."""
+    if not raw:
+        return []
+    s = raw.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE | re.MULTILINE).strip()
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError:
+        m = _JSON_BLOCK_RE.search(s)
+        if not m:
+            return []
+        try:
+            parsed = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return []
+    calls = parsed.get("calls") if isinstance(parsed, dict) else parsed
+    if not isinstance(calls, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for c in calls:
+        if not isinstance(c, dict):
+            continue
+        tool = c.get("tool")
+        if not isinstance(tool, str) or not tool.strip():
+            continue
+        args_raw = c.get("args_json")
+        if args_raw is None:
+            args_raw = c.get("args")
+        if isinstance(args_raw, dict):
+            args = args_raw
+        elif isinstance(args_raw, str):
+            try:
+                args = json.loads(args_raw)
+            except json.JSONDecodeError:
+                args = {}
+        else:
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        out.append({"tool": tool.strip(), "args": args,
+                    "rationale": str(c.get("rationale") or "")})
+    return out
+
+
+async def _gather_live_evidence(
+    state: InvestigationState,
+    llm,
+    node: HypothesisNode,
+    tool_dispatch: "ToolDispatchFn | None",
+    tool_catalog: list[dict[str, Any]] | None,
+    *,
+    service: str | None,
+    namespace: str | None,
+) -> list[Citation]:
+    """Have the LLM pick targeted live tools for THIS hypothesis, dispatch
+    them, and return provenance-tagged Citations.
+
+    Each live result is tagged `source_id="tool:<name>"` and
+    `repo=<service>` so the off-topic cap treats it as on-service (the
+    tool was called WITH the service in its args, so the result is by
+    construction about that service). Tool ERRORS become zero-score
+    evidence the judge can read as "expected signal absent" -- a genuine
+    invalidation signal, not a crash. No-op when dispatch is unwired.
+    """
+    if not tool_dispatch or not tool_catalog:
+        return []
+    prompt = TOOL_SELECT_PROMPT.format(
+        alert_text=state.alert_context.alert_text[:500],
+        service_hint=service or "(unknown)",
+        namespace_hint=namespace or "(unknown)",
+        hypothesis_statement=node.statement,
+        tool_catalog=_render_tool_catalog(tool_catalog),
+        max_calls=MAX_TOOL_CALLS_PER_HYPOTHESIS,
+    )
+    try:
+        raw = await _call_llm_raw(
+            state, llm, prompt,
+            purpose="llm_tool_select", max_tokens=1200,
+            response_schema=ToolPlan.model_json_schema(),
+        )
+    except BudgetExceeded as exc:
+        emit_circuit_breaker(state, exc.breaker, exc.detail)
+        return []
+    plan = _parse_tool_plan(raw)
+    citations: list[Citation] = []
+    for call in plan[:MAX_TOOL_CALLS_PER_HYPOTHESIS]:
+        try:
+            check_budget(state.budget_state)
+        except BudgetExceeded as exc:
+            emit_circuit_breaker(state, exc.breaker, exc.detail)
+            break
+        name = call["tool"]
+        try:
+            result = await tool_dispatch(name, call["args"])
+        except Exception as exc:  # noqa: BLE001 -- dispatch should never kill the node
+            result = {"tool": name, "data": None, "error": f"dispatch raised: {exc}"}
+        record_tool_call(state.budget_state, "tool_dispatch")
+        err = result.get("error") if isinstance(result, dict) else None
+        data = result.get("data") if isinstance(result, dict) else result
+        if err:
+            snippet = f"[live tool {name} -> ERROR] {str(err)[:280]}"
+            score = 0.0
+        else:
+            snippet = f"[live tool {name}] {_summarize_tool_result(data)[:380]}"
+            score = 0.8
+        citations.append(Citation(
+            source_id=f"tool:{name}",
+            chunk_id=f"tool:{name}:{len(citations)}",
+            snippet=snippet[:400],
+            score=score,
+            repo=(service or ""),
+        ))
+        state.agent_trace.append(TraceEvent(
+            event_type="tool_call",
+            node_id=node.id,
+            payload={"tool": name, "error": bool(err),
+                     "rationale": call.get("rationale", "")[:120]},
+        ))
+    return citations
+
+
 # --- 1. bootstrap_context -------------------------------------------
 
 
@@ -149,7 +357,7 @@ def bootstrap_node(
         for q in (runbook_query, history_query):
             try:
                 check_budget(state.budget_state)
-                hits = await retrieve(q, BOOTSTRAP_TOP_K)
+                hits = await _retrieve_guarded(retrieve, q, BOOTSTRAP_TOP_K)
             except BudgetExceeded as exc:
                 emit_circuit_breaker(state, exc.breaker, exc.detail)
                 break
@@ -230,14 +438,34 @@ def generate_hypotheses_node(
 
         for stmt in statements:
             node = HypothesisNode(statement=stmt, depth=0, parent_id=None)
-            state.add_node(node)
             if embed_query is not None:
                 try:
-                    emb = await embed_query(stmt)
+                    emb = await asyncio.wait_for(
+                        embed_query(stmt), timeout=PER_CALL_RETRIEVAL_TIMEOUT_SEC,
+                    )
+                    record_tool_call(state.budget_state, "embed_dedup")
+                    # Dedup at the ROOT level too. Previously only sub-
+                    # hypotheses were dedup'd, so the 3-5 "diverse" roots
+                    # could be near-restatements of each other (worsened by
+                    # the greedy decoder). parent_id=None makes
+                    # is_duplicate_sibling walk root_ids.
+                    sib_dup, sib_id, sib_score = is_duplicate_sibling(state, emb, None)
+                    if sib_dup:
+                        state.agent_trace.append(TraceEvent(
+                            event_type="duplicate_sibling",
+                            payload={
+                                "level": "root",
+                                "matched_sibling": sib_id,
+                                "cosine": sib_score,
+                            },
+                        ))
+                        continue
+                    # Register the embedding BEFORE add_node so the next
+                    # root's sibling check can compare against this one.
                     state.statement_embeddings[node.id] = emb
-                    record_tool_call(state.budget_state, "retrieval")
                 except Exception as exc:
                     _log.warning("embed_query failed for root hypothesis: %s", exc)
+            state.add_node(node)
 
         state.agent_trace.append(TraceEvent(
             event_type="hypothesis_gen",
@@ -256,8 +484,19 @@ def generate_hypotheses_node(
 # --- 3. test_hypothesis ---------------------------------------------
 
 
-def test_hypothesis_node(retrieve: RetrieveFn, llm):
-    """Targeted retrieval + LLM judge for the current pending node."""
+def test_hypothesis_node(
+    retrieve: RetrieveFn,
+    llm,
+    tool_dispatch: "ToolDispatchFn | None" = None,
+    tool_catalog: list[dict[str, Any]] | None = None,
+):
+    """Targeted retrieval + LIVE telemetry + LLM judge for the current
+    pending node.
+
+    P0-B: when `tool_dispatch` is wired, the LLM also picks targeted live
+    tools (datadog/rootly/code) whose results are folded into the judge's
+    evidence alongside the retrieved doc snippets. When unwired, this is
+    the original RAG-only judge (backward compatible for tests)."""
 
     async def _run(state: InvestigationState) -> InvestigationState:
         nid = state.current_node_id
@@ -278,13 +517,14 @@ def test_hypothesis_node(retrieve: RetrieveFn, llm):
 
         # Retrieval scoped to THIS hypothesis only -- no dump-all-at-once.
         try:
-            hits = await retrieve(node.statement, EVIDENCE_TOP_K)
+            hits = await _retrieve_guarded(retrieve, node.statement, EVIDENCE_TOP_K)
         except BudgetExceeded as exc:
             emit_circuit_breaker(state, exc.breaker, exc.detail)
             node.status = "inconclusive"
             node.termination_reason = exc.breaker  # type: ignore[assignment]
             return state
         record_tool_call(state.budget_state, "retrieval")
+        ac = state.alert_context
 
         evidence_block_lines: list[str] = []
         snippet_index: dict[str, Citation] = {}
@@ -301,15 +541,30 @@ def test_hypothesis_node(retrieve: RetrieveFn, llm):
             evidence_block_lines.append(
                 f"[chunk_id={cid} source={citation.source_id}]\n{citation.snippet}"
             )
+
+        # P0-B: gather LIVE telemetry evidence for this hypothesis (the LLM
+        # picks targeted datadog/rootly/code tools) and fold it into the
+        # SAME evidence block + snippet index the judge scores. Live tool
+        # results are the strongest signal (judge rubric 3c); the RAG
+        # snippets above stay as corroborating context. No-op (RAG-only)
+        # when tool_dispatch is unwired.
+        live_citations = await _gather_live_evidence(
+            state, llm, node, tool_dispatch, tool_catalog,
+            service=ac.service_hint, namespace=ac.namespace_hint,
+        )
+        for c in live_citations:
+            snippet_index[c.chunk_id] = c
+            evidence_block_lines.append(
+                f"[chunk_id={c.chunk_id} source={c.source_id}]\n{c.snippet}"
+            )
+
         evidence_block = "\n\n".join(evidence_block_lines) or "(no snippets returned)"
 
-        # LLM judge -- strict three-state.
-        # Service-anchor: pass alert context so the judge can reject
-        # evidence from unrelated services (a major source of drift --
-        # earlier runs validated Helm-template-bug hypotheses for an
-        # unrelated service outage using citations from completely
-        # different tools' changelogs).
-        ac = state.alert_context
+        # LLM judge -- strict three-state. Service-anchor: pass alert
+        # context so the judge can reject evidence from unrelated services
+        # (a major source of drift -- earlier runs validated Helm-template-
+        # bug hypotheses for an unrelated service outage using citations
+        # from completely different tools' changelogs).
         prompt = EVIDENCE_JUDGE_PROMPT.format(
             alert_text=ac.alert_text[:500],
             service_hint=ac.service_hint or "(unknown)",
@@ -348,16 +603,50 @@ DecisionLabel = Literal[
 ]
 
 
+def _best_expandable_node(state: InvestigationState) -> HypothesisNode | None:
+    """Best-first frontier: among validated, not-yet-expanded nodes, pick
+    the one with the strongest evidence to drill into next. Nodes that
+    can't recurse (max depth / below threshold) are finalized in place
+    (termination_reason set, expanded=True) so they aren't re-examined.
+
+    Returns the chosen node (caller marks it expanded + routes to
+    generate_sub_hypotheses), or None when nothing is expandable.
+    """
+    best: HypothesisNode | None = None
+    best_key: tuple[float, float] = (-1.0, -1.0)
+    for node in state.nodes_by_id.values():
+        if node.status != "validated" or node.expanded:
+            continue
+        if node.depth + 1 > MAX_DEPTH:
+            node.termination_reason = "max_depth_reached"
+            node.expanded = True
+            continue
+        if node.confidence < threshold_for_depth(node.depth):
+            node.termination_reason = "below_recurse_threshold"
+            node.expanded = True
+            continue
+        key = (_node_evidence_strength(node), node.confidence)
+        if key > best_key:
+            best_key = key
+            best = node
+    return best
+
+
 def decide_next_node(
     embed_query: Callable[[str], Awaitable[list[float]]] | None = None,
 ):
-    """Pure routing -- picks the next phase based on tree + budget state.
+    """Best-first router (differential-diagnosis style).
 
-    Order of checks (matches the spec):
-      1. Budget tripped -> synthesize
-      2. Current node was validated AND can recurse -> generate_sub_hypotheses
-      3. Otherwise advance DFS cursor to the next pending node; if none
-         remain -> synthesize.
+    Order of checks:
+      1. Budget tripped -> synthesize.
+      2. ANY pending node anywhere -> test it next. We exhaust the whole
+         current frontier (all sibling roots, then all new children)
+         BEFORE drilling into any one branch -- so a strong-but-shallow
+         competing hypothesis is never starved by an early commit to the
+         first branch that happened to validate (the old strict-DFS +
+         recurse-immediately behavior).
+      3. No pending left -> expand the strongest validated unexpanded
+         node (best-first). If none -> synthesize.
     """
 
     async def _run(state: InvestigationState) -> InvestigationState:
@@ -369,23 +658,21 @@ def decide_next_node(
             _mark_remaining_inconclusive(state, exc.breaker)
             return state  # router below sees outcome already set by caller
 
-        # Where are we in the DFS?
-        nid = state.current_node_id
-        if nid is not None and nid in state.nodes_by_id:
-            node = state.nodes_by_id[nid]
-            if node.status == "validated":
-                if node.depth + 1 > MAX_DEPTH:
-                    node.termination_reason = "max_depth_reached"
-                elif node.confidence < threshold_for_depth(node.depth):
-                    node.termination_reason = "below_recurse_threshold"
-                else:
-                    # Recurse -- leave current_node_id pointing at the
-                    # parent so generate_sub_hypotheses can attach.
-                    return state
+        # 2. Test every pending hypothesis on the frontier first.
+        next_pending = state.next_pending_id()
+        if next_pending is not None:
+            state.current_node_id = next_pending
+            return state
 
-        # Advance cursor.
-        next_id = state.next_pending_id()
-        state.current_node_id = next_id
+        # 3. Frontier exhausted -> drill into the best-evidenced branch.
+        candidate = _best_expandable_node(state)
+        if candidate is not None:
+            candidate.expanded = True  # claim it so we never re-pick it
+            state.current_node_id = candidate.id
+            return state
+
+        # Nothing pending and nothing expandable -> synthesize.
+        state.current_node_id = None
         return state
 
     return _run
@@ -395,21 +682,23 @@ def decide_next_router(state: InvestigationState) -> DecisionLabel:
     """Conditional edge -- read state shape and pick the next graph node.
 
     Kept separate from `decide_next_node` so LangGraph's edge resolver
-    sees a pure function (no I/O, no embedding calls)."""
+    sees a pure function (no I/O, no embedding calls). `decide_next_node`
+    has already set current_node_id to either a pending node (-> test) or
+    a validated node it chose to expand (-> generate_sub_hypotheses)."""
     if state.budget_state.circuit_breakers_hit and state.current_node_id is None:
         return "synthesize_root_cause"
 
     nid = state.current_node_id
     if nid and nid in state.nodes_by_id:
         node = state.nodes_by_id[nid]
+        if node.status == "pending":
+            return "test_hypothesis"
         if (
             node.status == "validated"
             and node.depth + 1 <= MAX_DEPTH
             and node.confidence >= threshold_for_depth(node.depth)
         ):
             return "generate_sub_hypotheses"
-        if node.status == "pending":
-            return "test_hypothesis"
     return "synthesize_root_cause"
 
 
@@ -469,26 +758,27 @@ def generate_sub_hypotheses_node(
             # budget node count is untouched (these never ran).
             if embed_query is not None:
                 try:
-                    emb = await embed_query(stmt)
-                    record_tool_call(state.budget_state, "retrieval")
-                    # Pre-register the embedding so is_duplicate_ancestor
-                    # can find ancestors by id (the new node is not yet
-                    # added to the tree).
+                    emb = await asyncio.wait_for(
+                        embed_query(stmt), timeout=PER_CALL_RETRIEVAL_TIMEOUT_SEC,
+                    )
+                    record_tool_call(state.budget_state, "embed_dedup")
+                    # Pre-register the embedding + a TEMP tree insert so
+                    # is_duplicate_ancestor can walk ancestors by id (the
+                    # node is not yet committed via add_node). Both are
+                    # removed on EVERY exit path below -- a rejected dup
+                    # must NOT linger in nodes_by_id (phantom UI nodes) or
+                    # in parent.children (it would poison the sibling
+                    # dedup of later candidates, falsely pruning a real
+                    # hypothesis as a "duplicate of a duplicate").
                     state.statement_embeddings[node.id] = emb
                     state.nodes_by_id[node.id] = node  # temp insert for ancestor walk
                     is_dup, anc_id, score = is_duplicate_ancestor(state, node.id, emb)
                     if is_dup:
-                        node.status = "inconclusive"
-                        node.termination_reason = "duplicate_ancestor"
-                        node.judge_rationale = (
-                            f"semantic duplicate of ancestor {anc_id} (cos={score:.2f})"
-                        )
-                        # Wire into the parent for traceability but DON'T
-                        # add to budget node total -- it never ran. Leave
-                        # the temp tree insert + embedding in place so
-                        # state.nodes_by_id can be inspected for dups.
-                        if node.id not in parent.children:
-                            parent.children.append(node.id)
+                        # Reject: unwind the temp insert + embedding and do
+                        # NOT wire into parent.children. The trace event
+                        # below is the durable record for dashboards/tests.
+                        state.nodes_by_id.pop(node.id, None)
+                        state.statement_embeddings.pop(node.id, None)
                         state.agent_trace.append(TraceEvent(
                             event_type="duplicate_ancestor",
                             node_id=node.id,
@@ -496,36 +786,25 @@ def generate_sub_hypotheses_node(
                         ))
                         continue
                     # Ancestor check passed -- now sibling check against
-                    # children that already landed in this same batch.
-                    # NB: we pass parent.id, NOT node.id, so siblings are
-                    # resolved by parent's children list (which the temp
-                    # insert is NOT yet in -- so the candidate can't
-                    # self-match).
+                    # children that already landed (committed) in this
+                    # same batch. We pass parent.id, NOT node.id, so
+                    # siblings resolve via parent's children list (the temp
+                    # insert is NOT in it -- the candidate can't self-match).
                     sib_dup, sib_id, sib_score = is_duplicate_sibling(
                         state, emb, parent.id,
                     )
                     if sib_dup:
-                        node.status = "inconclusive"
-                        node.termination_reason = "duplicate_sibling"
-                        node.judge_rationale = (
-                            f"semantic duplicate of sibling {sib_id} (cos={sib_score:.2f})"
-                        )
-                        # Wire into parent.children for traceability --
-                        # the temp insert in nodes_by_id stays so this
-                        # rejected node is inspectable for dashboards
-                        # and tests. Budget total_nodes is NOT touched.
-                        if node.id not in parent.children:
-                            parent.children.append(node.id)
+                        state.nodes_by_id.pop(node.id, None)
+                        state.statement_embeddings.pop(node.id, None)
                         state.agent_trace.append(TraceEvent(
                             event_type="duplicate_sibling",
                             node_id=node.id,
                             payload={"matched_sibling": sib_id, "cosine": sib_score},
                         ))
                         continue
-                    # Not a dup -- finalize via add_node so children/
-                    # root_ids/budget_state stay consistent. Remove the
-                    # temp insert first so add_node's bookkeeping fires
-                    # exactly once.
+                    # Not a dup -- remove the temp insert so add_node's
+                    # bookkeeping fires exactly once. The embedding stays
+                    # registered so later siblings dedup against this node.
                     state.nodes_by_id.pop(node.id, None)
                 except Exception as exc:
                     _log.warning("embed_query failed in sub-hypothesis gen: %s", exc)
@@ -552,10 +831,10 @@ def generate_sub_hypotheses_node(
 
 
 def synthesize_root_cause_node(llm):
-    """Pick the deepest validated chain -> LLM writes the final answer."""
+    """Pick the best-evidenced validated chain -> LLM writes the final answer."""
 
     async def _run(state: InvestigationState) -> InvestigationState:
-        chain = _deepest_validated_chain(state)
+        chain = _best_validated_chain(state)
         state.final_chain_node_ids = [n.id for n in chain]
 
         if not chain:
@@ -647,16 +926,30 @@ def _is_evidence_on_topic(citation: Citation, service: str | None, namespace: st
     if not service and not namespace:
         return True  # can't filter -- be permissive
     haystack = f"{citation.source_id} {citation.repo}".lower()
-    if service and service.lower() in haystack:
+    # Tokenize on non-alphanumerics so a short, common service hint
+    # ("api", "main", "worker") matches a real path SEGMENT rather than
+    # an incidental substring (e.g. "api" inside "rapid-events"). Short
+    # hints must match a whole token; only specific (>=6 char) hints may
+    # match as a substring.
+    tokens = set(re.split(r"[^a-z0-9]+", haystack))
+
+    def _matches(hint: str | None) -> bool:
+        if not hint:
+            return False
+        h = hint.lower().strip()
+        if not h:
+            return False
+        if h in tokens:
+            return True
+        return len(h) >= 6 and h in haystack
+
+    if _matches(service) or _matches(namespace):
         return True
-    if namespace and namespace.lower() in haystack:
-        return True
-    # Generic SRE knowledge -- always allowed as supporting evidence.
-    generic_markers = ("sre-knowledge-base", "confluence:sre",
-                       "confluence:runbook", "runbook")
-    if any(m in haystack for m in generic_markers):
-        return True
-    return False
+    # Narrowed generic-SRE allowlist. A bare "runbook" marker previously
+    # auto-passed almost any path mentioning a runbook, so the cap rarely
+    # fired -- require a specific KB / space marker instead.
+    generic_markers = ("sre-knowledge-base", "confluence:sre", "confluence:runbook")
+    return any(m in haystack for m in generic_markers)
 
 
 def _apply_verdict(
@@ -717,11 +1010,57 @@ def _apply_verdict(
             node.judge_rationale = (node.judge_rationale + " " + note)[:280]
 
 
-def _deepest_validated_chain(state: InvestigationState) -> list[HypothesisNode]:
-    """Return the root -> leaf chain whose terminal node has the
-    maximum depth AND was validated. Tie-break by terminal confidence."""
+def _node_evidence_strength(node: HypothesisNode) -> float:
+    """Evidence-backed strength of a single validated node.
+
+    Blends the judge's self-reported confidence with the ACTUAL
+    retrieval quality of the attached citations (`Citation.score`) and
+    how many independent sources corroborate it. Before this, a node
+    "validated" on 6 chunks at cosine 0.41 scored identically to one at
+    0.88 -- the retrieval score was stored but never gated anything. Now
+    it feeds chain selection so a thinly-grounded branch can't win on
+    confidence alone.
+    """
+    if node.status != "validated":
+        return 0.0
+    scores = [c.score for c in node.evidence if c.score > 0.0]
+    avg_score = (sum(scores) / len(scores)) if scores else 0.0
+    n_sources = len({c.source_id for c in node.evidence if c.source_id})
+    corroboration = min(n_sources, 3) / 3.0
+    # Confidence is the spine; evidence score + corroboration are
+    # multiplicative dampers (floor 0.5 each) that reward real grounding
+    # without fully zeroing out a confident-but-sparsely-cited node.
+    return node.confidence * (0.5 + 0.5 * avg_score) * (0.5 + 0.5 * corroboration)
+
+
+def _chain_strength(chain: list[HypothesisNode]) -> float:
+    """AVERAGE evidence strength across the validated nodes of a chain.
+
+    Averaging (not summing) is deliberate: a long, thinly-grounded chain
+    must NOT out-score a short well-grounded one purely on node count --
+    that would just relabel the depth bias we're removing. When two
+    chains are equally well-grounded, the (depth, confidence) tie-breaker
+    in `_best_validated_chain` prefers the deeper (more specific) one.
+    """
+    validated = [n for n in chain if n.status == "validated"]
+    if not validated:
+        return 0.0
+    return sum(_node_evidence_strength(n) for n in validated) / len(validated)
+
+
+def _best_validated_chain(state: InvestigationState) -> list[HypothesisNode]:
+    """Return the root -> validated-leaf chain with the strongest
+    aggregate EVIDENCE -- not merely the deepest.
+
+    Selection key: (total evidence strength, terminal depth, terminal
+    confidence). Depth is demoted to a tie-breaker, so a plausible-but-
+    thinly-grounded 4-deep chain no longer beats a well-corroborated
+    2-deep chain. The old depth-first selection was the worst failure
+    mode for an SRE tool: confidently reporting the deepest node of a
+    wrong branch, dragging oncall down a false trail.
+    """
     best: list[HypothesisNode] = []
-    best_key: tuple[int, float] = (-1, -1.0)
+    best_key: tuple[float, int, float] = (-1.0, -1, -1.0)
 
     def _walk(node_id: str, path: list[HypothesisNode]) -> None:
         nonlocal best, best_key
@@ -730,7 +1069,7 @@ def _deepest_validated_chain(state: InvestigationState) -> list[HypothesisNode]:
             return
         next_path = path + [node]
         if node.status == "validated":
-            key = (node.depth, node.confidence)
+            key = (_chain_strength(next_path), node.depth, node.confidence)
             if key > best_key:
                 best_key = key
                 best = next_path
@@ -842,6 +1181,7 @@ async def _call_llm_raw(
     *,
     purpose: str,
     max_tokens: int = 800,
+    temperature: float = 0.0,
     response_schema: dict | None = None,
     force: bool = False,
 ) -> str:
@@ -864,13 +1204,27 @@ async def _call_llm_raw(
     extra_kwargs: dict[str, Any] = {}
     if response_schema is not None:
         extra_kwargs["response_schema"] = response_schema
-    resp = await llm.generate(
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        max_tokens=max_tokens,
-        purpose=f"investigation.{purpose}",
-        **extra_kwargs,
-    )
+    try:
+        resp = await asyncio.wait_for(
+            llm.generate(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                purpose=f"investigation.{purpose}",
+                **extra_kwargs,
+            ),
+            timeout=PER_CALL_LLM_TIMEOUT_SEC,
+        )
+    except (TimeoutError, asyncio.TimeoutError):
+        # A hung provider call can't block past the node-boundary
+        # wall-clock breaker. Degrade to an empty body: the verdict
+        # parser yields `inconclusive` and the hypothesis parser yields
+        # zero statements, so the graph advances instead of hanging.
+        _log.warning(
+            "LLM call timed out after %ss (purpose=%s)",
+            PER_CALL_LLM_TIMEOUT_SEC, purpose,
+        )
+        return ""
     in_t = int((resp.usage or {}).get("input_tokens", 0))
     out_t = int((resp.usage or {}).get("output_tokens", 0))
     record_tool_call(
@@ -900,6 +1254,7 @@ async def _call_llm_for_hypotheses(
     raw = await _call_llm_raw(
         state, llm, prompt,
         purpose=purpose, max_tokens=3000,
+        temperature=HYPOTHESIS_GEN_TEMPERATURE,
         response_schema=HypothesisList.model_json_schema(),
     )
     parsed = _parse_hypothesis_list(raw)
@@ -992,6 +1347,8 @@ def build_investigation_graph(
     llm_flash,
     llm_pro=None,
     embed_query: Callable[[str], Awaitable[list[float]]] | None = None,
+    tool_dispatch: "ToolDispatchFn | None" = None,
+    tool_catalog: list[dict[str, Any]] | None = None,
 ):
     """Compile the LangGraph subgraph.
 
@@ -1021,7 +1378,10 @@ def build_investigation_graph(
     graph = StateGraph(InvestigationState)
     graph.add_node("bootstrap_context", bootstrap_node(retrieve, embed_query))
     graph.add_node("generate_hypotheses", generate_hypotheses_node(llm_flash, embed_query))
-    graph.add_node("test_hypothesis", test_hypothesis_node(retrieve, llm_flash))
+    graph.add_node(
+        "test_hypothesis",
+        test_hypothesis_node(retrieve, llm_flash, tool_dispatch, tool_catalog),
+    )
     graph.add_node("decide_next", decide_next_node(embed_query))
     graph.add_node(
         "generate_sub_hypotheses",
