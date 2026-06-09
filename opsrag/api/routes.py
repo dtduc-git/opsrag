@@ -50,7 +50,7 @@ from opsrag.auth import (
     current_user_oid_var,
     get_current_user_dep,
 )
-from opsrag.api.investigation_routes import investigation_live_telemetry_enabled
+from opsrag.investigations.feature_gate import investigation_live_telemetry_enabled
 from opsrag.auth.scopes import Scope, require_scope
 from opsrag.indexing_tracker import indexing_tracker
 from opsrag.usage import tracker as usage_tracker

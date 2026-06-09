@@ -636,13 +636,6 @@ export async function fetchInvestigationHistory(limit: number = 50): Promise<Inv
   return d.investigations || [];
 }
 
-export async function fetchInvestigation(investigationId: string): Promise<InvestigationResponse> {
-  const r = await fetch(`${BASE}/investigation/${encodeURIComponent(investigationId)}`);
-  if (!r.ok) throw new Error(`fetch investigation failed: ${r.status}`);
-  return r.json();
-}
-
-
 // ── M1: Identity (/api/me) ──────────────────────────────────────────────
 // Backend contract: `/api/me` returns either
 //   { anonymous: true }                                        — no identity
@@ -965,39 +958,6 @@ export async function updateUserRoles(
     throw new Error(typeof detail === "string" ? detail : `update roles failed: ${r.status}`);
   }
   return r.json();
-}
-
-
-export async function* streamInvestigation(req: InvestigateRequest): AsyncGenerator<SSEEvent> {
-  // apiFetch surfaces a 401 before streaming (see streamQuery note above).
-  const resp = await apiFetch(`${BASE}/investigate/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
-  if (!resp.ok || !resp.body) throw new Error(`Investigate failed: ${resp.status}`);
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      if (!part.trim()) continue;
-      let event = "", data = "";
-      for (const line of part.split("\n")) {
-        if (line.startsWith("event: ")) event = line.slice(7);
-        else if (line.startsWith("data: ")) data = line.slice(6);
-      }
-      if (event) {
-        try { yield { event, data: JSON.parse(data || "{}") }; }
-        catch { yield { event, data: {} }; }
-      }
-    }
-  }
 }
 
 
