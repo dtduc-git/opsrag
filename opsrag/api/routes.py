@@ -148,8 +148,14 @@ async def ui_config(request: Request) -> UIConfigResponse:
 
 
 @router.get("/usage")
-async def usage(request: Request) -> dict:
+async def usage(
+    request: Request,
+    _admin: CurrentUser = Depends(require_scope(Scope.ADMIN)),
+) -> dict:
     """Token usage summary -- per-model breakdown with cost estimates.
+
+    Admin-only: this is the ORG-WIDE aggregate. Regular users see their own
+    spend via /usage/mine (the UI's "Mine" tab).
 
     Reads directly from the shared Postgres event table so the answer is
     POD-AGNOSTIC: backend + indexer both record into the same table, but
@@ -175,8 +181,13 @@ async def usage(request: Request) -> dict:
 
 
 @router.get("/usage/weekly")
-async def usage_weekly(request: Request) -> dict:
+async def usage_weekly(
+    request: Request,
+    _admin: CurrentUser = Depends(require_scope(Scope.ADMIN)),
+) -> dict:
     """Per-week token + cost buckets for the Home dashboard mini chart.
+
+    Admin-only (org-wide aggregate; see /usage).
 
     Reads from the shared Postgres event table (pod-agnostic, same as
     ``/usage``). Returns ``{"weeks": [...]}`` oldest-first with the

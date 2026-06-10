@@ -130,8 +130,12 @@ export default function HomePage({
   // none of these should ever throw or blank the page.
   useEffect(() => {
     let cancelled = false;
-    fetchUsage().then((d) => { if (!cancelled) setUsage(d); }).catch(() => { if (!cancelled) setUsage(null); });
-    fetchUsageWeekly().then((d) => { if (!cancelled) setUsageWeeks(d); }).catch(() => { if (!cancelled) setUsageWeeks([]); });
+    // Org-wide usage/cost is admin-only now (the endpoints 403 non-admins).
+    // Only fetch it for admins; the card is hidden for everyone else.
+    if (me?.is_admin) {
+      fetchUsage().then((d) => { if (!cancelled) setUsage(d); }).catch(() => { if (!cancelled) setUsage(null); });
+      fetchUsageWeekly().then((d) => { if (!cancelled) setUsageWeeks(d); }).catch(() => { if (!cancelled) setUsageWeeks([]); });
+    }
     fetchIndexing().then((d) => { if (!cancelled) setIndexing(d); }).catch(() => { if (!cancelled) setIndexing(null); });
     fetchInvestigationHistory(6).then((d) => { if (!cancelled) setInvestigations(d); }).catch(() => { if (!cancelled) setInvestigations([]); });
     return () => { cancelled = true; };
@@ -265,7 +269,8 @@ export default function HomePage({
           )}
         </section>
 
-        {/* ── Usage this month ── */}
+        {/* ── Usage this month (org-wide aggregate -> admin-only) ── */}
+        {isAdmin && (
         <section className="home-card">
           <div className="home-card-head">
             <div className="home-card-title">
@@ -311,6 +316,7 @@ export default function HomePage({
             )}
           </div>
         </section>
+        )}
 
         {/* ── Indexing health ── */}
         <section className="home-card">
