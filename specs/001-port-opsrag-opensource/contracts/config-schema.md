@@ -18,7 +18,7 @@ mirrors it.
 | `observability` | yes | object | `console` (default) or `phoenix` |
 | `agent` | yes | object | Agent tuning |
 | `slack_bot` | no | object | Bot-worker config; `enabled: false` default |
-| `mcp` | yes | object | Map of 14 known MCP keys; unknown keys rejected |
+| `mcp` | yes | object | Map of 20 known MCP keys; unknown keys rejected |
 | `entity_extraction` | yes | object | Method: `rule_based` / `llm` / `hybrid` (default `hybrid`) |
 | `cloud_provider` | no | string\|null | `aws` / `gcp` / null (default). Fills unset model slots from a per-purpose bundle; explicit blocks + `models` + env always win. |
 | `models` | no | object\|null | Per-purpose overrides (`reason`/`tool_call`/`embed`/`rerank`/`summarize`/`extract`), each a `{provider?, model?, effort?}` `ModelSpec`. |
@@ -84,7 +84,7 @@ investigations, which share the Qdrant client).
 
 ## `mcp` block
 
-Exactly the 14 keys listed in `data-model.md` §1. Each value follows the
+Exactly the 20 keys listed in `data-model.md` §1. Each value follows the
 `MCPConfigBlock` shape:
 
 ```yaml
@@ -135,7 +135,7 @@ carries the actual secret. The settings loader:
 
 - `tests/contract/test_config_default_boots.py` — load
   `config.yaml` (the shipped default), assert it validates and yields
-  `mcp.<name>.enabled == false` for all 14, and
+  `mcp.<name>.enabled == false` for all 20, and
   `knowledge_graph.provider == "null"`.
 - `tests/contract/test_config_unknown_keys_rejected.py` — load a synthetic
   config with an unknown top-level key; assert validation error.

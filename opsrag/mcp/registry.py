@@ -95,7 +95,7 @@ class MCPIntegration:
 
 
 # ---------------------------------------------------------------------------
-# The 14 entries.
+# The 20 entries.
 # ---------------------------------------------------------------------------
 #
 # tool_names: harvested from each MCP's tool definitions (alphabetised

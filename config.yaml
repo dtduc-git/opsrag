@@ -11,7 +11,7 @@
 #   - Embeddings  : fastembed - runs locally on-device, no API key
 #   - Vector store: Qdrant (compose service)
 #   - Graph       : none (FR-019 null backend - no Neo4j needed)
-#   - MCP         : all 14 integrations disabled (FR-011)
+#   - MCP         : all 20 integrations disabled (FR-011)
 #
 # Everything that varies per deployment (URLs, secrets) is read from env or
 # this file - never hardcoded in code. See config-example.yaml for every
@@ -91,7 +91,7 @@ agent:
   max_retries: 3
 
 # --- MCP integrations --------------------------------------------------------
-# All fourteen are present and disabled by default (FR-011). Flip enabled: true
+# All twenty are present and disabled by default (FR-011). Flip enabled: true
 # and supply the integration's required credentials via env to activate one.
 # Enabling without the required env causes a fail-fast startup error:
 #   MCP_MISCONFIGURED:<name>:<missing-env-var>   (FR-004)

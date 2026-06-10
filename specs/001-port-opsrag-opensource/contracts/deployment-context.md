@@ -53,17 +53,15 @@ class KubernetesContext(BaseModel):
     `pod_label_selector`: the recommended-labels selector convention the
     operator's workloads use (e.g. "app.kubernetes.io/name");
     drives default pod discovery in the K8s MCP.
-    `eck_elasticsearch_*`: the operator's Elastic Cloud on K8s deployment
-    coordinates, when present; absent disables the ECK shortcut in the
-    Elasticsearch MCP."""
+
+    (Per-environment Elasticsearch coordinates now live in the
+    `environments:` registry's `EsTarget`, not on this model.)"""
 
     model_config = ConfigDict(extra="forbid")
 
     clusters: dict[str, str] = Field(default_factory=dict)
     namespaces: list[str] = Field(default_factory=list)
     pod_label_selector: Optional[str] = None
-    eck_elasticsearch_service: Optional[str] = None
-    eck_elasticsearch_namespace: Optional[str] = None
 
 
 class CloudContext(BaseModel):
@@ -131,7 +129,7 @@ class DeploymentContext(BaseModel):
 | `environments` | `list[str]` | `[]` | Env classifier, alert parsing | Free-form labels (e.g. `["prod", "staging"]` or `["us-east-1-prod", "us-east-1-staging"]`). The engine combines these with industry-standard tokens (`prod`, `staging`, `dev`, `test`) to build the env discriminator regex. |
 | `key_repos` | `list[str]` | `[]` | Repo-map agent hints | Most-touched repos. Drives the agent's repo-map cache priority. |
 | `kubernetes` | `KubernetesContext` | empty | K8s MCP, Elasticsearch MCP, Prometheus MCP | Required when the corresponding MCP is enabled. |
-| `cloud` | `CloudContext` | empty | CloudSQL MCP, GCP cartography paths | Required when those MCPs are enabled. |
+| `cloud` | `CloudContext` | empty | GCP resource enumeration (`gcp` MCP) | Required when the `gcp` MCP uses `cloud.gcp_projects`. |
 | `tracker` | `TrackerContext` | `prefix="TICKET"` | Ticket recognition / deep-linking | `prefix="TICKET"` is the engine's neutral default; operators override. |
 | `source_urls` | `SourceUrlBases` | all `None` | Deep-link construction | When a field is `None`, the agent omits the corresponding deep-link section in answers. |
 | `semantic_router_examples` | `dict[str, list[str]]` | `{}` | Classifier augmentation | Optional operator augmentation; merged with engine-derived anchors at startup. See "Derivation rules" below. |

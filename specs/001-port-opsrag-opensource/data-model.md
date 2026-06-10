@@ -29,10 +29,11 @@ Identifies a single named external integration the agent can invoke.
 - When `enabled` is `true`, every name in `required_env` MUST resolve to a
   non-empty value in the process environment. Otherwise startup fails per
   FR-004 with error `MCP_MISCONFIGURED:<name>:<missing-env-var>`.
-- The 14 names inherited from upstream form the initial registry:
-  `cartography`, `cloudflare`, `cloudsql`, `code`, `datadog`,
-  `elasticsearch`, `gitlab`, `knowledge`, `kubernetes`, `prometheus`,
-  `rootly`, `runbooks`, `slack`, `tool_cache`.
+- The 20 names in the registry:
+  `aws`, `azure`, `cloudflare`, `code`, `datadog`, `elasticsearch`, `gcp`,
+  `github`, `gitlab`, `grafana`, `knowledge`, `kubernetes`, `loki`,
+  `prometheus`, `rootly`, `runbooks`, `sentry`, `slack`, `splunk`,
+  `tool_cache`.
 - Adding a new integration requires a new entry in this registry plus a
   corresponding default-`false` entry in `values.yaml` (FR-006); the
   Helm-values contract test (see `contracts/helm-values-schema.md`) fails
@@ -84,9 +85,9 @@ slack_bot:
   app_token_env: SLACK_APP_TOKEN
   bot_token_env: SLACK_BOT_TOKEN
 mcp:
-  cartography:    { enabled: false, ... }
+  aws:            { enabled: false, ... }
   cloudflare:     { enabled: false, ... }
-  cloudsql:       { enabled: false, ... }
+  gcp:            { enabled: false, ... }
   code:           { enabled: false, ... }
   datadog:        { enabled: false, ... }
   elasticsearch:  { enabled: false, ... }
@@ -175,9 +176,9 @@ slackBot:
   enabled: false
   replicaCount: 1
 mcp:
-  cartography:   { enabled: false, secretRef: "" }
+  aws:           { enabled: false, secretRef: "" }
   cloudflare:    { enabled: false, secretRef: "" }
-  cloudsql:      { enabled: false, secretRef: "" }
+  gcp:           { enabled: false, secretRef: "" }
   code:          { enabled: false, secretRef: "" }
   datadog:       { enabled: false, secretRef: "" }
   elasticsearch: { enabled: false, secretRef: "" }
@@ -201,7 +202,7 @@ autoscaling:
 
 **Validation rules** (enforced by `values.schema.json`):
 
-- `mcp` keys are constrained to the 14 known names; unknown keys fail
+- `mcp` keys are constrained to the 20 known names; unknown keys fail
   `helm lint`.
 - Every `mcp.<name>.enabled` MUST be a boolean (no string coercion).
 - `auth.issuer` MUST be a URL.
