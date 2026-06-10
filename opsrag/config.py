@@ -19,6 +19,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from opsrag.channels.config import ChannelsConfig, SlackChannelConfig
 from opsrag.config_mcp import (
     KNOWN_MCP_NAMES,
     MCP_CONFIG_TYPES,
@@ -840,7 +841,13 @@ class Settings(BaseModel):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     confluence: ConfluenceConfig = Field(default_factory=ConfluenceConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    # Legacy single-channel Slack bot config. KEPT for back-compat: an existing
+    # `slack_bot:` block still boots the Slack adapter (mirrored into
+    # `channels.slack` at load -- see `_mirror_legacy_slack_bot`).
     slack_bot: SlackBotConfig = Field(default_factory=SlackBotConfig)
+    # Unified multi-channel bot config (Slack / Telegram / Discord / Teams).
+    # New deployments configure bots here; `slack_bot:` is the deprecated alias.
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     code_cache: CodeCacheConfig = Field(default_factory=CodeCacheConfig)
     rootly: RootlyConfig = Field(default_factory=RootlyConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
@@ -907,12 +914,55 @@ class Settings(BaseModel):
         # import (model_bundles imports Settings).
         from opsrag.model_bundles import resolve_cloud_bundle
         resolve_cloud_bundle(cfg)
+        _mirror_legacy_slack_bot(cfg)
         return cfg
 
 
 # Backward-compat alias for existing imports. New code should import
 # ``Settings`` directly.
 OpsRAGConfig = Settings
+
+
+def _mirror_legacy_slack_bot(cfg: Settings) -> None:
+    """Mirror a legacy ``slack_bot:`` block into ``channels.slack``.
+
+    Back-compat (design section 5): when an operator still configures the deprecated
+    top-level ``slack_bot:`` block (``enabled=True``) AND has not configured the
+    new ``channels.slack`` block (it is still at defaults, i.e. disabled), copy
+    the legacy settings into ``channels.slack`` so the unified boot path picks
+    them up. If ``channels.slack`` is already enabled, the new block wins and
+    the legacy block is ignored (with a warning).
+
+    Both paths boot the same Slack adapter, so this keeps existing
+    ``config.yaml`` / Helm ``slackBot:`` deployments working unchanged.
+    """
+    legacy = cfg.slack_bot
+    if not getattr(legacy, "enabled", False):
+        return
+    slack_ch = cfg.channels.slack
+    if slack_ch.enabled:
+        _log.warning(
+            "config: both slack_bot.enabled and channels.slack.enabled are set; "
+            "channels.slack wins (slack_bot is deprecated -- migrate to channels.slack)."
+        )
+        return
+    _log.warning(
+        "config: slack_bot.* is DEPRECATED -- mirroring it into channels.slack. "
+        "Migrate to the unified `channels.slack` block."
+    )
+    cfg.channels.slack = SlackChannelConfig(
+        enabled=True,
+        bot_token_env=legacy.bot_token_env,
+        app_token_env=legacy.app_token_env,
+        allowlist=list(legacy.channels_allowlist),
+        per_user_daily_quota=legacy.per_user_daily_quota,
+        streaming_enabled=legacy.streaming_enabled,
+        workspace_url=legacy.workspace_url,
+        web_ui_base_url=legacy.web_ui_base_url,
+        thread_context_message_cap=getattr(
+            legacy, "thread_context_message_cap", 20
+        ),
+    )
 
 
 # Env var -> (sub-model attr, field) mapping. Values set here override

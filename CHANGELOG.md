@@ -55,6 +55,16 @@ the current net state of `master`.
   Code, Cursor, ...) with per-client tokens, per-tool + global rate limits, and
   a Postgres audit log of every tool call (who/token, tool, args **hash**,
   latency, status) surfaced in an admin **MCP Audit** page.
+- **Channel bots for Slack, Telegram, Discord, and Microsoft Teams** — full
+  parity with the web UI (streaming progress, thread context, cited answers,
+  thumbs up/down feedback, per-channel allowlist + per-user quota). A shared
+  transport-agnostic core (`opsrag/channels/`) calls the agent pipeline
+  in-process; each platform is a thin adapter over one `ChannelAdapter` port.
+  Slack/Telegram/Discord run as role-gated outbound workers
+  (`OPSRAG_ROLE=slackbot|telegrambot|discordbot`); Teams is a Bot Framework
+  webhook on the `api` role. Configured under a unified `channels:` block (the
+  legacy `slack_bot:` block is mirrored into `channels.slack` for back-compat).
+  See [`docs/channels.md`](docs/channels.md).
 - **Multi-environment `environments:` registry**: one instance targeting N
   environments' Kubernetes / Prometheus / Elasticsearch, with a per-target
   field-mapping layer (`opsrag/environments.py`).

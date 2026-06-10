@@ -103,6 +103,15 @@ login = [
     "itsdangerous>=2.2",       # signed session cookie + state/nonce
     "python-multipart>=0.0.9", # form-encoded POST /auth/login body
 ]
+# Multi-channel chat bots. Telegram needs NO extra (it uses httpx, already a
+# core dep). Discord uses the discord.py gateway client; Teams uses the
+# Microsoft Bot Framework SDK. Both are LAZY-imported by their adapters so a
+# disabled channel -- and the api role -- never imports the SDK.
+discord = ["discord.py>=2.4"]
+teams = [
+    "botbuilder-core>=4.15",
+    "botbuilder-schema>=4.15",
+]
 # spaCy NER for the Q&A cache discriminator (free-form entity layer on top
 # of the regex layer). The model `en_core_web_sm` is ~13MB and is pulled
 # separately by `python -m spacy download` in the Dockerfile so it does

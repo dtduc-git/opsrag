@@ -1,0 +1,80 @@
+{{- /*
+Per-channel bot worker Deployments (slack / telegram / discord).
+
+One Deployment per ENABLED worker-backed channel, each with
+OPSRAG_ROLE=<name>bot so the app boots exactly that channel's adapter (the
+role-gating fix, design D6: a channel worker boots iff OPSRAG_ROLE matches AND
+the channel is enabled -> exactly one process per channel, no duplicate
+answers). Teams is NOT here: it is an inbound webhook served by the api role.
+
+`slackBot` is kept as a DEPRECATED alias for `channels.slack` (see values.yaml).
+When `channels.slack.enabled` is unset but `slackBot.enabled` is true, the
+loop below still renders the slackbot Deployment.
+
+The `$channels` map below maps each channel name to its OPSRAG_ROLE value. The
+role for channel "slack" is "slackbot", for "telegram" is "telegrambot", etc.
+*/}}
+{{- $root := . -}}
+{{- $channels := dict "slack" "slackbot" "telegram" "telegrambot" "discord" "discordbot" -}}
+{{- range $name, $role := $channels }}
+{{- $cfg := index $root.Values.channels $name | default dict }}
+{{- /* Back-compat: slackBot alias enables the slack worker too. */}}
+{{- $enabled := $cfg.enabled }}
+{{- if and (eq $name "slack") (not $enabled) }}
+{{- $enabled = $root.Values.slackBot.enabled }}
+{{- end }}
+{{- if $enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsrag.fullname" $root }}-{{ $role }}
+  labels:
+    {{- include "opsrag.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  # Exactly ONE replica per channel worker: each replica opens its own
+  # Socket Mode / gateway connection, so N replicas = N duplicate answers.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsrag.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $role }}
+  template:
+    metadata:
+      labels:
+        {{- include "opsrag.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+    spec:
+      serviceAccountName: {{ include "opsrag.serviceAccountName" $root }}
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $role }}
+          image: {{ include "opsrag.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $root.Values.securityContext | nindent 12 }}
+          env:
+            - name: OPSRAG_ROLE
+              value: {{ $role }}
+            - name: OPSRAG_CONFIG
+              value: /etc/opsrag/config.yaml
+            {{- include "opsrag.mcpEnv" $root | nindent 12 }}
+          {{- if $root.Values.api.envFromSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ $root.Values.api.envFromSecret }}
+          {{- end }}
+          resources:
+            {{- toYaml ($cfg.resources | default $root.Values.slackBot.resources) | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/opsrag
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "opsrag.fullname" $root }}-config
+{{- end }}
+{{- end }}

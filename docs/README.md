@@ -29,6 +29,7 @@ Start with **Getting started**, then branch by what you need.
 | Doc | What it covers |
 |-----|----------------|
 | [MCP integrations](./mcp-integrations.md) | The 20 read-only integrations, their required env vars and tools, the deny-by-verb safety model, and how to enable one. |
+| [Channel bots](./channels.md) | Slack / Telegram / Discord / Teams chat bots — the shared adapter core, per-platform setup, the `channels:` config, run model (role-gated workers + the Teams webhook), and identity/quota. |
 | [Multi-environment](./multi-environment.md) | The `environments:` registry — one instance targeting N environments' Kubernetes / Prometheus / Elasticsearch. |
 
 ## Operations & reference

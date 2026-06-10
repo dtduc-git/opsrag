@@ -90,6 +90,17 @@ agent:
   rerank_top_k: 5
   max_retries: 3
 
+# --- Multi-channel bots (Slack / Telegram / Discord / Teams) -----------------
+# All disabled by default. Enable a channel here AND run a worker with
+# OPSRAG_ROLE=<name>bot (slackbot / telegrambot / discordbot). Teams is a
+# webhook on the `api` role (no worker). Tokens are referenced by `*_env` var
+# names only. See config-example.yaml for the full per-channel field set.
+channels:
+  slack:    { enabled: false }
+  telegram: { enabled: false }
+  discord:  { enabled: false }
+  teams:    { enabled: false }
+
 # --- MCP integrations --------------------------------------------------------
 # All twenty are present and disabled by default (FR-011). Flip enabled: true
 # and supply the integration's required credentials via env to activate one.
