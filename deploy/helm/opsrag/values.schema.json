@@ -92,6 +92,9 @@
     "ui": {
       "type": "object"
     },
+    "phoenix": {
+      "type": "object"
+    },
     "slackBot": {
       "type": "object"
     },

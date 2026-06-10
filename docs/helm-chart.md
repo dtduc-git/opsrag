@@ -221,8 +221,18 @@ Rendered into a ConfigMap and mounted at `/etc/opsrag/config.yaml`
 | `config.knowledgeGraph.provider` | `none` | Knowledge graph provider; `none` disables the graph. |
 | `config.session.provider` | `postgres` | Session store provider name. |
 | `config.session.dsnEnv` | `POSTGRES_DSN` | Env var name the app reads the session DSN from (value from your Secret). |
-| `config.observability.provider` | `console` | Observability provider name. |
+| `config.observability.enabled` | `false` | LLM observability (Phoenix tracing). `false` -> the no-op `console` provider; the app runs with **no Phoenix**. Flipping this both sets the API's config provider (`phoenix` <-> `console`) and brings the bundled Phoenix deployment up/down — no image rebuild. |
 | `config.observability.projectName` | `opsrag` | Project name reported to the observability backend. |
+| `config.observability.externalEndpoint` | `""` | Point the API at your **own** Phoenix collector. When set, the bundled Phoenix deployment is not rendered. |
+
+### Observability (Phoenix)
+
+OpsRAG ships with **no observability by default** (`config.observability.enabled: false` -> the `console` no-op provider). Set `config.observability.enabled=true` to:
+
+1. flip the API config to the `phoenix` provider, and
+2. render a bundled Phoenix Deployment + Service (`<release>-phoenix`) and wire `PHOENIX_COLLECTOR_ENDPOINT` to it.
+
+Both move together off one flag, so the app config and the collector can never drift — and toggling it needs **no image rebuild**. To use an existing Phoenix instead of the bundled one, set `config.observability.externalEndpoint`. The bundled Phoenix's image/resources/persistence are under the top-level `phoenix:` block.
 
 ### mcp
 

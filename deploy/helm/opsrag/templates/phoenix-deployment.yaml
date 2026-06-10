@@ -1,0 +1,88 @@
+{{- /*
+Bundled Arize Phoenix (LLM observability collector + viewer).
+
+Rendered ONLY when config.observability.enabled is true AND no external
+collector is configured (config.observability.externalEndpoint is empty). This
+is the "phoenix up/down via one toggle, no image rebuild" lever: flipping
+config.observability.enabled adds/removes this Deployment + Service and flips
+the API's config provider (phoenix <-> console) in lockstep (see configmap.yaml).
+*/ -}}
+{{- if and .Values.config.observability.enabled (not .Values.config.observability.externalEndpoint) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opsrag.fullname" . }}-phoenix
+  labels:
+    {{- include "opsrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phoenix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opsrag.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: phoenix
+  template:
+    metadata:
+      labels:
+        {{- include "opsrag.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: phoenix
+    spec:
+      containers:
+        - name: phoenix
+          image: "{{ .Values.phoenix.image.repository }}:{{ .Values.phoenix.image.tag }}"
+          imagePullPolicy: {{ .Values.phoenix.image.pullPolicy }}
+          ports:
+            - name: otlp-http
+              containerPort: {{ .Values.phoenix.port }}
+          {{- with .Values.phoenix.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.phoenix.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          {{- end }}
+      {{- if .Values.phoenix.persistence.enabled }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "opsrag.fullname" . }}-phoenix
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opsrag.fullname" . }}-phoenix
+  labels:
+    {{- include "opsrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phoenix
+spec:
+  type: {{ .Values.phoenix.service.type }}
+  selector:
+    {{- include "opsrag.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: phoenix
+  ports:
+    - name: otlp-http
+      port: {{ .Values.phoenix.port }}
+      targetPort: otlp-http
+{{- if .Values.phoenix.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "opsrag.fullname" . }}-phoenix
+  labels:
+    {{- include "opsrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phoenix
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.phoenix.persistence.size }}
+  {{- with .Values.phoenix.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}
