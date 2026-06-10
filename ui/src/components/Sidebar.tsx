@@ -189,7 +189,7 @@ export default function Sidebar({
     {
       label: "Insights",
       items: [
-        { page: "usage", label: "Usage & Cost", icon: I.usage, title: "LLM usage and cost telemetry", requires: "admin" },
+        { page: "usage", label: "Usage & Cost", icon: I.usage, title: "Your LLM usage & cost (admins also see org-wide)", requires: "chat" },
         { page: "quality", label: "Retrieval Quality", icon: I.quality, title: "Feedback and corrections", requires: "admin" },
         { page: "mcpaudit", label: "MCP Audit", icon: I.audit, title: "Centralized MCP tool-call audit log (who called which read-only tool, when)", requires: "admin" },
       ],

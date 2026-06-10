@@ -48,7 +48,9 @@ export default function UsagePage({ me = null }: Props) {
   const [data, setData] = useState<UsageSummary | null>(null);
   const [byUser, setByUser] = useState<UsageByUser[]>([]);
   const [mine, setMine] = useState<UsageMine | null>(null);
-  const [tab, setTab] = useState<Tab>("overall");
+  // Non-admins only get the "Mine" tab (personal tracking); Overall + By-user
+  // are org-wide (admin-only). Default the landing tab accordingly.
+  const [tab, setTab] = useState<Tab>(me?.is_admin ? "overall" : "mine");
 
   // Sortable column state for the by-user table.
   type SortKey = "email" | "query_count" | "prompt_tokens" | "completion_tokens" | "cost_usd_micros" | "last_active_at";
@@ -56,11 +58,14 @@ export default function UsagePage({ me = null }: Props) {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   useEffect(() => {
+    // Overall is the org-wide aggregate -> admin-only (the endpoint now 403s
+    // non-admins). Don't poll it for regular users.
+    if (!me?.is_admin) return;
     const loadOverall = () => fetchUsage().then(setData).catch(() => {});
     loadOverall();
     const iv = setInterval(loadOverall, 5000);
     return () => clearInterval(iv);
-  }, []);
+  }, [me?.is_admin]);
 
   // Per-user data only loads when the user actually opens those tabs —
   // keeps initial render cheap and avoids unnecessary 403s for non-admins.
@@ -103,15 +108,18 @@ export default function UsagePage({ me = null }: Props) {
     }
   };
 
+  const showOverallTab = Boolean(me?.is_admin);
   const showByUserTab = Boolean(me?.is_admin);
   const showMineTab = Boolean(me && !me.is_anonymous);
 
-  // If a tab gets hidden underneath the user (e.g. me loads late & user
-  // isn't admin), drop back to overall.
+  // If the active tab gets hidden underneath the user (e.g. me loads late, or
+  // a non-admin lands on overall), drop to the best available tab.
   useEffect(() => {
-    if (tab === "by-user" && !showByUserTab) setTab("overall");
-    if (tab === "mine" && !showMineTab) setTab("overall");
-  }, [tab, showByUserTab, showMineTab]);
+    const fallback: Tab = showOverallTab ? "overall" : showMineTab ? "mine" : "overall";
+    if (tab === "overall" && !showOverallTab) setTab(fallback);
+    if (tab === "by-user" && !showByUserTab) setTab(fallback);
+    if (tab === "mine" && !showMineTab) setTab(fallback);
+  }, [tab, showOverallTab, showByUserTab, showMineTab]);
 
   return (
     <div className="page">
@@ -119,10 +127,12 @@ export default function UsagePage({ me = null }: Props) {
       <div className="page-subtitle">Live telemetry — auto-refreshed every 5s. Costs split by purpose so indexing vs query spend is visible at a glance.</div>
 
       <div className="tab-bar">
-        <button
-          className={`tab-bar-item ${tab === "overall" ? "active" : ""}`}
-          onClick={() => setTab("overall")}
-        >Overall</button>
+        {showOverallTab && (
+          <button
+            className={`tab-bar-item ${tab === "overall" ? "active" : ""}`}
+            onClick={() => setTab("overall")}
+          >Overall</button>
+        )}
         {showByUserTab && (
           <button
             className={`tab-bar-item ${tab === "by-user" ? "active" : ""}`}
