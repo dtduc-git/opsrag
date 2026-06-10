@@ -85,6 +85,55 @@ auth:
 The compose quickstart sets these via environment, e.g.
 `OPSRAG_OIDC_ISSUER`.
 
+## First-party login mode (`auth.mode: login`) + the admin user
+
+`oidc` mode has **no user database** — identity comes entirely from the IdP's
+token, so there is no "admin account" to sign in with. To run opsrag's own
+login (email + password, SSO, cookie sessions) with a real **admin user**,
+switch to `login` mode:
+
+```yaml
+auth:
+  mode: login
+  session:
+    signing_key_env: OPSRAG_SESSION_SIGNING_KEY   # signs session cookies
+    password_enabled: true                        # enable email + password login
+```
+
+Then supply the secrets via environment — never inline in committed config:
+
+```sh
+# A random key (>= 32 bytes) signs session cookies. Generate one, e.g.:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+OPSRAG_SESSION_SIGNING_KEY=<your-32+-byte-random-key>
+
+# The bootstrap admin -- choose your OWN email + password.
+OPSRAG_ADMIN_EMAIL=admin@opsrag.local
+OPSRAG_ADMIN_PASSWORD=<choose-a-strong-password>
+```
+
+There is nothing to "retrieve": on startup opsrag **seeds** this admin user
+(role `admin`) from those two env vars if it does not already exist —
+idempotent, and the password is read only from the env var (or a mounted
+secret in production), never from config (`api/server.py`). Log in to get a
+session cookie, then call the API with it:
+
+```sh
+curl -sf -X POST http://localhost:8080/auth/login \
+  -d "email=$OPSRAG_ADMIN_EMAIL" -d "password=$OPSRAG_ADMIN_PASSWORD" \
+  -c cookies.txt
+
+curl -sf -X POST http://localhost:8080/query -b cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"How do I roll back an Acme Notes deployment?"}' | jq
+```
+
+The web UI presents a login screen in this mode. To add SSO (Google / GitHub /
+Microsoft-Entra) on top of password login, configure the `sso` block alongside
+the provider setup below. The admin user can list and manage **every**
+conversation; other users are scoped to their own (see
+[Per-session ownership](#per-session-ownership)).
+
 ## Per-provider setup
 
 For all providers below, replace placeholder hosts and IDs with your own.

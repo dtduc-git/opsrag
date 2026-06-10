@@ -106,7 +106,10 @@ curl -sf http://localhost:8080/readyz
 docker compose -f deploy/compose/docker-compose.yaml exec opsrag-api \
   scripts/seed-sample-corpus.sh
 
-# 5. Get an OIDC token from the bundled Dex (static evaluator user)
+# 5. (Illustrates OIDC) Get a token from the bundled Dex — the stand-in for a
+#    real IdP. NOTE: the compose demo runs in OPEN mode (see "Authentication"
+#    below), so this token is ACCEPTED but not REQUIRED. It shows the `oidc`
+#    path; there is no first-party "admin" user in this mode.
 TOKEN=$(curl -sf -X POST \
   -d 'grant_type=password' \
   -d 'username=evaluator@example.com' -d 'password=evaluator' \
@@ -114,7 +117,8 @@ TOKEN=$(curl -sf -X POST \
   -d 'scope=openid profile email' \
   http://localhost:5556/dex/token | jq -r .access_token)
 
-# 6. Ask a question — every endpoint except /healthz and /readyz needs the token
+# 6. Ask a question. In the open-mode demo the Authorization header is OPTIONAL
+#    (the same call works without it); in `oidc` mode it would be required.
 curl -sf -X POST http://localhost:8080/query \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"query":"How do I roll back an Acme Notes deployment?"}' | jq
@@ -131,6 +135,40 @@ inspect the full LangGraph trace in Phoenix at <http://localhost:6006>.
 
 The full walkthrough lives in
 [`docs/getting-started.md`](docs/getting-started.md).
+
+## 🔑 Authentication: the Dex user vs. the admin user
+
+The Dex token above and the first-party `admin@opsrag.local` account belong to
+**two different auth modes** — a common point of confusion. OpsRAG has three:
+
+| Mode | Who proves identity | First-party users? | Used by |
+|---|---|---|---|
+| `open` | nobody — every request is anonymous with all scopes | — | the **compose demo** (so the cookie-less UI works with no login screen) |
+| `oidc` | an **external IdP** issues a Bearer token; OpsRAG only *validates* it | **No** — no user database; identity lives entirely in the token | the **Dex** flow above; in production, your Okta / Entra / Google |
+| `login` | OpsRAG's own login: password + SSO (Google/GitHub/Microsoft) + cookies | **Yes** — including the bootstrap **`admin@opsrag.local`** | first-party deployments |
+
+**The key point: by default there is no admin account.** In `oidc` mode the
+"user" is whoever the token says — the Dex `evaluator@example.com` above — and
+OpsRAG keeps **no user records at all**. The `admin@opsrag.local` account only
+exists when you run **`login` mode**. So the "Dex user" and the "admin user"
+are not the same thing, and you can't swap one for the other within a single
+mode.
+
+**Getting the admin user.** There is no pre-baked password to retrieve — you
+create it. Switch to `login` mode and set your own credentials via env (never
+inline in config):
+
+```sh
+# config.yaml ->  auth: { mode: login }
+OPSRAG_SESSION_SIGNING_KEY=<32+ random bytes>      # signs session cookies
+OPSRAG_ADMIN_EMAIL=admin@opsrag.local
+OPSRAG_ADMIN_PASSWORD=<choose-a-strong-password>
+```
+
+On boot OpsRAG **seeds** that admin (role `admin`, idempotent). Log in via the
+web UI's login screen, or `POST /auth/login` to get a session cookie. Full
+steps (SSO, refresh tokens, RBAC) are in [docs/auth.md](docs/auth.md), which
+covers all three modes end to end.
 
 ## 🧭 Documentation
 
