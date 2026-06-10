@@ -42,7 +42,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -249,6 +249,86 @@ async def revoke_token(
     if not ok:
         raise HTTPException(status_code=404, detail="token not found or already revoked")
     _log.info("mcp token revoked user=%s id=%s", user_oid, token_id)
+
+
+# --- Audit log (admin-only view of the centralized MCP) -------------
+
+
+class AuditRow(BaseModel):
+    occurred_at: str | None = None
+    user_oid: str | None = None
+    token_id: str | None = None
+    tool_name: str
+    args_hash: str | None = None
+    latency_ms: int | None = None
+    status: str
+    error: str | None = None
+
+
+class AuditListResponse(BaseModel):
+    rows: list[AuditRow]
+    total: int
+    limit: int
+    offset: int
+
+
+class AuditTopTool(BaseModel):
+    tool_name: str
+    calls: int
+
+
+class AuditSummaryResponse(BaseModel):
+    total_calls: int
+    error_count: int
+    denied_count: int
+    distinct_users: int
+    distinct_tools: int
+    top_tools: list[AuditTopTool]
+
+
+def _require_audit(request: Request):
+    audit = getattr(request.app.state, "mcp_audit", None)
+    if audit is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="mcp audit log not configured (MCP server disabled)",
+        )
+    return audit
+
+
+@router.get("/audit", response_model=AuditListResponse)
+async def list_audit(
+    request: Request,
+    user: str | None = Query(None, description="filter by user_oid"),
+    tool: str | None = Query(None, description="filter by tool_name"),
+    status_filter: str | None = Query(None, alias="status", description="ok | denied | error"),
+    since_minutes: int | None = Query(None, ge=1, description="only rows in the last N minutes"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    _admin: CurrentUser = Depends(require_scope(Scope.ADMIN)),
+) -> AuditListResponse:
+    """Admin-only: read the centralized-MCP audit log -- who called which
+    read-only tool, when, and the result. Args are NEVER stored literally;
+    only ``args_hash`` (sha256 of canonical args) so secrets cannot leak."""
+    audit = _require_audit(request)
+    since = datetime.now(UTC) - timedelta(minutes=since_minutes) if since_minutes else None
+    rows, total = await audit.query(
+        user_oid=user, tool_name=tool, status=status_filter,
+        since=since, limit=limit, offset=offset,
+    )
+    return AuditListResponse(rows=rows, total=total, limit=limit, offset=offset)
+
+
+@router.get("/audit/summary", response_model=AuditSummaryResponse)
+async def audit_summary(
+    request: Request,
+    since_minutes: int | None = Query(None, ge=1, description="window in minutes (default: all time)"),
+    _admin: CurrentUser = Depends(require_scope(Scope.ADMIN)),
+) -> AuditSummaryResponse:
+    """Admin-only: aggregate stats for the audit dashboard strip."""
+    audit = _require_audit(request)
+    since = datetime.now(UTC) - timedelta(minutes=since_minutes) if since_minutes else None
+    return AuditSummaryResponse(**await audit.summary(since=since))
 
 
 # --- MCP wire protocol (bearer-token authed) ------------------------

@@ -145,6 +145,110 @@ class AuditLogger:
                 del self._buf[:_BUFFER_DROP_CHUNK]
             self._buf.append(row)
 
+    # --- read API (admin audit view) ------------------------------
+
+    async def query(
+        self,
+        *,
+        user_oid: str | None = None,
+        tool_name: str | None = None,
+        status: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Read audit rows newest-first with optional filters. Returns
+        ``(rows, total_matching)`` so the admin view can paginate."""
+        if not self._opened:
+            return [], 0
+        where: list[str] = []
+        params: list[Any] = []
+
+        def _add(expr: str, value: Any) -> None:
+            where.append(expr)
+            params.append(value)
+
+        if user_oid:
+            _add("user_oid = %s", user_oid)
+        if tool_name:
+            _add("tool_name = %s", tool_name)
+        if status:
+            _add("status = %s", status)
+        if since is not None:
+            _add("occurred_at >= %s", since)
+        if until is not None:
+            _add("occurred_at <= %s", until)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(f"SELECT count(*) FROM opsrag_mcp_audit{clause}", params)
+                total = int((await cur.fetchone())[0])
+                await cur.execute(
+                    "SELECT occurred_at, user_oid, token_id, tool_name, args_hash, "
+                    f"latency_ms, status, error FROM opsrag_mcp_audit{clause} "
+                    "ORDER BY occurred_at DESC, id DESC LIMIT %s OFFSET %s",
+                    [*params, limit, offset],
+                )
+                rows = await cur.fetchall()
+        out = [
+            {
+                "occurred_at": r[0].isoformat() if r[0] else None,
+                "user_oid": str(r[1]) if r[1] else None,
+                "token_id": str(r[2]) if r[2] else None,
+                "tool_name": r[3],
+                "args_hash": r[4],
+                "latency_ms": r[5],
+                "status": r[6],
+                "error": r[7],
+            }
+            for r in rows
+        ]
+        return out, total
+
+    async def summary(self, *, since: datetime | None = None) -> dict:
+        """Aggregate stats for the admin dashboard strip (top tools, error
+        rate, distinct users/tools) over an optional time window."""
+        empty = {
+            "total_calls": 0, "error_count": 0, "denied_count": 0,
+            "distinct_users": 0, "distinct_tools": 0, "top_tools": [],
+        }
+        if not self._opened:
+            return empty
+        where: list[str] = []
+        params: list[Any] = []
+        if since is not None:
+            where.append("occurred_at >= %s")
+            params.append(since)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*), "
+                    "count(*) FILTER (WHERE status = 'error'), "
+                    "count(*) FILTER (WHERE status = 'denied'), "
+                    "count(DISTINCT user_oid), count(DISTINCT tool_name) "
+                    f"FROM opsrag_mcp_audit{clause}",
+                    params,
+                )
+                total, errs, denied, users, tools = await cur.fetchone()
+                await cur.execute(
+                    f"SELECT tool_name, count(*) AS c FROM opsrag_mcp_audit{clause} "
+                    "GROUP BY tool_name ORDER BY c DESC LIMIT 8",
+                    params,
+                )
+                top = [{"tool_name": t, "calls": int(c)} for t, c in await cur.fetchall()]
+        return {
+            "total_calls": int(total or 0),
+            "error_count": int(errs or 0),
+            "denied_count": int(denied or 0),
+            "distinct_users": int(users or 0),
+            "distinct_tools": int(tools or 0),
+            "top_tools": top,
+        }
+
     # --- internal flush loop --------------------------------------
 
     async def _flush_loop(self) -> None:
