@@ -98,6 +98,24 @@
     "slackBot": {
       "type": "object"
     },
+    "channels": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "slack": {
+          "type": "object"
+        },
+        "telegram": {
+          "type": "object"
+        },
+        "discord": {
+          "type": "object"
+        },
+        "teams": {
+          "type": "object"
+        }
+      }
+    },
     "indexJob": {
       "type": "object"
     },

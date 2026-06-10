@@ -1330,69 +1330,55 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         else:
             app.state.scheduler = None
 
-        # -- Slack chatbot (Slack -> OpsRAG -> Slack) --
-        # Spawns a Socket Mode worker inside this process when enabled.
-        # No public ingress needed; the bot connects outbound to Slack.
+        # -- Multi-channel chat bots (Slack / Telegram / Discord) --
+        # The role-gating fix (design D6): a channel worker boots iff
+        # OPSRAG_ROLE maps to a channel AND that channel is enabled.
+        # ``build_and_start`` returns the connected adapter for shutdown, or
+        # None on the api/backend/indexer roles (no outbound worker). This
+        # replaces the old `enabled`-alone Slack boot, which on N api replicas
+        # opened N Socket Mode connections = duplicate answers.
+        #
         # Bound to the same agent_graph + providers as the HTTP /query
-        # endpoint, so cluster utilization is one process per pod.
-        # Local dev: this runs alongside the auto-index loop. In
-        # production it can move to a dedicated Deployment via
-        # OPSRAG_ROLE=slack-bot gating in a follow-up.
-        app.state.slack_bot = None
-        if cfg.slack_bot.enabled:
+        # endpoint, so a channel worker pod is one process per pod.
+        app.state.channel = None
+        from types import SimpleNamespace
+        caches = SimpleNamespace(
+            qa_cache=app.state.qa_cache,
+            investigation_cache=app.state.investigation_cache,
+            semantic_router=app.state.semantic_router,
+            feedback_store=app.state.feedback_store,
+        )
+        try:
+            from opsrag.channels.boot import build_and_start
+            app.state.channel = await build_and_start(
+                _role, cfg, agent_graph, providers, caches,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("channel worker startup failed: %s", exc, exc_info=True)
+
+        # Teams is inbound-only: its Bot Framework webhook is mounted on the
+        # `api` role (Bot Framework pushes activities to the public ingress the
+        # API already has). Only mount it when Teams is enabled.
+        if _role in ("", "api") and getattr(cfg.channels.teams, "enabled", False):
             try:
-                from opsrag.slack_bot import (
-                    SlackBotClient,
-                    SlackBotPermission,
-                    SlackEventDispatcher,
+                from opsrag.channels.adapters.teams.router import build_teams_router
+                app.include_router(
+                    build_teams_router(
+                        agent_graph, providers, caches, cfg.channels.teams,
+                    )
                 )
-                bot_token = os.environ.get(cfg.slack_bot.bot_token_env, "").strip()
-                app_token = os.environ.get(cfg.slack_bot.app_token_env, "").strip()
-                if not bot_token or not app_token:
-                    _log.warning(
-                        "slack_bot.enabled=true but %s or %s is unset -- "
-                        "skipping Socket Mode worker",
-                        cfg.slack_bot.bot_token_env, cfg.slack_bot.app_token_env,
-                    )
-                else:
-                    bot_client = SlackBotClient(
-                        bot_token=bot_token, app_token=app_token,
-                    )
-                    bot_permission = SlackBotPermission(
-                        allowed_channels=set(cfg.slack_bot.channels_allowlist),
-                        per_user_daily_quota=cfg.slack_bot.per_user_daily_quota,
-                    )
-                    bot_dispatcher = SlackEventDispatcher(
-                        client=bot_client,
-                        agent_graph=agent_graph,
-                        providers=providers,
-                        config=cfg.slack_bot,
-                        permission=bot_permission,
-                        web_ui_base_url=cfg.slack_bot.web_ui_base_url,
-                        qa_cache=app.state.qa_cache,
-                        investigation_cache=app.state.investigation_cache,
-                        semantic_router=app.state.semantic_router,
-                        feedback_store=app.state.feedback_store,
-                    )
-                    await bot_client.start(bot_dispatcher)
-                    app.state.slack_bot = bot_client
-                    _log.info(
-                        "slack chatbot connected via Socket Mode "
-                        "(channels=%d, streaming=%s)",
-                        len(cfg.slack_bot.channels_allowlist),
-                        cfg.slack_bot.streaming_enabled,
-                    )
+                _log.info("teams webhook router mounted on api role (/api/channels/teams)")
             except Exception as exc:  # noqa: BLE001
-                _log.warning("slack chatbot startup failed: %s", exc, exc_info=True)
+                _log.warning("teams webhook router mount failed: %s", exc, exc_info=True)
 
         try:
             yield
         finally:
-            if app.state.slack_bot is not None:
+            if app.state.channel is not None:
                 try:
-                    await app.state.slack_bot.stop()
+                    await app.state.channel.close()
                 except Exception as exc:  # noqa: BLE001
-                    _log.warning("slack chatbot stop raised: %s", exc)
+                    _log.warning("channel worker close raised: %s", exc)
             if scheduler is not None:
                 # wait=False so shutdown doesn't block on a job in flight;
                 # the next process picks up via the persisted jobstore.

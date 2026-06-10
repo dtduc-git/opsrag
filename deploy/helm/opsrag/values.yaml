@@ -133,7 +133,52 @@ indexJob:
     limits:
       memory: 4Gi
 
-# --- Slack bot worker (opt-in) ----------------------------------------------
+# --- Multi-channel bot workers (opt-in) -------------------------------------
+# One role-gated worker Deployment per ENABLED channel (slack / telegram /
+# discord), each with OPSRAG_ROLE=<name>bot. Teams is NOT a worker -- it is an
+# inbound webhook served by the api role (set channels.teams.enabled to render
+# it into the app config; expose the api Ingress publicly for the Bot
+# Framework). Enabling a channel here ALSO flips it on in the mounted
+# config.yaml (see configmap.yaml), so the in-app adapter boots. Tokens come
+# from api.envFromSecret / secretRef, never inline.
+channels:
+  slack:
+    enabled: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  telegram:
+    enabled: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  discord:
+    enabled: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  teams:
+    # No worker Deployment -- webhook on the api role. enabled=true renders the
+    # channels.teams block into config.yaml so the api mounts the Teams router.
+    enabled: false
+
+# --- Slack bot worker (opt-in) -- DEPRECATED alias for channels.slack -------
+# Kept for one release. When channels.slack.enabled is false but
+# slackBot.enabled is true, the slackbot worker Deployment still renders and
+# the app mirrors slack_bot into channels.slack at config load. Migrate to
+# `channels.slack`.
 slackBot:
   enabled: false
   replicaCount: 1

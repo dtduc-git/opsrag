@@ -40,18 +40,19 @@ case "$ROLE" in
     echo "opsrag: starting job-indexer (run-to-completion) args='$*'" >&2
     exec python -m opsrag.job.indexer "$@"
     ;;
-  api | backend | indexer | scheduler | slackbot | slack-bot | worker)
+  api | backend | indexer | scheduler | slackbot | slack-bot | telegrambot | discordbot | worker)
     # All recognised roles serve the same ASGI app. The app inspects
     # OPSRAG_ROLE at startup to enable/disable the indexing loop, the
-    # APScheduler-driven daily job, and the Slack bot. Export it so the
-    # process sees the same value this script resolved.
+    # APScheduler-driven daily job, and the matching channel bot worker
+    # (slackbot / telegrambot / discordbot). Export it so the process sees
+    # the same value this script resolved.
     export OPSRAG_ROLE="$ROLE"
     echo "opsrag: starting role='$ROLE' on ${HOST}:${PORT}" >&2
     exec uvicorn "$APP" --host "$HOST" --port "$PORT" "$@"
     ;;
   *)
     echo "opsrag: unknown OPSRAG_ROLE='$ROLE'" >&2
-    echo "opsrag: valid roles are: api, backend, indexer, scheduler, slackbot, worker, job-indexer" >&2
+    echo "opsrag: valid roles are: api, backend, indexer, scheduler, slackbot, telegrambot, discordbot, worker, job-indexer" >&2
     exit 1
     ;;
 esac

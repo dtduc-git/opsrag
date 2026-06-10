@@ -109,6 +109,21 @@ non_english_exempt_paths:
   # and reaction calls. These are part of the user-facing UX, not language text.
   - opsrag/slack_bot/
 
+  # Multi-channel core + adapters carry the same load-bearing emoji as the Slack
+  # bot: the heartbeat ladder (🤔 😅 🙏 🐢), the apology (😔), and the
+  # 👍/👎/👀/✅/❌ feedback + reaction affordances each adapter renders. These
+  # are user-facing UX, not non-English language text. Proprietary-name +
+  # hardcoded-host checks still apply to opsrag/channels/.
+  - opsrag/channels/
+
+  # The channel-adapter unit tests assert on that same load-bearing emoji
+  # output (placeholder "🤔 Thinking...", reaction glyphs 👀/✅/❌, 👍/👎
+  # feedback, the "OpsRAG ·" footer dot). Narrowly exempt just these three
+  # files so the rest of tests/ stays ASCII-strict.
+  - tests/unit/test_telegram_adapter.py
+  - tests/unit/test_discord_adapter.py
+  - tests/unit/test_teams_adapter.py
+
   # React UI: source uses typographic Unicode (em dashes, >=, x, box-drawing
   # comment dividers) and load-bearing emoji (thumbs reactions) - UX/typography,
   # not non-English language text. Proprietary-name + hardcoded-host checks
@@ -188,6 +203,10 @@ hardcoded_hosts_allowlist:
   - "*.datadoghq.com"
   - api.rootly.com                   # rootly MCP
   - "*.honeycomb.io"                 # (future) honeycomb MCP
+  - api.telegram.org                 # telegram channel bot -- public Bot API base
+  - adaptivecards.io                 # teams channel bot -- Adaptive Card $schema URL (a spec constant, not a network host)
+  - discord.com                      # discord channel bot -- developer portal / public host (docs link)
+  - "*.discord.com"
 
   # Project's own identity. opsrag.io is the project domain, used as a
   # Kubernetes label-key namespace (opsrag.io/index-repo, ...) the way

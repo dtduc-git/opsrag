@@ -100,6 +100,20 @@ data:
       {{ $name }}:
         enabled: {{ $cfg.enabled }}
       {{- end }}
+    {{- /* channels: render each channel's enabled flag so flipping a channel
+           in values flips the in-app adapter. Token *_env names + allowlists +
+           quotas use the app defaults unless an operator overrides them in a
+           separate config layer; secrets are NEVER rendered here. slackBot is a
+           deprecated alias -> ORs into channels.slack.enabled. */}}
+    channels:
+      slack:
+        enabled: {{ or (.Values.channels.slack).enabled .Values.slackBot.enabled | default false }}
+      telegram:
+        enabled: {{ (.Values.channels.telegram).enabled | default false }}
+      discord:
+        enabled: {{ (.Values.channels.discord).enabled | default false }}
+      teams:
+        enabled: {{ (.Values.channels.teams).enabled | default false }}
     {{- /* Unified multi-environment registry (Settings.environments). Each
            target's kubernetes / prometheus / elasticsearch block is rendered
            verbatim, so the keys MUST match config.py's K8sTarget /

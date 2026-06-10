@@ -226,7 +226,11 @@ slack:
   backfill_days: 30
   min_replies_per_thread: 1
 
-# --- Slack bot (Socket Mode worker) ------------------------------------------
+# --- Slack bot (Socket Mode worker) -- DEPRECATED -----------------------------
+# Back-compat only. New deployments should configure bots under `channels:`
+# below. When `slack_bot.enabled` is true and `channels.slack` is left at its
+# defaults, this block is mirrored into `channels.slack` at load (with a
+# deprecation warning). Both paths boot the same Slack adapter.
 slack_bot:
   enabled: false
   bot_token_env: OPSRAG_SLACK_BOT_TOKEN
@@ -234,6 +238,42 @@ slack_bot:
   channels_allowlist: []
   streaming_enabled: true
   per_user_daily_quota: 200
+
+# --- Multi-channel bots (Slack / Telegram / Discord / Teams) -----------------
+# Each channel is its own role-gated worker EXCEPT Teams, which is a webhook
+# mounted on the `api` role (Bot Framework pushes inbound activities). Enable a
+# channel here AND run a worker with OPSRAG_ROLE=<name>bot (slackbot /
+# telegrambot / discordbot). Secrets are referenced only by their `*_env` var
+# names (Principle VI) -- never inline tokens. `allowlist` holds channel/chat
+# ids (DMs bypass the allowlist but not the per-user quota).
+channels:
+  slack:
+    enabled: false
+    bot_token_env: OPSRAG_SLACK_BOT_TOKEN
+    app_token_env: OPSRAG_SLACK_APP_TOKEN
+    allowlist: []                # Slack channel ids (C...); DMs bypass
+    per_user_daily_quota: 200
+    streaming_enabled: true
+    web_ui_base_url: ""          # deep-link base for "View in OpsRAG UI"
+  telegram:
+    enabled: false
+    bot_token_env: OPSRAG_TELEGRAM_BOT_TOKEN
+    allowlist: []                # chat ids (may be negative for groups)
+    per_user_daily_quota: 200
+    web_ui_base_url: ""
+  discord:
+    enabled: false
+    bot_token_env: OPSRAG_DISCORD_BOT_TOKEN
+    allowlist: []                # channel ids
+    per_user_daily_quota: 200
+    web_ui_base_url: ""
+  teams:
+    enabled: false               # webhook on the `api` role (no worker)
+    app_id_env: OPSRAG_TEAMS_APP_ID
+    app_password_env: OPSRAG_TEAMS_APP_PASSWORD
+    allowlist: []                # conversation ids
+    per_user_daily_quota: 200
+    web_ui_base_url: ""
 
 # --- MCP integrations --------------------------------------------------------
 # All twenty, disabled. Flip `enabled: true` and provide the integration's
