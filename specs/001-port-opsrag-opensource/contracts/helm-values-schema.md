@@ -45,10 +45,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "cartography", "cloudflare", "cloudsql", "code",
-        "datadog", "elasticsearch", "gitlab", "knowledge",
-        "kubernetes", "prometheus", "rootly", "runbooks",
-        "slack", "tool_cache"
+        "aws", "azure", "cloudflare", "code",
+        "datadog", "elasticsearch", "gcp", "github",
+        "gitlab", "grafana", "knowledge", "kubernetes",
+        "loki", "prometheus", "rootly", "runbooks",
+        "sentry", "slack", "splunk", "tool_cache"
       ],
       "patternProperties": {
         "^[a-z][a-z0-9_]*$": {

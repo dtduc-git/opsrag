@@ -64,7 +64,8 @@ separate API key or second client path:
   (`memory.mem0_collection`, default `opsrag_mem0_ops`). The live Qdrant
   client is injected so the existing connection is reused.
 - **LLM:** the project's configured LLM, mapped to mem0's provider name
-  (anthropic / openai / gemini / aws_bedrock / ollama).
+  (anthropic / openai / vertex / aws_bedrock / litellm). Run an Ollama model
+  through the `litellm` provider.
 - **Embedder:** the project's embedder, with an optional override (see
   below). The mem0 **graph store stays OFF**.
 

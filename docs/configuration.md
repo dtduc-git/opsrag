@@ -235,9 +235,8 @@ chat sessions; Postgres lets `/readyz` verify the database.
 
 ### `observability` — tracing
 
-`provider` is `console` (default, boot-safe), `phoenix` (stream LangGraph
-traces to a Phoenix collector via `endpoint`), or `datadog`. `project_name`
-labels traces.
+`provider` is `console` (default, boot-safe) or `phoenix` (stream LangGraph
+traces to a Phoenix collector via `endpoint`). `project_name` labels traces.
 
 ### `eval` and `scheduler` — background jobs
 

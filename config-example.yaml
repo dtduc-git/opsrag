@@ -236,7 +236,7 @@ slack_bot:
   per_user_daily_quota: 200
 
 # --- MCP integrations --------------------------------------------------------
-# All fourteen, disabled. Flip `enabled: true` and provide the integration's
+# All twenty, disabled. Flip `enabled: true` and provide the integration's
 # required env (see .env.example). Missing env on an enabled MCP fails startup
 # with MCP_MISCONFIGURED:<name>:<env> (FR-004). Per-integration knobs go under
 # `extra:` and are validated by that integration's own model.
