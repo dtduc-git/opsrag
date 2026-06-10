@@ -204,7 +204,11 @@ def build_providers(config: OpsRAGConfig) -> Providers:
     # re-embedded 3-5x per chat turn (cache lookup, classifier,
     # semantic router, retrieval, qa_cache). 60s TTL + 1k entries is
     # tuned for chat-burst patterns and keeps memory well under 100MB.
-    embedder = CachedEmbedder(embedder, max_size=1000, ttl_seconds=60.0)
+    embedder = CachedEmbedder(
+        embedder,
+        max_size=config.embedding.cache_max_size,
+        ttl_seconds=config.embedding.cache_ttl_seconds,
+    )
 
     if config.vector_store.provider == "qdrant":
         vector_store: VectorStore = QdrantVectorStore(
@@ -537,8 +541,9 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             location=ce_cfg.location or "us-central1",
             # Code retrieval task types: documents use RETRIEVAL_DOCUMENT
             # (same as prose), queries use the code-specific task type.
-            document_task_type="RETRIEVAL_DOCUMENT",
-            query_task_type="CODE_RETRIEVAL_QUERY",
+            # Overridable for non-default Vertex embed models.
+            document_task_type=ce_cfg.code_document_task_type,
+            query_task_type=ce_cfg.code_query_task_type,
             # Pass the configured dimension THROUGH (no `or 768` fallback): a
             # None here lets VertexAIEmbeddings' unknown-model guard raise
             # instead of silently baking a wrong-dim code collection. A known
@@ -546,7 +551,11 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             # code_embedding.dimension is a hard error, by design.
             output_dimensionality=ce_cfg.dimension,
         )
-        code_embedder_provider = CachedEmbedder(code_embedder_provider, max_size=1000, ttl_seconds=60.0)
+        code_embedder_provider = CachedEmbedder(
+            code_embedder_provider,
+            max_size=ce_cfg.cache_max_size,
+            ttl_seconds=ce_cfg.cache_ttl_seconds,
+        )
         if cv_cfg.provider != "qdrant":
             raise NotImplementedError(
                 f"code vector store currently only supports 'qdrant', got {cv_cfg.provider!r}"

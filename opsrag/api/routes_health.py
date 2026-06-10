@@ -75,6 +75,21 @@ async def readyz(request: Request) -> JSONResponse:
         components[name] = {"status": "up" if ok else "down", "detail": detail}
         ready = ready and ok
 
+    # Optional graph lanes: probe ONLY when actually enabled, so a disabled
+    # lane is omitted (not reported down) while a broken ENABLED lane degrades
+    # readiness instead of being discovered weeks later (graph writes are
+    # swallowed at WARNING during ingestion by design).
+    graph_store = getattr(providers, "graph_store", None)
+    if graph_store is not None and type(graph_store).__name__ != "NullGraphStore":
+        ok, detail = await _probe_store(graph_store)
+        components["knowledge_graph"] = {"status": "up" if ok else "down", "detail": detail}
+        ready = ready and ok
+    light_graph = getattr(providers, "light_graph", None)
+    if light_graph is not None:
+        ok, detail = await _probe_store(light_graph)
+        components["light_graph"] = {"status": "up" if ok else "down", "detail": detail}
+        ready = ready and ok
+
     # Per-MCP readiness (T088): for each enabled integration, report its status
     # and, where the registry declares a fully-formed health URL, best-effort
     # probe it. Disabled integrations are omitted. A failed MCP probe degrades

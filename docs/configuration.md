@@ -106,10 +106,11 @@ write the ones you need. The shipped default
 
 ### `llm` — language model
 
-`provider` (`anthropic` | `openai` | `vertex` | `bedrock` | `ollama` |
-`litellm`), `model`, `api_key_env`, `max_tokens`. Vertex adds
+`provider` (`anthropic` | `openai` | `vertex` | `bedrock` | `litellm`),
+`model`, `api_key_env`, `max_tokens`. Vertex adds
 `project`/`location`; Bedrock adds `aws_region`/`aws_profile`; `litellm` adds
-`api_base` for self-hosted OpenAI-compatible endpoints (vLLM/TGI).
+`api_base` for self-hosted OpenAI-compatible endpoints (vLLM/TGI, or an
+Ollama server).
 
 ```yaml
 llm:
