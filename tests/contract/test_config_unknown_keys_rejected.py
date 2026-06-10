@@ -59,3 +59,65 @@ def test_implemented_embedding_providers_still_accepted() -> None:
     for provider in ("openai", "vertex", "bedrock", "fastembed", "litellm"):
         settings = Settings.model_validate({"embedding": {"provider": provider}})
         assert settings.embedding.provider == provider
+
+
+# --- Other provider slots with unimplemented Literal values --------------
+# Same fail-fast contract as embedding.provider: a provider the factory can't
+# build must be rejected at config-load, not at provider-build time.
+
+
+@pytest.mark.parametrize(
+    "block,field,bad",
+    [
+        ("llm", "llm.provider", "ollama"),          # use provider="litellm" instead
+        ("vector_store", "vector_store.provider", "weaviate"),
+        ("vector_store", "vector_store.provider", "chroma"),
+        ("observability", "observability.provider", "datadog"),
+    ],
+)
+def test_unimplemented_provider_rejected_at_load(block, field, bad) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        Settings.model_validate({block: {"provider": bad}})
+    assert field in str(exc_info.value)
+
+
+def test_implemented_providers_for_other_slots_still_accepted() -> None:
+    for provider in ("anthropic", "openai", "vertex", "bedrock", "litellm"):
+        assert Settings.model_validate({"llm": {"provider": provider}}).llm.provider == provider
+    for provider in ("qdrant", "pgvector"):
+        s = Settings.model_validate({"vector_store": {"provider": provider}})
+        assert s.vector_store.provider == provider
+    for provider in ("console", "phoenix"):
+        s = Settings.model_validate({"observability": {"provider": provider}})
+        assert s.observability.provider == provider
+
+
+# --- Code-embedding lane: vertex + qdrant only ---------------------------
+
+
+def test_code_lane_rejects_unsupported_providers_at_load() -> None:
+    # The code lane only supports Vertex embeddings -> Qdrant. Anything else
+    # deferred to a NotImplementedError at provider-build; reject at load.
+    with pytest.raises(ValidationError) as exc_info:
+        Settings.model_validate({"code_embedding": {"provider": "openai"}})
+    assert "code_embedding.provider" in str(exc_info.value)
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings.model_validate(
+            {
+                "code_embedding": {"provider": "vertex"},
+                "code_vector_store": {"provider": "pgvector"},
+            }
+        )
+    assert "code_vector_store.provider" in str(exc_info.value)
+
+
+def test_code_lane_vertex_qdrant_accepted() -> None:
+    s = Settings.model_validate(
+        {
+            "code_embedding": {"provider": "vertex"},
+            "code_vector_store": {"provider": "qdrant"},
+        }
+    )
+    assert s.code_embedding.provider == "vertex"
+    assert s.code_vector_store.provider == "qdrant"

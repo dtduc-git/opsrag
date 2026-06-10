@@ -98,10 +98,23 @@ class EmbeddingConfig(BaseModel):
     # LiteLLM: optional base URL for self-hosted / OpenAI-compatible
     # endpoints (e.g. a Qwen TEI server). Ignored by the other providers.
     api_base: str | None = None
+    # Read-through embedding cache (CachedEmbedder wraps the provider): the
+    # same query is re-embedded 3-5x per turn. Defaults match the previously
+    # hardcoded values; raise cache_max_size for high query cardinality.
+    cache_max_size: int = 1000
+    cache_ttl_seconds: float = 60.0
+    # Vertex code-retrieval task types -- only consulted when this block is the
+    # `code_embedding` lane (ignored by the main embedder / non-Vertex providers).
+    code_document_task_type: str = "RETRIEVAL_DOCUMENT"
+    code_query_task_type: str = "CODE_RETRIEVAL_QUERY"
 
 
 class VectorStoreConfig(BaseModel):
-    provider: Literal["qdrant", "pgvector", "weaviate", "chroma"] = "qdrant"
+    # Only the providers the factory can build. "weaviate"/"chroma" were
+    # accepted here but unimplemented, deferring to a runtime
+    # NotImplementedError -- now they fail fast at config-load (matches
+    # EmbeddingConfig.provider above).
+    provider: Literal["qdrant", "pgvector"] = "qdrant"
     url: str = "http://localhost:6333"
     collection: str = "opsrag"
     api_key_env: str | None = None
@@ -116,7 +129,11 @@ class VectorStoreConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    provider: Literal["anthropic", "openai", "vertex", "bedrock", "ollama", "litellm"] = "anthropic"
+    # Only the providers the LLM factory can build. "ollama" was accepted
+    # here but unimplemented natively (run an Ollama model through
+    # provider="litellm" instead) -- it deferred to a runtime
+    # NotImplementedError, so it now fails fast at config-load.
+    provider: Literal["anthropic", "openai", "vertex", "bedrock", "litellm"] = "anthropic"
     model: str = "claude-sonnet-4-20250514"
     api_key_env: str = "ANTHROPIC_API_KEY"
     aws_region: str | None = None
@@ -130,7 +147,10 @@ class LLMConfig(BaseModel):
 
 
 class ObservabilityConfig(BaseModel):
-    provider: Literal["console", "phoenix", "datadog"] = "console"
+    # Only the providers the factory can build. "datadog" was accepted here
+    # but unimplemented, deferring to a runtime NotImplementedError -- now it
+    # fails fast at config-load.
+    provider: Literal["console", "phoenix"] = "console"
     project_name: str = "opsrag"
     endpoint: str | None = None
 
@@ -848,6 +868,27 @@ class Settings(BaseModel):
     # When either is None, behavior is identical to pre-P3.
     code_embedding: EmbeddingConfig | None = None
     code_vector_store: VectorStoreConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_code_lane(self) -> Settings:
+        # The optional code-embedding lane is only wired for Vertex embeddings
+        # written to a Qdrant collection (see opsrag/factory.py). Any other
+        # provider deferred to a runtime NotImplementedError at provider-build
+        # time; reject it at config-load with a clear, field-named error.
+        if self.code_embedding is not None and self.code_embedding.provider != "vertex":
+            raise ValueError(
+                "code_embedding.provider must be 'vertex' "
+                f"(the code lane only supports Vertex), got {self.code_embedding.provider!r}"
+            )
+        if (
+            self.code_vector_store is not None
+            and self.code_vector_store.provider != "qdrant"
+        ):
+            raise ValueError(
+                "code_vector_store.provider must be 'qdrant' "
+                f"(the code lane only supports Qdrant), got {self.code_vector_store.provider!r}"
+            )
+        return self
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Settings:

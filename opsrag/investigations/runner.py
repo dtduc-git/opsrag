@@ -975,6 +975,7 @@ class InvestigationRunner:
             alert_tokens = set(re.findall(r"[a-z0-9][a-z0-9\-_]{2,}", alert_lc))
 
             hit_dicts = []
+            culled: list[dict[str, Any]] = []
             for h in (hits or []):
                 # RunbookHit is a Pydantic model with shape
                 #   {runbook: Runbook, score: float, origin: str, ...}
@@ -1023,6 +1024,14 @@ class InvestigationRunner:
                         "lane_a: dropping irrelevant runbook %r (service=%r overlap=%s)",
                         rb_title, rb_service, sorted(overlap),
                     )
+                    # Surface the cull in the event ledger too -- a runbook
+                    # dropped by the relevance gate is otherwise an invisible
+                    # false-negative to operators.
+                    culled.append({
+                        "title": _g("title") or "",
+                        "service": _g("service") or None,
+                        "overlap": sorted(overlap)[:6],
+                    })
                     continue
 
                 hit_dicts.append({
@@ -1035,7 +1044,12 @@ class InvestigationRunner:
                     "_overlap": sorted(overlap)[:6],
                 })
             elapsed = int((time.perf_counter() - t0) * 1000)
-            return {"hits": hit_dicts, "elapsed_ms": elapsed}
+            return {
+                "hits": hit_dicts,
+                "elapsed_ms": elapsed,
+                "culled_count": len(culled),
+                "culled": culled,
+            }
         except Exception as exc:  # noqa: BLE001
             _log.warning("lane_a failed: %s", exc)
             return {"hits": [], "elapsed_ms": int((time.perf_counter() - t0) * 1000),

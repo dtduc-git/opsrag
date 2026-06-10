@@ -60,6 +60,14 @@ class LightGraphStore:
             await self._pool.close()
             self._opened = False
 
+    async def health_check(self) -> None:
+        """Lightweight readiness probe (``SELECT 1``). Raises if the
+        light-graph Postgres pool is unreachable so /readyz reports the
+        light-graph lane as down rather than discovering it weeks later."""
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+
     async def init_schema(self) -> None:
         """No-op: the migration framework owns the DDL (parity with the other
         *Store classes so the boot sequence can call it uniformly)."""

@@ -120,6 +120,10 @@ _BUNDLE_PRO_MODEL: dict[str, str | None] = {
 
 # The six purpose keys carried by a bundle / ModelsConfig.
 _PURPOSES = ("reason", "tool_call", "embed", "rerank", "summarize", "extract")
+# The LLM-bearing purposes (everything except embed/rerank). Used to keep the
+# bundle from injecting a provider into these that conflicts with an
+# explicitly-pinned classic `llm` slot (split-brain guard in resolve_cloud_bundle).
+_LLM_PURPOSES = frozenset({"reason", "tool_call", "summarize", "extract"})
 
 
 def _llm_slot_is_default(settings: Settings) -> bool:
@@ -185,10 +189,26 @@ def resolve_cloud_bundle(settings: Settings) -> None:
     #    consult resolved purposes regardless of operator config.
     if settings.models is None:
         settings.models = ModelsConfig()
+    llm_overridden = not _llm_slot_is_default(settings)
     for purpose in _PURPOSES:
         spec = bundle.get(purpose)
-        if spec is not None:
-            _fill_models_purpose(settings.models, purpose, spec)
+        if spec is None:
+            continue
+        # Split-brain guard: when the operator explicitly pinned the classic
+        # `llm` slot to a DIFFERENT provider than this bundle, don't inject the
+        # bundle's provider into the LLM purposes -- otherwise e.g. models.reason
+        # becomes vertex while llm.provider stays bedrock, and the router builds
+        # a Vertex client using bedrock's slot config. The router falls back to
+        # the explicit classic llm client for skipped purposes. Matching
+        # providers fill as normal (preserves the cheap tool/summarize lane).
+        if (
+            purpose in _LLM_PURPOSES
+            and llm_overridden
+            and spec.provider is not None
+            and spec.provider != settings.llm.provider
+        ):
+            continue
+        _fill_models_purpose(settings.models, purpose, spec)
 
     # 2. Classic `llm` slot <- bundle `reason` (the strong/default model).
     reason = bundle.get("reason")

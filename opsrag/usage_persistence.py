@@ -80,6 +80,7 @@ class UsagePersistence:
         self._flush_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._opened = False
+        self._dropped = 0  # cumulative usage events lost to buffer overflow
 
     async def open(self) -> None:
         await self._pool.open()
@@ -132,8 +133,17 @@ class UsagePersistence:
             # Cap the buffer at 50k events. If we're past that we're
             # losing the DB anyway; drop oldest to make room.
             if len(self._buf) >= 50_000:
-                # Drop ~10% of the oldest events.
+                # Drop ~10% of the oldest events -- and make the loss VISIBLE.
+                # Overflow means Postgres has been unreachable long enough that
+                # usage/cost rows for these events are now permanently gone.
                 del self._buf[: 5_000]
+                self._dropped += 5_000
+                _log.warning(
+                    "usage buffer overflow: dropped 5000 oldest events "
+                    "(cumulative dropped=%d) -- Postgres flush is falling "
+                    "behind or unreachable; usage/cost data for these is lost",
+                    self._dropped,
+                )
             self._buf.append((
                 model, purpose, session_id,
                 int(input_tokens), int(output_tokens), float(latency_ms),

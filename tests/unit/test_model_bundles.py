@@ -145,6 +145,38 @@ def test_env_model_overrides_win_over_bundle(monkeypatch):
     assert cfg.embedding.dimension == 1024
 
 
+def test_explicit_llm_provider_blocks_conflicting_bundle_purposes():
+    # cloud_provider=gcp (vertex bundle) but the operator pinned the classic
+    # llm slot to bedrock. The bundle must NOT inject vertex into the LLM
+    # purposes (split-brain) -- they fall back to the explicit bedrock client.
+    cfg = _fresh(
+        cloud_provider="gcp",
+        llm={"provider": "bedrock", "model": "us.anthropic.claude-sonnet-4-6"},
+    )
+    resolve_cloud_bundle(cfg)
+    assert cfg.llm.provider == "bedrock"          # explicit slot respected
+    # LLM purposes skipped -> not vertex -> router falls back to classic llm.
+    r = cfg.models.reason
+    assert r is None or r.provider != "vertex"
+    tc = cfg.models.tool_call
+    assert tc is None or tc.provider != "vertex"
+    # embed is an INDEPENDENT slot (bedrock LLM + vertex embeddings is valid)
+    # and still follows the gcp bundle.
+    assert cfg.models.embed is not None and cfg.models.embed.provider == "vertex"
+
+
+def test_explicit_llm_provider_matching_bundle_still_fills_cheap_lane():
+    # llm pinned to bedrock AND cloud_provider=aws (bedrock bundle): providers
+    # match, so the cheap tool/summarize lane is still filled from the bundle.
+    cfg = _fresh(
+        cloud_provider="aws",
+        llm={"provider": "bedrock", "model": "custom-reason-model"},
+    )
+    resolve_cloud_bundle(cfg)
+    assert cfg.llm.model == "custom-reason-model"  # explicit model respected
+    assert cfg.models.tool_call.model == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
 def test_env_invalid_values_ignored(monkeypatch):
     """A bad cloud provider / non-int dimension is ignored, not fatal."""
     for v in ("OPSRAG_LLM_MODEL", "OPSRAG_PRO_MODEL", "OPSRAG_EMBEDDING_MODEL"):

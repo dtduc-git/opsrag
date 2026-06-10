@@ -44,6 +44,13 @@ class Neo4jGraphStore:
     async def close(self) -> None:
         await self._driver.close()
 
+    async def health_check(self) -> None:
+        """Lightweight readiness probe (``RETURN 1``). Raises if Neo4j is
+        unreachable so /readyz reports the knowledge-graph lane as down
+        instead of letting it fail silently at query time."""
+        async with self._driver.session(database=self._db) as session:
+            await session.run("RETURN 1")
+
     async def __aenter__(self) -> Neo4jGraphStore:
         return self
 

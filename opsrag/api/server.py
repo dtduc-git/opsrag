@@ -63,6 +63,15 @@ def _build_rate_limit_backend(cfg: OpsRAGConfig):
     limiter and the login lockout so replicas agree.
     """
     if cfg.api.rate_limit_backend != "redis":
+        # Per-pod, in-process state: with N replicas the effective limit is
+        # N x rpm and the login lockout is not shared. Fine for single-replica
+        # / local dev; set api.rate_limit_backend=redis for a shared limit.
+        _log.warning(
+            "rate-limit: using the in-memory backend (per-pod). Limits are "
+            "NOT shared across replicas -- with N replicas the effective rate "
+            "is N x %s rpm. Set api.rate_limit_backend=redis to share state.",
+            getattr(cfg.api, "rate_limit_rpm", "configured"),
+        )
         return MemoryRateLimitBackend()
 
     url = os.environ.get(cfg.api.redis_url_env, "").strip()
@@ -657,6 +666,24 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 )
             except Exception as exc:  # noqa: BLE001
                 _log.warning("investigation runner init failed: %s", exc)
+
+        # Surface the investigate feature-gate state at boot. The Investigate
+        # tab only appears in the UI when >=1 live-telemetry MCP (datadog /
+        # prometheus / kubernetes / ...) is enabled, so a config flip that
+        # silently hides the tab is otherwise hard to diagnose.
+        try:
+            from opsrag.investigations.feature_gate import (
+                investigation_live_telemetry_enabled,
+            )
+
+            _gate = investigation_live_telemetry_enabled(cfg)
+            _log.info(
+                "investigate feature gate: live telemetry %s -> Investigate tab %s",
+                "enabled" if _gate else "disabled",
+                "VISIBLE" if _gate else "HIDDEN (enable a datadog/prometheus/k8s MCP)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("feature-gate boot log skipped: %s", exc)
 
         # Pomerium identity verifier + user store. The verifier is
         # only constructed when tracking is enabled AND a JWKS URL is
