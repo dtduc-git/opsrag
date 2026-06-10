@@ -3,6 +3,7 @@ import Sidebar, { type Page } from "./components/Sidebar";
 import ChatMessage, { type Message, type RichComponent } from "./components/ChatMessage";
 import ChatInput from "./components/ChatInput";
 import UsagePage from "./components/UsagePage";
+import MCPAuditPage from "./components/MCPAuditPage";
 import ErrorBoundary from "./components/ErrorBoundary";
 import IndexingPage from "./components/IndexingPage";
 import AgentGuidancePage from "./components/AgentGuidancePage";
@@ -49,7 +50,7 @@ const SUGGESTED_PROMPTS: Array<{ cat: string; text: string; tone?: "q" | "h" | "
 //   `mcp-tokens` (legacy) → connections
 const SIMPLE_PAGES: Page[] = [
   "home", "usage", "indexing", "cache", "investigate", "docs",
-  "connections", "sources", "graph", "integrations", "quality", "users", "guidance",
+  "connections", "sources", "graph", "integrations", "quality", "mcpaudit", "users", "guidance",
 ];
 
 function parseHash(): { page: Page; threadId: string | null; runbookId: string | null; investigationId: string | null } {
@@ -596,6 +597,24 @@ export default function App({ me, reloadMe }: AppProps) {
               </p>
             </div>
             <UsagePage me={me} />
+          </section>
+        )}
+
+        {page === "mcpaudit" && (
+          <section className="page">
+            <div className="topbar">
+              <h1>MCP Audit <span className="dim">· centralized MCP governance</span></h1>
+            </div>
+            <div className="hero">
+              <div className="eyebrow green"><span className="dot"></span> Read-only · token-scoped · fully audited</div>
+              <h2>Who called <em>which tool</em>, and <em>when</em>.</h2>
+              <p>
+                Every call through the centralized MCP is recorded — the user and
+                token behind it, the tool, the latency, and the result. Arguments
+                are never stored, only a sha256 hash, so secrets never reach the log.
+              </p>
+            </div>
+            <MCPAuditPage me={me} />
           </section>
         )}
 

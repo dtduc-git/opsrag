@@ -20,6 +20,7 @@ export type Page =
   | "cache"
   | "usage"
   | "quality"
+  | "mcpaudit"
   | "users"
   | "guidance"
   | "docs";
@@ -87,6 +88,7 @@ const I = {
   cache: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 4l6-2.5L14 4l-6 2.5z"/><path d="M2 4v5l6 2.5L14 9V4"/><path d="M2 9v3l6 2.5L14 12V9"/></svg>,
   usage: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 14V2M2 14h12M5 11l3-4 2 2 3-5"/></svg>,
   quality: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 14V8M7 14V4M11 14v-4"/><path d="M2 14h12"/></svg>,
+  audit: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"><path d="M8 1.5l5.5 2.2v3.6c0 3.3-2.3 5.6-5.5 6.7-3.2-1.1-5.5-3.4-5.5-6.7V3.7z"/><path d="M5.8 8l1.6 1.6L10.5 6.3"/></svg>,
   docs: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 2h7l3 3v9H3z"/><path d="M6 7h5M6 9.5h5M6 12h3"/></svg>,
   guidance: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 2h7l3 3v9H3z"/><path d="M6 6.5h4M6 9h4"/><path d="M11.5 12.2l1 1 2-2.2"/></svg>,
   plus: <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 1v10M1 6h10"/></svg>,
@@ -189,6 +191,7 @@ export default function Sidebar({
       items: [
         { page: "usage", label: "Usage & Cost", icon: I.usage, title: "LLM usage and cost telemetry", requires: "admin" },
         { page: "quality", label: "Retrieval Quality", icon: I.quality, title: "Feedback and corrections", requires: "admin" },
+        { page: "mcpaudit", label: "MCP Audit", icon: I.audit, title: "Centralized MCP tool-call audit log (who called which read-only tool, when)", requires: "admin" },
       ],
     },
   ];

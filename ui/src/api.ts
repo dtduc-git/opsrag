@@ -907,6 +907,77 @@ export async function revokeMcpToken(id: string): Promise<void> {
   }
 }
 
+// ── Centralized-MCP audit log (admin-only) ──────────────────────────────
+// Read-only view over `opsrag_mcp_audit`: who (user + token) called which
+// read-only tool, when, and the result. Args are never stored literally —
+// only `args_hash` (sha256). Both endpoints require the `admin` scope.
+
+export interface McpAuditRow {
+  occurred_at: string | null;
+  user_oid: string | null;
+  token_id: string | null;
+  tool_name: string;
+  args_hash: string | null;
+  latency_ms: number | null;
+  status: string;       // ok | denied | error
+  error: string | null;
+}
+
+export interface McpAuditList {
+  rows: McpAuditRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface McpAuditSummary {
+  total_calls: number;
+  error_count: number;
+  denied_count: number;
+  distinct_users: number;
+  distinct_tools: number;
+  top_tools: { tool_name: string; calls: number }[];
+}
+
+export interface McpAuditFilters {
+  tool?: string;
+  user?: string;
+  status?: string;
+  sinceMinutes?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export async function fetchMcpAudit(f: McpAuditFilters = {}): Promise<McpAuditList> {
+  const q = new URLSearchParams();
+  if (f.tool) q.set("tool", f.tool);
+  if (f.user) q.set("user", f.user);
+  if (f.status) q.set("status", f.status);
+  if (f.sinceMinutes) q.set("since_minutes", String(f.sinceMinutes));
+  q.set("limit", String(f.limit ?? 100));
+  q.set("offset", String(f.offset ?? 0));
+  const r = await fetch(`${BASE}/mcp/audit?${q.toString()}`);
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 403) {
+      return { rows: [], total: 0, limit: f.limit ?? 100, offset: f.offset ?? 0 };
+    }
+    throw new Error(`mcp audit failed: ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function fetchMcpAuditSummary(sinceMinutes?: number): Promise<McpAuditSummary> {
+  const q = sinceMinutes ? `?since_minutes=${sinceMinutes}` : "";
+  const r = await fetch(`${BASE}/mcp/audit/summary${q}`);
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 403) {
+      return { total_calls: 0, error_count: 0, denied_count: 0, distinct_users: 0, distinct_tools: 0, top_tools: [] };
+    }
+    throw new Error(`mcp audit summary failed: ${r.status}`);
+  }
+  return r.json();
+}
+
 
 // --- Admin: users & roles (RBAC) --------------------------------------
 // All admin-gated; apiFetch flips the app into login mode on a 401.
