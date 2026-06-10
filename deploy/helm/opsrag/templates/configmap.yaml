@@ -90,7 +90,10 @@ data:
       provider: {{ .Values.config.session.provider }}
       dsn_env: {{ .Values.config.session.dsnEnv }}
     observability:
-      provider: {{ .Values.config.observability.provider }}
+      # enabled -> phoenix tracing; disabled -> the no-op "console" provider
+      # (OpsRAG runs with no Phoenix). Same flag gates the bundled Phoenix
+      # deployment, so the config and the collector can never drift.
+      provider: {{ if .Values.config.observability.enabled }}phoenix{{ else }}console{{ end }}
       project_name: {{ .Values.config.observability.projectName }}
     mcp:
       {{- range $name, $cfg := .Values.mcp }}

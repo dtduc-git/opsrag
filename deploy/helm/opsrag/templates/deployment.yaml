@@ -46,6 +46,12 @@ spec:
               value: /etc/opsrag/config.yaml
             - name: OPSRAG_PORT
               value: {{ .Values.api.port | quote }}
+            {{- if .Values.config.observability.enabled }}
+            # LLM observability ON -> point the OTLP exporter at Phoenix
+            # (the operator's external collector if set, else the bundled one).
+            - name: PHOENIX_COLLECTOR_ENDPOINT
+              value: {{ .Values.config.observability.externalEndpoint | default (printf "http://%s-phoenix:%v" (include "opsrag.fullname" .) .Values.phoenix.port) | quote }}
+            {{- end }}
             {{- if .Values.indexJob.enabled }}
             # Indexing trigger: spawn an ephemeral Job (cloned from the
             # indexer CronJob) instead of indexing in-process, so these

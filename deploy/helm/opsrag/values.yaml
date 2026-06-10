@@ -72,6 +72,33 @@ ui:
       cpu: 250m
       memory: 256Mi
 
+# --- Phoenix (LLM observability collector + viewer) --------------------------
+# Bundled Arize Phoenix. Rendered ONLY when config.observability.enabled is
+# true AND config.observability.externalEndpoint is empty. Toggling
+# config.observability.enabled brings this up/down with no image rebuild; the
+# API's PHOENIX_COLLECTOR_ENDPOINT is wired to this Service automatically.
+phoenix:
+  image:
+    repository: arizephoenix/phoenix
+    tag: version-16.3.0
+    pullPolicy: IfNotPresent
+  port: 6006                 # OTLP HTTP collector + web UI
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  # Phoenix keeps traces in-memory by default (lost on restart). For durable
+  # trace history, enable a PVC mounted at /data.
+  persistence:
+    enabled: false
+    size: 2Gi
+    storageClass: ""
+
 # --- Indexing Job (ephemeral; replaces the always-on indexer) ----------------
 # Indexing runs as a run-to-completion Job, not a long-running pod. The CronJob
 # below is BOTH the scheduled full-reindex and the template the API clones for
@@ -185,8 +212,16 @@ config:
     provider: postgres
     dsnEnv: POSTGRES_DSN
   observability:
-    provider: console
+    # LLM observability (Phoenix tracing). false -> the no-op "console"
+    # provider; OpsRAG runs perfectly fine with NO Phoenix. Toggling this flag
+    # flips the API config provider (phoenix <-> console) AND brings the
+    # bundled Phoenix deployment (top-level `phoenix:` block) up/down -- no
+    # image rebuild required.
+    enabled: false
     projectName: opsrag
+    # Use your OWN Phoenix collector instead of the bundled one. When set, the
+    # bundled Phoenix deployment is NOT rendered and the API points here.
+    externalEndpoint: ""
   # --- Multi-environment registry (Settings.environments) --------------------
   # One OpsRAG instance can target N environments; each bundles how to reach
   # that env's kubernetes + prometheus + elasticsearch. The k8s / prometheus /
