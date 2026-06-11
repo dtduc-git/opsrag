@@ -102,11 +102,13 @@ class _FakeTextChannel:
         self._next_id = 5000
         self.sent: list[object] = []
 
-    async def send(self, content):  # noqa: ANN001
+    async def send(self, content=None, *, embed=None, view=None):  # noqa: ANN001
         self._next_id += 1
         msg = _FakeMessage(
-            mid=self._next_id, content="", author=_FakeAuthor(1), channel=self,
+            mid=self._next_id, content=content or "", author=_FakeAuthor(1), channel=self,
         )
+        msg.embed = embed
+        msg.view = view
         self.sent.append(msg)
         return msg
 
@@ -121,9 +123,11 @@ class _FakeThread:
         self._next_id = 8000
         self.sent: list[object] = []
 
-    async def send(self, content):  # noqa: ANN001
+    async def send(self, content=None, *, embed=None, view=None):  # noqa: ANN001
         self._next_id += 1
-        msg = _FakeMessage(mid=self._next_id, content="", author=_FakeAuthor(1), channel=self)
+        msg = _FakeMessage(mid=self._next_id, content=content or "", author=_FakeAuthor(1), channel=self)
+        msg.embed = embed
+        msg.view = view
         self.sent.append(msg)
         return msg
 
@@ -603,8 +607,8 @@ async def test_finalize_renders_embed_and_feedback_buttons(monkeypatch) -> None:
     field_values = [f["value"] for f in embed.fields]
     assert "https://example.com/rb" in field_values
     assert any("svc/api/handler.py" in v for v in field_values)
-    # Deep-link footer from the configured web UI base.
-    assert embed.footer and "opsrag.example.com" in embed.footer
+    # Footer is plain attribution -- no conversation deep-link (not shareable).
+    assert embed.footer == "OpsRAG"
 
     # The feedback View carries up:/down: custom_ids anchored on the inv id.
     view = edit["view"]
@@ -613,24 +617,51 @@ async def test_finalize_renders_embed_and_feedback_buttons(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalize_truncates_long_answer(monkeypatch) -> None:
+async def test_finalize_paginates_long_answer_no_truncation(monkeypatch) -> None:
+    _install_fake_discord(monkeypatch)
+    adapter = _adapter()
+    channel = _FakeTextChannel(222)
+    placeholder = _FakeMessage(
+        mid=900, content="🤔", author=_FakeAuthor(100), channel=channel,
+    )
+    handle = _DiscordHandle(message=placeholder)
+    long_answer = "\n".join(f"line {i} " + "y" * 200 for i in range(120))  # >> 4096
+    result = AgentResult(
+        answer=long_answer, sources=[], diagram_present=False,
+        session_id=None, investigation_id=None,
+    )
+    await adapter.finalize(handle, result)
+    # First chunk edits the placeholder; the rest go out as follow-up embeds.
+    first = placeholder.edits[-1]["embed"]
+    assert len(first.description) <= 4096
+    assert len(channel.sent) >= 1  # at least one follow-up message
+    descs = [first.description] + [m.embed.description for m in channel.sent]
+    assert all(len(d) <= 4096 for d in descs)
+    joined = "".join(descs)
+    assert "truncated" not in joined  # nothing clipped
+    assert "line 0 " in joined and "line 119 " in joined
+
+
+@pytest.mark.asyncio
+async def test_finalize_drops_diagram_json_block(monkeypatch) -> None:
     _install_fake_discord(monkeypatch)
     adapter = _adapter()
     placeholder = _FakeMessage(
         mid=900, content="🤔", author=_FakeAuthor(100), channel=_FakeTextChannel(222),
     )
     handle = _DiscordHandle(message=placeholder)
-    long_answer = "x" * 5000  # exceeds the 4096 embed description cap
     result = AgentResult(
-        answer=long_answer, sources=[], diagram_present=False,
+        answer='Arch:\n\n```diagram-json\n{"nodes":["a"]}\n```\n\nDone.',
+        sources=[], diagram_present=False,
         session_id=None, investigation_id=None,
     )
     await adapter.finalize(handle, result)
     embed = placeholder.edits[-1]["embed"]
-    assert len(embed.description) <= 4096
-    assert embed.description.endswith("…answer truncated")
-    # No investigation_id -> no feedback View attached.
-    assert "view" not in placeholder.edits[-1]
+    assert "diagram-json" not in embed.description
+    assert "nodes" not in embed.description
+    assert "Done." in embed.description
+    # A diagram callout field is still shown so the signal isn't lost.
+    assert any("Diagram available" in f["value"] for f in embed.fields)
 
 
 @pytest.mark.asyncio
@@ -676,15 +707,13 @@ async def test_connect_raises_without_token(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 def test_real_discord_embed_build() -> None:
     pytest.importorskip("discord")
-    # With the real SDK present, _build_embed must produce a real discord.Embed.
+    # With the real SDK present, _build_embed_chunk must produce a real Embed.
     import discord
 
-    from opsrag.channels.adapters.discord.adapter import _build_embed
+    from opsrag.channels.adapters.discord.adapter import _build_embed_chunk
 
-    embed = _build_embed(
-        AgentResult(answer="hi", sources=[{"title": "t", "url": "https://e"}],
-                    diagram_present=False, session_id="s", investigation_id="i"),
-        web_ui_base_url="https://opsrag.example.com",
+    embed = _build_embed_chunk(
+        "hi", sources=[{"title": "t", "url": "https://e"}], diagram_present=False,
     )
     assert isinstance(embed, discord.Embed)
     assert embed.description == "hi"

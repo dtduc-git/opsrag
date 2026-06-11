@@ -222,6 +222,7 @@ async def _h_knowledge_search(_unused, args: dict) -> Any:
     # Closes the divergence with the LangGraph path (which always reranks);
     # without this, tool-routed queries shipped raw bi-encoder order to the LLM.
     if rerank_on and results:
+        pre_rerank = results
         try:
             from opsrag.interfaces.vectorstore import SearchResult
             reranked = await _reranker.rerank(query, results, top_k=k)
@@ -230,9 +231,20 @@ async def _h_knowledge_search(_unused, args: dict) -> Any:
                              distance_metric="rerank")
                 for rr in reranked
             ]
+            # A reranker that returns an EMPTY list (no exception -- e.g. the
+            # Vertex :rank API returned no records on a transient/cold call)
+            # must NOT wipe out a good bi-encoder pool. Fall back to pre-rerank
+            # order so knowledge_search never returns zero hits when candidates
+            # existed (that left the agent ungrounded -> hallucinated answers).
+            if not results:
+                _log.warning(
+                    "rerank returned 0 of %d candidates -- using pre-rerank order",
+                    len(pre_rerank),
+                )
+                results = pre_rerank[:k]
         except Exception as exc:  # noqa: BLE001
             _log.warning("rerank failed (%s) -- using pre-rerank order", exc)
-            results = results[:k]
+            results = pre_rerank[:k]
     else:
         results = results[:k]
 

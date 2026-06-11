@@ -214,6 +214,18 @@ def _registry() -> dict[str, MCPTool]:
     return {t.name: t for t in _enabled_tools()}
 
 
+def _cartography_enabled() -> bool:
+    """True only if at least one ``cartography_*`` tool is actually bound.
+
+    The system prompts historically advertised a `cartography_*` infra-graph
+    family as the DEFAULT for "what/where/who" infra questions. When cartography
+    is removed/disabled, the model still planned `cartography_*` calls that
+    failed as unknown tools (wasted a round + risked fabricated output). Prompt
+    guidance that names cartography must be gated on this so the model is never
+    told about a tool it can't call."""
+    return any(t.name.startswith("cartography_") for t in _enabled_tools())
+
+
 def _tool_specs_for_llm() -> list[dict]:
     """MCP tools exposed to the LLM, plus rec #3's `update_plan` (a state-mutation
     tool, not an MCP call). The reasoner sees them all uniformly; `tool_caller_node`
@@ -1029,7 +1041,7 @@ def _build_reasoner_prompt(state: dict) -> str:
     # on something high-confidence. The reasoner then knows which tool
     # family to prioritise BEFORE reading the long system prompt.
     qc = state.get("query_category") or ""
-    if qc == "infra_graph":
+    if qc == "infra_graph" and _cartography_enabled():
         parts.append(
             "QUERY-INTENT HINT (from semantic classifier): "
             "**infrastructure_graph** -- this question is structurally about the "
@@ -1041,6 +1053,17 @@ def _build_reasoner_prompt(state: dict) -> str:
             "the graph doesn't model. See the 'INFRASTRUCTURE GRAPH' "
             "section + the few-shot examples below for the canonical "
             "tool sequence.\n"
+        )
+    elif qc == "infra_graph":
+        # Cartography not bound -> route infra-graph questions to the tools
+        # that ARE available instead of advertising the removed family.
+        parts.append(
+            "QUERY-INTENT HINT (from semantic classifier): "
+            "**infrastructure_graph** -- structural infra question. The "
+            "infra-graph (cartography) family is NOT available in this "
+            "deployment; answer from `knowledge_search` + `code_grep` / "
+            "`code_read_file` over the gitops/chart config, plus the live "
+            "`k8s_*` / `cloudflare_*` tools where applicable.\n"
         )
     elif qc == "live":
         parts.append(
@@ -1700,7 +1723,14 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                         "exec-shaped=%s; returned error in history",
                         name, args, _is_exec_like,
                     )
-                    executed_count += 1
+                    # Do NOT charge the per-turn tool budget for a tool that
+                    # doesn't exist: a no-op error round must not eat into the
+                    # agent's real drilling budget (MAX_TOOL_CALLS). This matters
+                    # when the prompt still advertises a removed/unbound tool
+                    # (e.g. cartography_*): the model "wastes" a call planning it,
+                    # gets this loud error, and should still have its full budget
+                    # to drill with real tools. Runaway is bounded by the loud
+                    # error + the per-turn wall-clock breaker, not by this count.
                     executed_now += 1
                     continue
                 try:

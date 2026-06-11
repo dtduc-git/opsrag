@@ -82,7 +82,6 @@ _REACTION_EMOJI: dict[ReactionKind, str] = {
 _EMBED_DESCRIPTION_MAX = 4096  # max chars in an embed ``description``
 _EMBED_FIELD_VALUE_MAX = 1024  # max chars in a single embed field value
 _MAX_SOURCE_FIELDS = 10        # cap source rows (embeds allow 25 fields total)
-_TRUNCATION_SUFFIX = "\n\n…answer truncated"
 
 
 @dataclass(frozen=True)
@@ -211,25 +210,37 @@ class DiscordAdapter(ChannelAdapter):
         await h.message.edit(content=text)
 
     async def finalize(self, handle: MessageHandle, result: AgentResult) -> None:
-        """Render the neutral result as an Embed + a feedback Button View.
+        """Render the neutral result as paginated Embed(s) + a feedback View.
 
-        The answer prose goes in the embed ``description`` (truncated to
-        Discord's 4096-char limit); each source becomes an embed field; the
-        👍/👎 controls are two ``discord.ui.Button``s on a ``discord.ui.View``
-        carrying ``custom_id`` ``up:<id>`` / ``down:<id>``. The plain-text
-        ``content`` is cleared so only the embed shows.
+        Machine-only ``diagram-json`` fences are dropped (replaced by a callout);
+        the answer is then paginated across ``<=4096``-char embed descriptions
+        instead of being truncated. The first chunk edits the placeholder; the
+        rest are sent as follow-up embeds in the same channel/thread. The source
+        fields, diagram callout, and the 👍/👎 feedback View are attached to the
+        FINAL chunk only.
         """
         h = _as_handle(handle)
-        embed = _build_embed(
-            result,
-            web_ui_base_url=self._web_ui_base_url,
-        )
+        body, had_diagram = _strip_diagram_blocks(result.answer or "")
+        chunks = _paginate_markdown(body, _EMBED_DESCRIPTION_MAX)
         view = _build_feedback_view(result.investigation_id)
-        # ``view`` is None when there's no investigation_id to anchor a vote.
-        kwargs: dict[str, Any] = {"content": None, "embed": embed}
-        if view is not None:
-            kwargs["view"] = view
-        await h.message.edit(**kwargs)
+        last = len(chunks) - 1
+        for i, chunk in enumerate(chunks):
+            is_last = i == last
+            embed = _build_embed_chunk(
+                chunk,
+                sources=result.sources if is_last else None,
+                diagram_present=(result.diagram_present or had_diagram) if is_last else False,
+            )
+            if i == 0:
+                kwargs: dict[str, Any] = {"content": None, "embed": embed}
+                if is_last and view is not None:
+                    kwargs["view"] = view
+                await h.message.edit(**kwargs)
+            else:
+                send_kwargs: dict[str, Any] = {"embed": embed}
+                if is_last and view is not None:
+                    send_kwargs["view"] = view
+                await h.message.channel.send(**send_kwargs)
 
     async def react(
         self, channel_id: str, message_id: str, kind: ReactionKind,
@@ -593,12 +604,61 @@ def _discord_user_to_current_user(msg: InboundMessage) -> CurrentUser:
 # Render (Embed + feedback View)
 # =====================================================================
 
-def _truncate(text: str, cap: int) -> str:
-    """Clip ``text`` to ``cap`` chars, appending a truncation marker if cut."""
+# Machine-only diagram fences (a spec for the web UI's renderer) -- dropped
+# from chat; a plain callout field is shown instead.
+_DIAGRAM_FENCE_RE = re.compile(
+    r"```[ \t]*(?:diagram-json|diagram|mermaid)\b.*?```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_diagram_blocks(md: str) -> tuple[str, bool]:
+    """Remove machine-only diagram fences; return ``(text, had_diagram)``."""
+    had = bool(_DIAGRAM_FENCE_RE.search(md or ""))
+    text = _DIAGRAM_FENCE_RE.sub("", md or "")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, had
+
+
+def _paginate_markdown(text: str, cap: int) -> list[str]:
+    """Split markdown into ``<=cap`` chunks, keeping ``` code fences balanced.
+
+    Discord renders markdown natively in an embed description, so we don't
+    convert it -- we only split. Splitting on line boundaries never cuts inline
+    markdown; a fenced ``` block that straddles a split is closed at the chunk
+    end and reopened at the next chunk start so each chunk renders correctly.
+    """
     if len(text) <= cap:
-        return text
-    head = text[: max(0, cap - len(_TRUNCATION_SUFFIX))]
-    return head.rstrip() + _TRUNCATION_SUFFIX
+        return [text] if text else [""]
+    chunks: list[str] = []
+    buf = ""
+    fence_open = False
+
+    def _flush(reopen: bool) -> None:
+        nonlocal buf, fence_open
+        if not buf:
+            return
+        chunks.append(buf + "\n```" if fence_open else buf)
+        if reopen and fence_open:
+            buf = "```"
+        else:
+            buf = ""
+            fence_open = False
+
+    for line in text.split("\n"):
+        reserve = 4 if fence_open else 0  # room for a closing '\n```'
+        addition = (1 + len(line)) if buf else len(line)
+        if buf and len(buf) + addition + reserve > cap:
+            _flush(reopen=True)
+        if not buf and len(line) > cap:
+            for i in range(0, len(line), cap):
+                chunks.append(line[i : i + cap])
+            continue
+        buf = line if not buf else f"{buf}\n{line}"
+        if line.count("```") % 2 == 1:
+            fence_open = not fence_open
+    _flush(reopen=False)
+    return chunks or [""]
 
 
 def _source_field(src: dict[str, Any]) -> tuple[str, str] | None:
@@ -618,53 +678,46 @@ def _source_field(src: dict[str, Any]) -> tuple[str, str] | None:
     return name[:256], value[:_EMBED_FIELD_VALUE_MAX]
 
 
-def _build_embed(result: AgentResult, *, web_ui_base_url: str = "") -> Any:
-    """Build a ``discord.Embed`` from the neutral result.
+def _build_embed_chunk(
+    description: str,
+    *,
+    sources: list[dict[str, Any]] | None = None,
+    diagram_present: bool = False,
+) -> Any:
+    """Build one ``discord.Embed`` for a paginated chunk.
 
-    The answer prose becomes the embed ``description`` (capped at Discord's
-    4096-char limit), each source becomes a field (capped at 10), a diagram
-    callout + a deep link footer are added when available. The ``discord`` SDK
-    is imported lazily here -- the render path is exercised in tests via a
-    duck-typed ``discord`` stub.
+    ``description`` is one ``<=4096``-char markdown chunk (Discord renders the
+    markdown natively). The diagram callout, source fields, and footer are only
+    attached on the final chunk (pass ``sources``/``diagram_present`` there;
+    leave them empty for earlier chunks). No web-UI deep-link is emitted:
+    channel conversations are oid-owned and not shareable, so a ``/#chat`` link
+    would 404 for the recipient. The ``discord`` SDK is imported lazily so the
+    render path can be exercised in tests via a duck-typed stub.
     """
     import discord  # lazy
 
-    description = _truncate(result.answer or "", _EMBED_DESCRIPTION_MAX)
-    embed = discord.Embed(description=description)
+    embed = discord.Embed(description=description or "")
 
-    if result.diagram_present:
+    if diagram_present:
         embed.add_field(
             name="Diagram",
-            value="Diagram available -- open in the OpsRAG UI for the full visual.",
+            value="Diagram available (rendered in the OpsRAG web UI only).",
             inline=False,
         )
 
-    for src in (result.sources or [])[:_MAX_SOURCE_FIELDS]:
+    for src in (sources or [])[:_MAX_SOURCE_FIELDS]:
         field = _source_field(src)
         if field is None:
             continue
         name, value = field
         embed.add_field(name=name, value=value, inline=False)
 
-    extra = len(result.sources or []) - _MAX_SOURCE_FIELDS
+    extra = len(sources or []) - _MAX_SOURCE_FIELDS
     if extra > 0:
         embed.add_field(name="More sources", value=f"+{extra} more", inline=False)
 
-    deep_link = _deep_link(web_ui_base_url, result.session_id)
-    footer = "OpsRAG"
-    if deep_link:
-        footer += f" · {deep_link}"
-    embed.set_footer(text=footer)
+    embed.set_footer(text="OpsRAG")
     return embed
-
-
-def _deep_link(web_ui_base_url: str, session_id: str | None) -> str | None:
-    base = (web_ui_base_url or "").rstrip("/")
-    if not base:
-        return None
-    if session_id:
-        return f"{base}/#chat/{session_id}"
-    return base
 
 
 def _build_feedback_view(investigation_id: str | None) -> Any:

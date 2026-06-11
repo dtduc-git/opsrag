@@ -46,6 +46,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,13 +63,9 @@ from opsrag.channels.types import (
 
 _log = logging.getLogger("opsrag.channels.adapters.telegram")
 
-# Telegram's hard per-message text cap. We render below this and, when the
-# rendered HTML would overflow, truncate the answer body and append a
-# "view in OpsRAG UI" link so nothing is silently lost.
+# Telegram's hard per-message text cap. Long answers are paginated across
+# multiple messages (see ``_paginate_html``) rather than truncated.
 _TELEGRAM_MAX_CHARS = 4096
-# Headroom under the cap so the sources block + footer + truncation marker
-# always fit after we clip the answer body.
-_RENDER_HEADROOM = 600
 # How many source bullets to render inline before collapsing to "+N more".
 _MAX_SOURCES = 10
 # Long-poll timeout (seconds) handed to getUpdates. Telegram holds the
@@ -82,11 +79,14 @@ class _TelegramHandle:
     """Opaque per-message handle: a ``(chat_id, message_id)`` pair.
 
     The core treats this purely as a token it hands back to ``edit`` /
-    ``finalize``; only this adapter inspects it.
+    ``finalize``; only this adapter inspects it. ``thread_id`` is carried so
+    paginated follow-up messages land in the same forum topic as the
+    placeholder (it is ``None`` for DMs and non-forum chats).
     """
 
     chat_id: str
     message_id: str
+    thread_id: str | None = None
 
 
 class TelegramAdapter(ChannelAdapter):
@@ -348,7 +348,9 @@ class TelegramAdapter(ChannelAdapter):
             payload["message_thread_id"] = _maybe_int(thread_id)
         result = await self._api("sendMessage", payload)
         message_id = _str_id((result or {}).get("message_id"))
-        return _TelegramHandle(chat_id=channel_id, message_id=message_id)
+        return _TelegramHandle(
+            chat_id=channel_id, message_id=message_id, thread_id=thread_id,
+        )
 
     async def edit(self, handle: MessageHandle, text: str) -> None:
         h = _as_handle(handle)
@@ -363,24 +365,43 @@ class TelegramAdapter(ChannelAdapter):
 
     async def finalize(self, handle: MessageHandle, result: AgentResult) -> None:
         h = _as_handle(handle)
-        text = render_answer_html(
+        # The full answer is paginated across as many messages as it takes --
+        # Telegram caps a single message at 4096 chars, so a long answer would
+        # otherwise be clipped. The first chunk edits the placeholder in place;
+        # the rest are sent as follow-up messages in the same chat/thread. The
+        # feedback keyboard is attached to the LAST chunk only.
+        messages = render_answer_messages(
             result.answer,
             result.sources,
             diagram_present=result.diagram_present,
-            web_ui_base_url=self._web_ui_base_url,
-            session_id=result.session_id,
         )
-        payload: dict[str, Any] = {
-            "chat_id": _maybe_int(h.chat_id),
-            "message_id": _maybe_int(h.message_id),
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
         keyboard = _feedback_keyboard(result.investigation_id)
-        if keyboard is not None:
-            payload["reply_markup"] = keyboard
-        await self._api("editMessageText", payload)
+        last = len(messages) - 1
+        for i, text in enumerate(messages):
+            markup = keyboard if i == last else None
+            if i == 0:
+                payload: dict[str, Any] = {
+                    "chat_id": _maybe_int(h.chat_id),
+                    "message_id": _maybe_int(h.message_id),
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                }
+                if markup is not None:
+                    payload["reply_markup"] = markup
+                await self._api("editMessageText", payload)
+            else:
+                payload = {
+                    "chat_id": _maybe_int(h.chat_id),
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                }
+                if h.thread_id:
+                    payload["message_thread_id"] = _maybe_int(h.thread_id)
+                if markup is not None:
+                    payload["reply_markup"] = markup
+                await self._api("sendMessage", payload)
 
     async def react(
         self, channel_id: str, message_id: str, kind: ReactionKind,
@@ -576,93 +597,216 @@ def _feedback_keyboard(investigation_id: str | None) -> dict[str, Any] | None:
     }
 
 
-def _deep_link(web_ui_base_url: str, session_id: str | None) -> str | None:
-    base = (web_ui_base_url or "").rstrip("/")
-    if not base:
-        return None
-    if session_id:
-        return f"{base}/#chat/{session_id}"
-    return base
+# ---------------------------------------------------------------------------
+# Markdown -> Telegram-HTML rendering
+# ---------------------------------------------------------------------------
+# The agent emits Markdown; Telegram's parse_mode=HTML supports only a small
+# tag allow-list (<b>/<i>/<s>/<code>/<pre>/<a>) and rejects raw < > &. We
+# convert the supported Markdown constructs to those tags and HTML-escape
+# everything else, so answers render as rich text instead of raw markup.
+
+# Fenced blocks whose content is machine-only (a diagram spec for the web UI's
+# renderer) -- dropped from chat; a plain callout is shown instead.
+_DIAGRAM_FENCE_RE = re.compile(
+    r"```[ \t]*(?:diagram-json|diagram|mermaid)\b.*?```",
+    re.DOTALL | re.IGNORECASE,
+)
+# Any remaining fenced code block -> <pre> (group 1 = body, lang line dropped).
+_CODE_FENCE_RE = re.compile(r"```[ \t]*[^\n`]*\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.*?)[ \t]*#*[ \t]*$")
+_BULLET_RE = re.compile(r"^([ \t]*)[-*+][ \t]+(.*)$")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)")
+_STRIKE_RE = re.compile(r"~~(.+?)~~")
+_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+
+_DIAGRAM_CALLOUT = "📊 <i>Diagram available (rendered in the web UI only).</i>"
 
 
-def render_answer_html(
+def _md_inline(text: str) -> str:
+    """Escape one line of prose and apply inline Markdown -> Telegram HTML.
+
+    ``text`` must NOT contain code spans (those are extracted to placeholders
+    upstream) so the inline rules never fire inside code. Escaping happens
+    first; the Markdown markers (``**``/``*``/``~~``/``[](...)``) carry no
+    ``<>&`` so they survive escaping and are then rewritten into real tags.
+    Underscore emphasis is intentionally unsupported (collides with snake_case
+    / dunder identifiers).
+    """
+    s = html.escape(text, quote=False)
+    s = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", s)
+    s = _STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", s)
+    s = _ITALIC_RE.sub(lambda m: f"<i>{m.group(1)}</i>", s)
+    s = _LINK_RE.sub(
+        lambda m: f'<a href="{m.group(2).replace(chr(34), "&quot;")}">{m.group(1)}</a>',
+        s,
+    )
+    return s
+
+
+def markdown_to_telegram_html(md: str) -> str:
+    """Convert the agent's Markdown answer to Telegram-safe HTML.
+
+    Supported: headings (-> bold; Telegram has none), ``**bold**``,
+    ``*italic*``, ``~~strike~~``, ``` `inline code` ```, fenced code (-> <pre>),
+    ``[text](url)`` links, and ``-/*/+`` bullets (-> ``•``). Machine-only
+    diagram fences (``diagram-json`` / ``mermaid``) are dropped.
+    """
+    if not md:
+        return ""
+    text = _DIAGRAM_FENCE_RE.sub("", md)
+
+    # Extract code (block, then inline) to placeholders so inline Markdown rules
+    # never fire inside code, and code content is escaped verbatim at the end.
+    blocks: list[str] = []
+
+    def _stash_block(m: re.Match[str]) -> str:
+        blocks.append(m.group(1))
+        return f"\x00B{len(blocks) - 1}\x00"
+
+    text = _CODE_FENCE_RE.sub(_stash_block, text)
+
+    spans: list[str] = []
+
+    def _stash_span(m: re.Match[str]) -> str:
+        spans.append(m.group(1))
+        return f"\x00C{len(spans) - 1}\x00"
+
+    text = _INLINE_CODE_RE.sub(_stash_span, text)
+
+    out: list[str] = []
+    for line in text.split("\n"):
+        h = _HEADING_RE.match(line)
+        if h:
+            out.append(f"<b>{_md_inline(h.group(1))}</b>")
+            continue
+        b = _BULLET_RE.match(line)
+        if b:
+            out.append(f"{b.group(1)}• {_md_inline(b.group(2))}")
+            continue
+        out.append(_md_inline(line))
+    text = "\n".join(out)
+
+    for i, code in enumerate(spans):
+        text = text.replace(
+            f"\x00C{i}\x00", f"<code>{html.escape(code, quote=False)}</code>"
+        )
+    for i, code in enumerate(blocks):
+        text = text.replace(
+            f"\x00B{i}\x00", f"<pre>{html.escape(code.strip(chr(10)), quote=False)}</pre>"
+        )
+
+    # Collapse the blank-line runs left where diagram fences were dropped.
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def render_answer_messages(
     answer: str,
     sources: list[dict[str, Any]],
     *,
     diagram_present: bool = False,
-    web_ui_base_url: str = "",
-    session_id: str | None = None,
     max_chars: int = _TELEGRAM_MAX_CHARS,
-) -> str:
-    """Render the agent's answer + sources + footer as Telegram HTML.
+) -> list[str]:
+    """Render the FULL answer as a list of Telegram-HTML messages (no truncation).
 
-    Telegram's ``parse_mode=HTML`` supports a small allow-list of tags and
-    requires ``<``, ``>``, ``&`` in *text* to be escaped (otherwise the API
-    rejects the message). We escape every dynamic span and only emit the tags
-    Telegram understands (``<b>`` / ``<a href>``). The answer body is the
-    agent's markdown rendered to plain escaped text (Telegram has no native
-    heading/table support and we keep the renderer dependency-free).
-
-    The whole message is capped at ``max_chars``; when the answer body alone
-    would overflow, it is clipped and a "view full in OpsRAG UI" link is
-    appended (or a plain truncation marker when no web UI base URL is set), so
-    long answers degrade gracefully instead of being rejected by the API.
+    The answer Markdown is converted to Telegram HTML, then body + trailer
+    (diagram callout + sources + footer) is paginated across ``<=max_chars``
+    messages. No web-UI deep-link is emitted: channel conversations are
+    oid-owned and not shareable, so a ``/#chat`` link would 404 for the
+    recipient.
     """
-    deep_link = _deep_link(web_ui_base_url, session_id)
+    had_diagram = bool(_DIAGRAM_FENCE_RE.search(answer or ""))
+    body = markdown_to_telegram_html(answer or "")
 
-    # Build the trailer (sources + diagram callout + footer) first so we know
-    # how much room is left for the answer body under the char cap.
     trailer_parts: list[str] = []
-    if diagram_present:
-        diagram_line = "📊 <b>Diagram available</b> — open in the OpsRAG UI for the full visual."
-        if deep_link:
-            diagram_line += f' <a href="{html.escape(deep_link, quote=True)}">View in OpsRAG UI</a>'
-        trailer_parts.append(diagram_line)
-
+    if diagram_present or had_diagram:
+        trailer_parts.append(_DIAGRAM_CALLOUT)
     sources_block = _render_sources_html(sources or [])
     if sources_block:
         trailer_parts.append(sources_block)
-
-    trailer_parts.append(_footer_html(deep_link))
+    trailer_parts.append(_footer_html())
     trailer = "\n\n".join(trailer_parts)
 
-    # Reserve room for the trailer + a blank line before it.
-    body_budget = max(0, max_chars - len(trailer) - _RENDER_HEADROOM)
-    body = _answer_body_html(answer or "", body_budget, deep_link)
-
-    message = body
-    if trailer:
-        message = f"{message}\n\n{trailer}" if message else trailer
-
-    # Final safety clamp -- should not trigger given the budgeting above, but
-    # guarantees we never hand Telegram an over-length message.
-    if len(message) > max_chars:
-        message = message[: max_chars - 1].rstrip()
-    return message
+    full = f"{body}\n\n{trailer}" if body else trailer
+    return _paginate_html(full, max_chars)
 
 
-_TRUNCATION_PLAIN = "\n\n<i>...answer truncated.</i>"
-_TRUNCATION_WITH_LINK = '\n\n<i>...answer truncated — <a href="{url}">view full in OpsRAG UI</a></i>'
+def _paginate_html(text: str, max_chars: int) -> list[str]:
+    """Pack ``text`` into ``<=max_chars`` Telegram-HTML chunks.
 
-
-def _answer_body_html(answer: str, budget: int, deep_link: str | None) -> str:
-    """Escape the answer to Telegram-safe HTML and clip it to ``budget`` chars.
-
-    The agent emits markdown; Telegram HTML can't render most of it, so we ship
-    the prose as escaped plain text (readable, never malformed). When the
-    escaped body exceeds ``budget`` we clip it and append a truncation marker
-    that links to the full answer in the OpsRAG UI when a base URL is known.
+    Splits on line, then word, boundaries (inline tags never span a line, so a
+    split never cuts one). Multi-line ``<pre>`` blocks are handled specially: a
+    split inside a ``<pre>`` closes it at the chunk end and reopens it at the
+    start of the next chunk, so every chunk is independently valid HTML.
     """
-    escaped = html.escape(answer or "", quote=False)
-    if len(escaped) <= budget:
-        return escaped
-    suffix = (
-        _TRUNCATION_WITH_LINK.format(url=html.escape(deep_link, quote=True))
-        if deep_link
-        else _TRUNCATION_PLAIN
-    )
-    keep = max(0, budget - len(suffix))
-    return escaped[:keep].rstrip() + suffix
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    buf = ""
+    pre_open = False  # currently inside an unclosed <pre> in buf?
+    close = "</pre>"
+
+    def _flush(reopen: bool) -> None:
+        nonlocal buf, pre_open
+        if not buf:
+            return
+        chunks.append(buf + close if pre_open else buf)
+        if reopen and pre_open:
+            buf = "<pre>"
+        else:
+            buf = ""
+            pre_open = False
+
+    for line in text.split("\n"):
+        reserve = len(close) if pre_open else 0
+        addition = (1 + len(line)) if buf else len(line)
+        if buf and len(buf) + addition + reserve > max_chars:
+            _flush(reopen=True)
+        if not buf and len(line) > max_chars:
+            # A single line still overflows -> hard-wrap it (rare; in practice
+            # never inside a <pre>).
+            chunks.extend(_wrap_long_line(line, max_chars))
+            continue
+        buf = line if not buf else f"{buf}\n{line}"
+        opens, closes = line.count("<pre>"), line.count(close)
+        if opens > closes:
+            pre_open = True
+        elif closes > opens:
+            pre_open = False
+    _flush(reopen=False)
+    return chunks or [""]
+
+
+def _wrap_long_line(line: str, max_chars: int) -> list[str]:
+    """Hard-wrap a single over-long line on spaces (entity-safe last resort)."""
+    out: list[str] = []
+    cur = ""
+    for word in line.split(" "):
+        while len(word) > max_chars:
+            if cur:
+                out.append(cur)
+                cur = ""
+            cut = _entity_safe_cut(word, max_chars)
+            out.append(word[:cut])
+            word = word[cut:]
+        if cur and len(cur) + 1 + len(word) > max_chars:
+            out.append(cur)
+            cur = ""
+        cur = word if not cur else f"{cur} {word}"
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _entity_safe_cut(s: str, cap: int) -> int:
+    """Return a cut index ``<=cap`` that never lands inside an ``&...;`` entity."""
+    cut = min(len(s), cap)
+    amp = s.rfind("&", 0, cut)
+    if amp > 0 and ";" not in s[amp:cut]:
+        return amp
+    return cut
 
 
 def _render_sources_html(sources: list[dict[str, Any]]) -> str:
@@ -697,11 +841,12 @@ def _render_sources_html(sources: list[dict[str, Any]]) -> str:
     return f"<b>Sources</b> ({len(sources)})\n" + "\n".join(bullets)
 
 
-def _footer_html(deep_link: str | None) -> str:
-    """Render the attribution + timestamp footer (with an optional deep link)."""
+def _footer_html() -> str:
+    """Render the attribution + timestamp footer (no deep link).
+
+    Channel conversations are oid-owned and not shareable, so no ``/#chat``
+    deep-link is emitted (it would 404 for the recipient).
+    """
     from datetime import UTC, datetime
 
-    footer = "OpsRAG · " + datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-    if deep_link:
-        footer += f' · <a href="{html.escape(deep_link, quote=True)}">View in OpsRAG UI →</a>'
-    return f"<i>{footer}</i>"
+    return "<i>OpsRAG · " + datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC") + "</i>"

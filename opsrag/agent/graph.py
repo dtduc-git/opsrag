@@ -1299,6 +1299,18 @@ async def query_with_session_events(
         "generation_grounded": False,
         "tool_calls": [],
         "tool_results": [],
+        # Per-turn tool budget + scratch -- MUST reset, else the checkpointer
+        # leaks them across turns on the same thread_id. Omitting these caused
+        # `tool_call_count` to accumulate across a long-lived chat thread (e.g.
+        # a Telegram DM) until every new turn hit the loop cap (10) on its first
+        # tool call -> the agent could call NO tools -> ungrounded/hallucinated
+        # answers. Mirrors the non-streaming `query_with_session` reset above.
+        "tool_call_count": 0,
+        "tool_message_history": [],
+        "tool_path_active": False,
+        "tool_call_audit": [],
+        "model_route_decision": {},
+        "past_investigations": [],
         # Multi-turn context -- see query_with_session for rationale.
         "conversation_history": prior,
         # Classifier result piped into state so `entry_route` (the
