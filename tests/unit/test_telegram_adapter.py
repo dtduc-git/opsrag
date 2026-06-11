@@ -34,7 +34,8 @@ from opsrag.channels.adapters.telegram.adapter import (
     _feedback_keyboard,
     _strip_mention,
     _TelegramHandle,
-    render_answer_html,
+    markdown_to_telegram_html,
+    render_answer_messages,
 )
 from opsrag.channels.config import TelegramChannelConfig
 from opsrag.channels.types import (
@@ -325,21 +326,6 @@ async def test_finalize_renders_html_with_feedback_keyboard() -> None:
     assert "down:inv-9" in callbacks
 
 
-def test_render_truncates_long_answer_with_ui_link() -> None:
-    long_answer = "x" * 8000
-    out = render_answer_html(
-        long_answer,
-        sources=[],
-        web_ui_base_url="https://opsrag.example.com",
-        session_id="telegram-dm:555",
-    )
-    assert len(out) <= 4096
-    assert "truncated" in out
-    # The truncation marker links to the full answer in the UI.
-    assert "view full in OpsRAG UI" in out
-    assert "https://opsrag.example.com/#chat/telegram-dm:555" in out
-
-
 def test_render_no_investigation_means_no_keyboard() -> None:
     assert _feedback_keyboard(None) is None
     kb = _feedback_keyboard("inv-1")
@@ -348,17 +334,130 @@ def test_render_no_investigation_means_no_keyboard() -> None:
     assert kb["inline_keyboard"][0][1]["callback_data"] == "down:inv-1"
 
 
-def test_render_includes_diagram_callout_and_footer() -> None:
-    out = render_answer_html(
-        "the answer",
-        sources=[{"source": "repo/file.py"}],
-        diagram_present=True,
-        web_ui_base_url="https://opsrag.example.com",
-        session_id="s1",
+# ---------------------------------------------------------------------------
+# Markdown -> Telegram HTML conversion
+# ---------------------------------------------------------------------------
+def test_markdown_headings_become_bold() -> None:
+    out = markdown_to_telegram_html("# Title\n## Sub\n### Deep")
+    assert out == "<b>Title</b>\n<b>Sub</b>\n<b>Deep</b>"
+
+
+def test_markdown_inline_emphasis_and_code_and_links() -> None:
+    out = markdown_to_telegram_html(
+        "Use **bold**, *italic*, ~~old~~, `code`, and [docs](https://x.io/a)."
     )
-    assert "Diagram available" in out
-    assert "OpsRAG ·" in out  # footer attribution
-    assert "<code>repo/file.py</code>" in out  # path source rendered as code
+    assert "<b>bold</b>" in out
+    assert "<i>italic</i>" in out
+    assert "<s>old</s>" in out
+    assert "<code>code</code>" in out
+    assert '<a href="https://x.io/a">docs</a>' in out
+
+
+def test_markdown_bullets_become_dots() -> None:
+    out = markdown_to_telegram_html("- one\n* two\n+ three")
+    assert out == "• one\n• two\n• three"
+
+
+def test_markdown_underscores_are_not_emphasis() -> None:
+    # snake_case / dunder identifiers must survive untouched.
+    out = markdown_to_telegram_html("call app_module and __init__ now")
+    assert "app_module" in out
+    assert "__init__" in out
+    assert "<i>" not in out
+
+
+def test_markdown_escapes_html_specials() -> None:
+    out = markdown_to_telegram_html("compare a < b && c > d")
+    assert "&lt;" in out and "&gt;" in out and "&amp;" in out
+    assert "<b>" not in out  # raw markup never leaks
+
+
+def test_markdown_no_markup_inside_code() -> None:
+    # Markdown markers inside a code span/block must NOT be converted.
+    out = markdown_to_telegram_html("inline `a**b**c` then\n```\nx = a*b*c\n```")
+    assert "<code>a**b**c</code>" in out
+    assert "<pre>x = a*b*c</pre>" in out
+
+
+def test_markdown_drops_diagram_json_block() -> None:
+    md = 'before\n\n```diagram-json\n{"nodes": ["a","b"]}\n```\n\nafter'
+    out = markdown_to_telegram_html(md)
+    assert "diagram-json" not in out
+    assert "nodes" not in out
+    assert "before" in out and "after" in out
+
+
+def test_render_messages_diagram_callout_no_ui_link() -> None:
+    md = '# Arch\n\n```diagram-json\n{"x":1}\n```\n\ndone'
+    parts = render_answer_messages(md, sources=[])
+    joined = "".join(parts)
+    assert "Diagram available" in joined
+    assert "/#chat/" not in joined  # no broken conversation deep-link
+    assert "View in OpsRAG UI" not in joined
+    assert "OpsRAG ·" in joined  # plain footer attribution
+
+
+def test_render_messages_paginates_long_answer_without_truncating() -> None:
+    # An answer well over a single Telegram message (4096) is split, not clipped.
+    long_answer = "\n".join(f"line {i} " + "x" * 200 for i in range(120))
+    parts = render_answer_messages(
+        long_answer,
+        sources=[{"title": "runbook", "url": "https://example.com/rb"}],
+    )
+    assert len(parts) > 1  # actually paginated
+    assert all(len(p) <= 4096 for p in parts)  # every chunk fits the cap
+    # Nothing is dropped and no truncation marker is emitted.
+    assert "truncated" not in "".join(parts)
+    assert "line 0 " in parts[0]
+    assert "line 119 " in "".join(parts)
+    # The trailer (sources + footer) flows into the final chunk(s).
+    assert '<a href="https://example.com/rb">runbook</a>' in parts[-1]
+    assert "OpsRAG ·" in parts[-1]
+
+
+def test_render_messages_short_answer_is_single_chunk() -> None:
+    parts = render_answer_messages("just a short answer", sources=[])
+    assert len(parts) == 1
+
+
+def test_paginate_keeps_pre_blocks_valid_across_split() -> None:
+    # A <pre> code block larger than the cap must close+reopen across chunks so
+    # every chunk has balanced <pre>/</pre>.
+    code = "\n".join(f"row{i} = {i}" for i in range(600))
+    parts = render_answer_messages(f"```\n{code}\n```", sources=[])
+    assert len(parts) > 1
+    for p in parts:
+        assert p.count("<pre>") == p.count("</pre>")  # balanced in each chunk
+
+
+@pytest.mark.asyncio
+async def test_finalize_paginates_across_multiple_messages() -> None:
+    recorder = _BotAPIRecorder({"sendMessage": {"message_id": 2}})
+    adapter = _adapter_with_recorder(recorder)
+    handle = _TelegramHandle(chat_id="555", message_id="10", thread_id="77")
+    result = AgentResult(
+        answer="\n".join(f"para {i} " + "y" * 300 for i in range(60)),
+        sources=[{"title": "rb", "url": "https://example.com/rb"}],
+        diagram_present=False,
+        session_id="telegram-dm:555",
+        investigation_id="inv-9",
+    )
+    await adapter.finalize(handle, result)
+    methods = [m for m, _ in recorder.calls]
+    # First chunk edits the placeholder; the rest are follow-up sends.
+    assert methods[0] == "editMessageText"
+    assert methods.count("sendMessage") >= 1
+    # The placeholder edit carries NO keyboard; the final send does.
+    assert "reply_markup" not in recorder.calls[0][1]
+    last_send = recorder.last("sendMessage")
+    callbacks = [
+        btn["callback_data"]
+        for row in last_send["reply_markup"]["inline_keyboard"]
+        for btn in row
+    ]
+    assert "up:inv-9" in callbacks and "down:inv-9" in callbacks
+    # Follow-up messages stay in the same forum topic as the placeholder.
+    assert last_send["message_thread_id"] == 77
 
 
 # ---------------------------------------------------------------------------

@@ -100,6 +100,64 @@ services:
         condition: service_started
     restart: "no"
 
+  # -- opsrag channel bots (Telegram / Discord) -----------------------
+  # Outbound workers (Telegram long-poll, Discord gateway websocket) -> no
+  # published port and no ingress required. Guarded behind the `channels`
+  # profile so a plain `up` does NOT start them:
+  #     docker compose --profile channels up -d
+  # Each serves the same ASGI app, but OPSRAG_ROLE gates it to exactly ONE
+  # channel worker (one connection -> no duplicate replies). Enable the
+  # matching channel in config.yaml and set its token in .env first. They
+  # call the agent pipeline in-process, so they need the same backing
+  # services (Qdrant/Postgres) and provider creds the api uses.
+  opsrag-telegrambot:
+    profiles: ["channels"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ghcr.io/your-org/opsrag:latest
+    env_file:
+      - .env
+    environment:
+      OPSRAG_ROLE: telegrambot
+      OPSRAG_CONFIG: /app/config.yaml
+      QDRANT_URL: http://qdrant:6333
+      POSTGRES_DSN: postgresql://opsrag:opsrag@postgres:5432/opsrag
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-opsrag-password}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+  opsrag-discordbot:
+    profiles: ["channels"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ghcr.io/your-org/opsrag:latest
+    env_file:
+      - .env
+    environment:
+      OPSRAG_ROLE: discordbot
+      OPSRAG_CONFIG: /app/config.yaml
+      QDRANT_URL: http://qdrant:6333
+      POSTGRES_DSN: postgresql://opsrag:opsrag@postgres:5432/opsrag
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-opsrag-password}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
   # -- opsrag UI (React SPA served by nginx) --------------------------
   opsrag-ui:
     # Built from ui/ (nginx serves the static SPA on container port 3000 and
