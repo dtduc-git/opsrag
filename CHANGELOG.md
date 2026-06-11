@@ -64,6 +64,10 @@ the current net state of `master`.
   (`OPSRAG_ROLE=slackbot|telegrambot|discordbot`); Teams is a Bot Framework
   webhook on the `api` role. Configured under a unified `channels:` block (the
   legacy `slack_bot:` block is mirrored into `channels.slack` for back-compat).
+  Answers render as platform-native rich text (Telegram HTML, Discord embeds);
+  machine-only `diagram-json` blocks are replaced by a callout, and long answers
+  are paginated across multiple messages/embeds instead of being truncated. A
+  `channels`-profile compose target runs the worker bots locally.
   See [`docs/channels.md`](docs/channels.md).
 - **Multi-environment `environments:` registry**: one instance targeting N
   environments' Kubernetes / Prometheus / Elasticsearch, with a per-target
@@ -120,6 +124,20 @@ the current net state of `master`.
   BM25 identifier sub-tokenization, classifier edge cases, MMR, NaN guards,
   deleted-file index purge, dimension guards) plus CI lint/unit greening and a
   security CVE bump (aiohttp).
+- Per-turn agent state no longer leaks across turns on a `thread_id`: the
+  streaming entrypoint (`query_with_session_events`, used by every chat channel
+  **and** the web stream) didn't reset `tool_call_count` / tool scratch, so the
+  LangGraph checkpointer carried them forward — a busy chat thread (e.g. a
+  long-lived DM) hit the tool-loop cap (10) on its first tool call and answered
+  with no tools (ungrounded/hallucinated). It now resets them like the
+  non-streaming path; a drift-guard test keeps the two entrypoints in sync.
+- `knowledge_search` no longer returns zero hits when the reranker yields an
+  empty list (e.g. a transient Vertex `:rank` response) — it falls back to the
+  pre-rerank candidate pool.
+- The triage prompt no longer advertises the removed `cartography_*` tool
+  family, and unknown/unbound tool calls no longer consume the agent's
+  tool-call budget — eliminating a wasted call + a fabricated-citation risk on
+  infra questions.
 
 ### Removed
 
