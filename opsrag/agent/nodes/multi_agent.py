@@ -226,6 +226,34 @@ def _cartography_enabled() -> bool:
     return any(t.name.startswith("cartography_") for t in _enabled_tools())
 
 
+# Anchors delimiting the cartography-specific spans of the triage prompt. When
+# no cartography_* tool is bound we strip these so the model is never told to
+# "TAP CARTOGRAPHY FIRST" / shown the (all-cartography) few-shot examples for a
+# tool family it can't call. Anchored on stable section headers; the constant
+# itself is left untouched (no surgery on the big triple-quoted string).
+_CARTO_BLOCK_A_START = "- **INFRASTRUCTURE GRAPH -- `cartography_*`"
+_CARTO_BLOCK_A_END = "- **CLOUDFLARE LIVE QUERIES"
+_CARTO_TAIL_START = "- **PER-HOSTNAME DIAGRAM"
+
+
+def _triage_prompt() -> str:
+    """The triage system prompt, with cartography guidance stripped when the
+    cartography_* family isn't bound."""
+    if _cartography_enabled():
+        return _SYSTEM_TRIAGE
+    out = _SYSTEM_TRIAGE
+    a = out.find(_CARTO_BLOCK_A_START)
+    b = out.find(_CARTO_BLOCK_A_END)
+    if a != -1 and b != -1 and b > a:
+        out = out[:a] + out[b:]
+    # Block B (PER-HOSTNAME directive) + the all-cartography few-shot examples
+    # run contiguously to the end of the prompt -- drop them in one cut.
+    tail = out.find(_CARTO_TAIL_START)
+    if tail != -1:
+        out = out[:tail].rstrip() + "\n"
+    return out
+
+
 def _tool_specs_for_llm() -> list[dict]:
     """MCP tools exposed to the LLM, plus rec #3's `update_plan` (a state-mutation
     tool, not an MCP call). The reasoner sees them all uniformly; `tool_caller_node`
@@ -1454,7 +1482,7 @@ def triage_node(llm, observability: ObservabilityProvider, model_router=None):
                 f"references relative dates ('yesterday', 'last week', "
                 f"'in the last 24 hours'), compute them from THIS date "
                 f"-- never from your training cutoff.\n\n"
-                + _SYSTEM_TRIAGE
+                + _triage_prompt()
             )
             resp = await chosen_llm.generate_with_tools(
                 messages=llm_messages,
