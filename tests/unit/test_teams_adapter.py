@@ -426,3 +426,30 @@ async def test_card_activity_builds_attachment_when_sdk_present() -> None:
     att = activity.attachments[0]
     assert att.content_type == "application/vnd.microsoft.card.adaptive"
     assert att.content["type"] == "AdaptiveCard"
+
+
+# ---------------------------------------------------------------------------
+# Single-tenant support (Microsoft deprecated multi-tenant bot creation, 2025)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_connect_reads_single_tenant_app_settings(monkeypatch) -> None:
+    monkeypatch.setenv("OPSRAG_TEAMS_APP_ID", "appid-123")
+    monkeypatch.setenv("OPSRAG_TEAMS_APP_PASSWORD", "secret-val")
+    monkeypatch.setenv("OPSRAG_TEAMS_APP_TYPE", "SingleTenant")
+    monkeypatch.setenv("OPSRAG_TEAMS_APP_TENANT_ID", "tenant-abc")
+    adapter = TeamsAdapter(TeamsChannelConfig(enabled=True))
+    await adapter.connect(object())  # bare sink is enough; connect only stores it
+    assert adapter._app_type == "SingleTenant"  # noqa: SLF001
+    assert adapter._app_tenant_id == "tenant-abc"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_connect_defaults_to_multitenant(monkeypatch) -> None:
+    monkeypatch.delenv("OPSRAG_TEAMS_APP_TYPE", raising=False)
+    monkeypatch.delenv("OPSRAG_TEAMS_APP_TENANT_ID", raising=False)
+    monkeypatch.setenv("OPSRAG_TEAMS_APP_ID", "appid-123")
+    monkeypatch.setenv("OPSRAG_TEAMS_APP_PASSWORD", "secret-val")
+    adapter = TeamsAdapter(TeamsChannelConfig(enabled=True))
+    await adapter.connect(object())
+    assert adapter._app_type == "MultiTenant"  # noqa: SLF001 -- back-compat default
+    assert adapter._app_tenant_id == ""  # noqa: SLF001

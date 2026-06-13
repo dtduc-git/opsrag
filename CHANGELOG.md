@@ -138,6 +138,10 @@ the current net state of `master`.
   family, and unknown/unbound tool calls no longer consume the agent's
   tool-call budget — eliminating a wasted call + a fabricated-citation risk on
   infra questions.
+- Teams adapter supports **single-tenant** Azure Bots (`MicrosoftAppType` +
+  tenant id, via `OPSRAG_TEAMS_APP_TYPE` / `OPSRAG_TEAMS_APP_TENANT_ID`).
+  Microsoft deprecated multi-tenant bot creation (2025); the adapter previously
+  hardcoded `MultiTenant`. Defaults remain `MultiTenant` for existing bots.
 
 ### Removed
 

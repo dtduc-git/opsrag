@@ -105,6 +105,8 @@ class TeamsAdapter(ChannelAdapter):
         ).rstrip("/")
         self._app_id: str = ""
         self._app_password: str = ""
+        self._app_type: str = "MultiTenant"
+        self._app_tenant_id: str = ""
         self._cloud_adapter: Any = None
         self._sink: CoreSink | None = None
         # Per-conversation ConversationReference cache, keyed by the platform
@@ -135,9 +137,17 @@ class TeamsAdapter(ChannelAdapter):
         self._app_password = os.environ.get(
             getattr(self._config, "app_password_env", ""), "",
         ).strip()
+        self._app_type = (
+            os.environ.get(getattr(self._config, "app_type_env", ""), "").strip()
+            or "MultiTenant"
+        )
+        self._app_tenant_id = os.environ.get(
+            getattr(self._config, "app_tenant_id_env", ""), "",
+        ).strip()
         self._cloud_adapter = self._build_cloud_adapter()
         _log.info(
-            "teams adapter connected (webhook-driven; outbound=%s)",
+            "teams adapter connected (webhook-driven; app_type=%s; outbound=%s)",
+            self._app_type,
             "ready" if self._cloud_adapter is not None else "disabled",
         )
 
@@ -278,7 +288,10 @@ class TeamsAdapter(ChannelAdapter):
             )
             return None
         try:
-            settings = _BotSettings(self._app_id, self._app_password)
+            settings = _BotSettings(
+                self._app_id, self._app_password,
+                app_type=self._app_type, tenant_id=self._app_tenant_id,
+            )
             credentials = ConfigurationServiceClientCredentialFactory(settings)
             auth = ConfigurationBotFrameworkAuthentication(
                 settings, credentials_factory=credentials,
@@ -384,12 +397,18 @@ class _BotSettings:
     object. We satisfy that shape without pulling in a config framework.
     """
 
-    def __init__(self, app_id: str, app_password: str) -> None:
+    def __init__(
+        self,
+        app_id: str,
+        app_password: str,
+        app_type: str = "MultiTenant",
+        tenant_id: str = "",
+    ) -> None:
         self._values = {
             "MicrosoftAppId": app_id,
             "MicrosoftAppPassword": app_password,
-            "MicrosoftAppType": "MultiTenant",
-            "MicrosoftAppTenantId": "",
+            "MicrosoftAppType": app_type or "MultiTenant",
+            "MicrosoftAppTenantId": tenant_id or "",
         }
 
     def get(self, key: str, default: Any = None) -> Any:
