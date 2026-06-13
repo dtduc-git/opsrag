@@ -114,6 +114,13 @@ class TeamsChannelConfig(_BaseChannelConfig):
 
     app_id_env: str = "OPSRAG_TEAMS_APP_ID"
     app_password_env: str = "OPSRAG_TEAMS_APP_PASSWORD"
+    # Bot identity model. Microsoft deprecated *multi-tenant* bot creation
+    # (2025), so new Azure Bots are SingleTenant (or UserAssignedMSI). For a
+    # SingleTenant bot the SDK needs MicrosoftAppType=SingleTenant + the home
+    # tenant id, else outbound token acquisition + inbound validation fail.
+    # Defaults keep the legacy MultiTenant behaviour for existing deployments.
+    app_type_env: str = "OPSRAG_TEAMS_APP_TYPE"          # MultiTenant | SingleTenant | UserAssignedMSI
+    app_tenant_id_env: str = "OPSRAG_TEAMS_APP_TENANT_ID"  # required when app_type=SingleTenant
 
     @field_validator("allowlist")
     @classmethod
