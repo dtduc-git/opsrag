@@ -35,7 +35,7 @@ from fastapi.responses import JSONResponse, Response
 from opsrag.channels.adapters.teams.adapter import TeamsAdapter
 from opsrag.channels.dispatcher import ChannelDispatcher
 from opsrag.channels.permission import ChannelPermission
-from opsrag.channels.types import FeedbackEvent, InboundMessage
+from opsrag.channels.types import FeedbackEvent, ImageRef, InboundMessage
 
 _log = logging.getLogger("opsrag.channels.adapters.teams.router")
 
@@ -141,6 +141,12 @@ def activity_to_inbound(activity: dict[str, Any]) -> InboundMessage:
     raw_text = activity.get("text") or ""
     text = _AT_MENTION_RE.sub("", raw_text).strip()
 
+    image_refs = tuple(
+        ImageRef(url=att.get("contentUrl"), mime_type=att.get("contentType", "image/png"))
+        for att in (activity.get("attachments") or [])
+        if str(att.get("contentType", "") or "").startswith("image/") and att.get("contentUrl")
+    )
+
     return InboundMessage(
         channel_id=conversation.get("id") or "",
         user_id=from_block.get("id") or "",
@@ -149,6 +155,7 @@ def activity_to_inbound(activity: dict[str, Any]) -> InboundMessage:
         thread_id=None,  # Teams has no Slack-style thread_ts in the v1 model
         is_dm=is_dm,
         workspace=tenant or None,
+        images=image_refs,
         raw={
             "activity": activity,
             "conversation_reference": _conversation_reference(activity),
