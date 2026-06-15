@@ -1,7 +1,6 @@
 import base64
 
 import pytest
-from pydantic import ValidationError
 
 from opsrag.api.images import ImageValidationError, decode_images
 from opsrag.api.models import ImageInput, QueryRequest
