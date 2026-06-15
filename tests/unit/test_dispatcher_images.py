@@ -186,6 +186,46 @@ async def test_bare_image_gets_default_prompt(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# FR-009: vision.enabled=False is a kill-switch -- no image is fetched
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_disabled_vision_never_fetches(monkeypatch) -> None:
+    captured: dict = {}
+    _stub_final(monkeypatch, captured=captured)
+    adapter = _ImageAdapter()
+    disp = _make_dispatcher(adapter, vision=VisionConfig(enabled=False))
+
+    await disp.on_message(
+        _msg(text="look", images=(ImageRef(file_id="F", mime_type="image/png"),)),
+    )
+
+    assert adapter.fetched == []                # kill-switch: no download
+    assert captured["images"] == []            # nothing reaches the agent
+    assert captured["query"] == "look"         # text turn still runs
+
+
+# ---------------------------------------------------------------------------
+# FR-010: a disallowed mime type is dropped BEFORE fetch (web-path parity)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_disallowed_mime_dropped_before_fetch(monkeypatch) -> None:
+    captured: dict = {}
+    _stub_final(monkeypatch, captured=captured)
+    adapter = _ImageAdapter()
+    disp = _make_dispatcher(adapter)        # default allow-list (no svg/pdf)
+
+    refs = (
+        ImageRef(file_id="ok", mime_type="image/png"),
+        ImageRef(file_id="bad", mime_type="image/svg+xml"),
+    )
+    await disp.on_message(_msg(text="look", images=refs))
+
+    # The svg ref is never fetched; only the png reaches the agent.
+    assert [r.file_id for r in adapter.fetched] == ["ok"]
+    assert [p.name for p in captured["images"]] == ["ok"]
+
+
+# ---------------------------------------------------------------------------
 # vision_llm is threaded from providers
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
