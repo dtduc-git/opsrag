@@ -97,7 +97,7 @@ carrying your runtime credentials:
 ```yaml
 # my-values.yaml
 image:
-  repository: ghcr.io/OWNER/opsrag
+  repository: ghcr.io/dtduc-git/opsrag
   tag: "0.1.0"
 auth:
   issuer: https://your-idp.example.com   # OIDC discovery base URL

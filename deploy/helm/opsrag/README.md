@@ -17,7 +17,7 @@ A minimal `my-values.yaml`:
 
 ```yaml
 image:
-  repository: ghcr.io/OWNER/opsrag
+  repository: ghcr.io/dtduc-git/opsrag
   tag: "0.1.0"
 auth:
   issuer: https://your-idp.example.com
@@ -126,7 +126,7 @@ values in the overlay before applying.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `image.repository` / `image.tag` | `ghcr.io/OWNER/opsrag` / `0.1.0` | API image (required) |
+| `image.repository` / `image.tag` | `ghcr.io/dtduc-git/opsrag` / `0.1.0` | API image (required) |
 | `auth.issuer` / `auth.audience` | example values | OIDC settings (required) |
 | `api.replicaCount` | `2` | API replicas (ignored when `autoscaling.enabled`) |
 | `api.envFromSecret` | `""` | Existing Secret injected as env (LLM/MCP creds) |
