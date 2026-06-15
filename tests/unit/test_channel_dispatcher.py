@@ -224,7 +224,9 @@ async def test_dm_happy_path_no_reactions_or_thread_fetch(monkeypatch) -> None:
         {"type": "final", "answer": "hi", "sources": []},
         captured=captured,
     )
-    perm = ChannelPermission(allowed_channels=set(), per_user_daily_quota=5)
+    perm = ChannelPermission(
+        allowed_channels=set(), per_user_daily_quota=5, allowed_dm_users={"*"}
+    )
     disp = _make_dispatcher(adapter, permission=perm)
 
     await disp.on_message(_msg(channel_id="D1", is_dm=True, thread_id=None))

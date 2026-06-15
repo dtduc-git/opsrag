@@ -34,10 +34,16 @@ async def test_empty_allowlist_denies_all_public_channels() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dm_bypasses_allowlist() -> None:
+async def test_dm_gated_by_dm_allowlist() -> None:
+    # Deny-by-default: an empty dm_allowlist denies the DM silently; listing
+    # the user allows it. Inherited from ChannelPermission.
     perm = SlackBotPermission(allowed_channels=set())
     ok, reason = await perm.allow({"channel": "D123", "user": "U1"})
-    assert ok is True and reason is None
+    assert ok is False and reason is None
+
+    allowed = SlackBotPermission(allowed_channels=set(), allowed_dm_users={"U1"})
+    ok2, reason2 = await allowed.allow({"channel": "D123", "user": "U1"})
+    assert ok2 is True and reason2 is None
 
 
 @pytest.mark.asyncio

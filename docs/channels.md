@@ -35,8 +35,9 @@ open N connections and answer every message N times.
 
 All channels are configured under the unified `channels:` block (see
 `config-example.yaml`). Every channel shares `enabled`, `allowlist`,
-`per_user_daily_quota`, and `web_ui_base_url`; secrets are referenced **only** by
-the name of the env var that carries them (never inline a token).
+`dm_allowlist`, `per_user_daily_quota`, and `web_ui_base_url`; secrets are
+referenced **only** by the name of the env var that carries them (never inline
+a token).
 
 ```yaml
 channels:
@@ -44,7 +45,8 @@ channels:
     enabled: false
     bot_token_env: OPSRAG_SLACK_BOT_TOKEN
     app_token_env: OPSRAG_SLACK_APP_TOKEN
-    allowlist: []                # Slack channel ids (C...); DMs bypass
+    allowlist: []                # Slack channel ids (C...) the bot answers in
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     streaming_enabled: true
     web_ui_base_url: ""          # deep-link base for "View in OpsRAG UI"
@@ -52,12 +54,14 @@ channels:
     enabled: false
     bot_token_env: OPSRAG_TELEGRAM_BOT_TOKEN
     allowlist: []                # chat ids (may be negative for groups)
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     web_ui_base_url: ""
   discord:
     enabled: false
     bot_token_env: OPSRAG_DISCORD_BOT_TOKEN
     allowlist: []                # channel ids
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     web_ui_base_url: ""
   teams:
@@ -65,14 +69,22 @@ channels:
     app_id_env: OPSRAG_TEAMS_APP_ID
     app_password_env: OPSRAG_TEAMS_APP_PASSWORD
     allowlist: []                # conversation ids
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     web_ui_base_url: ""
 ```
 
-`allowlist` is the cost-control choke point: an empty allowlist denies every
-public channel/group (DMs are always allowed, since the sender is implicitly
-identified, but they still count against the per-user quota). Populate it with
-the channel/chat/conversation ids you explicitly want to answer in.
+`allowlist` is the cost-control choke point for **public channels/groups**: an
+empty allowlist denies every public channel/group. Populate it with the
+channel/chat/conversation ids you want the bot to answer in.
+
+`dm_allowlist` gates **direct messages** — which are NOT covered by `allowlist`.
+It is **deny-by-default**: an empty `dm_allowlist` means *no one* can DM the bot
+(otherwise any stranger who finds it could query internal data). List the
+platform user ids allowed to DM, or use `["*"]` to allow anyone. Unauthorized
+DMs are denied **silently** (logged server-side, no reply) so the bot's
+existence isn't confirmed to an unauthorized user. DMs still count against the
+per-user quota.
 
 ### Identity
 

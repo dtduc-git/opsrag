@@ -77,6 +77,7 @@ async def build_and_start(
     permission = ChannelPermission(
         allowed_channels=set(getattr(channel_cfg, "allowlist", []) or []),
         per_user_daily_quota=int(getattr(channel_cfg, "per_user_daily_quota", 200)),
+        allowed_dm_users=set(getattr(channel_cfg, "dm_allowlist", []) or []),
     )
 
     adapter = adapter_cls(channel_cfg)

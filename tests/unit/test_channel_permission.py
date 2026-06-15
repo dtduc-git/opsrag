@@ -60,11 +60,44 @@ async def test_empty_allowlist_denies_all_public_channels() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dm_bypasses_allowlist() -> None:
-    # DM => is_dm True; empty allowlist still allows it (quota only).
+async def test_dm_denied_by_default() -> None:
+    # DENY-BY-DEFAULT: an empty dm_allowlist denies every DM, silently
+    # (reason None -> no reply, so the bot's existence isn't confirmed).
     perm = ChannelPermission(allowed_channels=set())
-    ok, reason = await perm.allow(_msg(channel_id="D123", is_dm=True))
+    ok, reason = await perm.allow(_msg(channel_id="D123", user_id="U1", is_dm=True))
+    assert ok is False and reason is None
+
+
+@pytest.mark.asyncio
+async def test_dm_allowed_when_user_in_dm_allowlist() -> None:
+    perm = ChannelPermission(allowed_channels=set(), allowed_dm_users={"U1"})
+    ok, reason = await perm.allow(_msg(channel_id="D123", user_id="U1", is_dm=True))
     assert ok is True and reason is None
+
+
+@pytest.mark.asyncio
+async def test_dm_denied_silently_when_user_not_in_dm_allowlist() -> None:
+    perm = ChannelPermission(allowed_channels=set(), allowed_dm_users={"U2"})
+    ok, reason = await perm.allow(_msg(channel_id="D123", user_id="U1", is_dm=True))
+    assert ok is False and reason is None  # silent -- no info leak
+
+
+@pytest.mark.asyncio
+async def test_dm_wildcard_allows_anyone() -> None:
+    perm = ChannelPermission(allowed_channels=set(), allowed_dm_users={"*"})
+    ok, reason = await perm.allow(_msg(channel_id="D123", user_id="whoever", is_dm=True))
+    assert ok is True and reason is None
+
+
+@pytest.mark.asyncio
+async def test_dm_allowlist_independent_of_channel_allowlist() -> None:
+    # A DM-allowed user is NOT thereby allowed in a non-allowlisted channel,
+    # and a channel-allowlisted bot still denies unlisted DM users.
+    perm = ChannelPermission(allowed_channels={"C123"}, allowed_dm_users={"U1"})
+    ok_chan, _ = await perm.allow(_msg(channel_id="C999", user_id="U1", is_dm=False))
+    assert ok_chan is False  # channel gate unaffected by DM allowlist
+    ok_dm, _ = await perm.allow(_msg(channel_id="D123", user_id="U2", is_dm=True))
+    assert ok_dm is False    # DM gate unaffected by channel allowlist
 
 
 @pytest.mark.asyncio
@@ -107,8 +140,10 @@ async def test_quota_is_per_user_not_global() -> None:
 
 @pytest.mark.asyncio
 async def test_dm_still_quota_limited() -> None:
-    # DMs bypass the allowlist but NOT the quota.
-    perm = ChannelPermission(allowed_channels=set(), per_user_daily_quota=1)
+    # An allowed DM user is still subject to the per-user quota.
+    perm = ChannelPermission(
+        allowed_channels=set(), per_user_daily_quota=1, allowed_dm_users={"U1"}
+    )
     m = _msg(channel_id="D123", is_dm=True, user_id="U1")
     assert (await perm.allow(m))[0] is True
     perm.record_usage("U1")

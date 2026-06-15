@@ -5,10 +5,14 @@ typed over the neutral :class:`~opsrag.channels.types.InboundMessage`.
 The two enforcement layers are unchanged in spirit:
 
 1. **Channel allowlist** -- public/group channels must appear in the
-   allowlist (cost-control choke point; an empty allowlist denies all
-   public channels). DMs bypass the allowlist (``msg.is_dm``) but NOT the
-   quota -- matching Slack.
-2. **Per-user daily quota** -- an in-memory rolling 24h ring buffer of
+   ``allowed_channels`` allowlist (cost-control choke point; an empty
+   allowlist denies all public channels).
+2. **DM allowlist** -- DMs are NOT covered by the channel allowlist, so they
+   have their own ``allowed_dm_users`` gate. DENY-BY-DEFAULT: an empty DM
+   allowlist denies every DM (a stranger who finds the bot must not be able to
+   query internal data); list platform user ids to allow them, or ``"*"`` to
+   allow anyone. Unauthorized DMs are denied SILENTLY (logged, no reply).
+3. **Per-user daily quota** -- an in-memory rolling 24h ring buffer of
    request timestamps per user. ``record_usage`` is called by the
    dispatcher only after a *successful* agent run, so errors/denials
    never burn a user's quota.
@@ -49,6 +53,7 @@ class ChannelPermission:
         allowed_channels: set[str] | list[str],
         per_user_daily_quota: int = 200,
         *,
+        allowed_dm_users: set[str] | list[str] | None = None,
         deny_dm_message: str = (
             "Sorry, I'm not enabled in that channel. "
             "Ping #devops if you want me added."
@@ -56,6 +61,11 @@ class ChannelPermission:
     ) -> None:
         self._allowed_channels: set[str] = set(allowed_channels)
         self._quota = int(per_user_daily_quota)
+        # Per-user DM allowlist (platform user ids). DENY-BY-DEFAULT: an empty
+        # set means NO ONE may DM the bot -- otherwise any stranger who finds
+        # the bot could extract internal answers + burn budget. The literal
+        # "*" opts a deployment back into open DMs.
+        self._allowed_dm_users: set[str] = set(allowed_dm_users or ())
         self._deny_dm_message = deny_dm_message
         self._usage: dict[str, list[float]] = {}
         # Coarse lock -- keeps the rolling window consistent if an adapter
@@ -81,8 +91,20 @@ class ChannelPermission:
         channel = msg.channel_id or ""
         user_id = msg.user_id or ""
 
-        # DMs always allowed (no allowlist gate). Quota still applies.
-        if not msg.is_dm:
+        if msg.is_dm:
+            # DM access gate (deny-by-default). Only users in the DM allowlist
+            # (or "*") may DM the bot -- DMs aren't covered by the channel
+            # allowlist, so without this any stranger could query internal data.
+            # Silent deny (no reply) so the bot's existence isn't confirmed to
+            # an unauthorized user; the attempt is logged so an operator can
+            # see the id and add it to the allowlist.
+            if "*" not in self._allowed_dm_users and user_id not in self._allowed_dm_users:
+                _log.info(
+                    "permission: deny dm user=%s reason=not-in-dm-allowlist",
+                    user_id,
+                )
+                return False, None
+        else:
             if not channel:
                 # No channel id on a non-DM message -- fail closed silently.
                 _log.debug("permission: missing channel id on non-DM message")
