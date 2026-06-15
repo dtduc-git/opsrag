@@ -55,6 +55,7 @@ from opsrag.channels.base import ChannelAdapter, CoreSink
 from opsrag.channels.types import (
     AgentResult,
     FeedbackEvent,
+    ImageRef,
     InboundMessage,
     MessageHandle,
     ReactionKind,
@@ -305,6 +306,23 @@ class TelegramAdapter(ChannelAdapter):
         thread_raw = message.get("message_thread_id")
         thread_id = _str_id(thread_raw) if thread_raw is not None else None
 
+        image_refs: list[ImageRef] = []
+        photos = message.get("photo") or []
+        if photos:
+            largest = max(photos, key=lambda p: p.get("file_size", 0) or 0)
+            image_refs.append(ImageRef(
+                file_id=largest.get("file_id"),
+                mime_type="image/jpeg",  # Telegram photos are always JPEG
+                size=largest.get("file_size"),
+            ))
+        doc = message.get("document") or {}
+        if doc and str(doc.get("mime_type", "")).startswith("image/"):
+            image_refs.append(ImageRef(
+                file_id=doc.get("file_id"),
+                mime_type=doc.get("mime_type"),
+                size=doc.get("file_size"),
+            ))
+
         return InboundMessage(
             channel_id=chat_id,
             user_id=_str_id(sender.get("id")),
@@ -313,8 +331,30 @@ class TelegramAdapter(ChannelAdapter):
             thread_id=thread_id,
             is_dm=is_dm,
             workspace=chat_id,
+            images=tuple(image_refs),
             raw=dict(message),
         )
+
+    async def fetch_image(self, ref: ImageRef) -> bytes | None:
+        """Download a Telegram attachment: getFile(file_id) -> file download.
+
+        Telegram is a two-step fetch -- ``getFile`` resolves the ``file_id`` to a
+        ``file_path``, then the bytes are pulled from the file CDN under the bot
+        token. Returns ``None`` if there is no ``file_id`` to resolve.
+        """
+        if not ref.file_id:
+            return None
+        import httpx
+        base = f"https://api.telegram.org/bot{self._token}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            meta = await client.get(f"{base}/getFile", params={"file_id": ref.file_id})
+            meta.raise_for_status()
+            file_path = meta.json()["result"]["file_path"]
+            dl = await client.get(
+                f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+            )
+            dl.raise_for_status()
+            return dl.content
 
     def _group_trigger(
         self, message: dict[str, Any], raw_text: str,

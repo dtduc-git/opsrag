@@ -54,6 +54,7 @@ from opsrag.channels.base import ChannelAdapter, CoreSink
 from opsrag.channels.types import (
     AgentResult,
     FeedbackEvent,
+    ImageRef,
     InboundMessage,
     MessageHandle,
     ReactionKind,
@@ -236,6 +237,24 @@ class TeamsAdapter(ChannelAdapter):
         context", so this degrades cleanly.
         """
         return []
+
+    async def fetch_image(self, ref: ImageRef) -> bytes | None:
+        """Download a Teams attachment from its ``contentUrl``.
+
+        Teams hosts most inline images as public-ish ``contentUrl``s that need no
+        auth. There is no static bot access token on this adapter (the
+        ``CloudAdapter`` mints credentials internally and exposes no simple
+        token accessor), so we fetch anonymously. Teams-hosted content that
+        requires a bearer token (rare for the synthetic-bot v1) would 401 here
+        and yield ``None``; acquiring an AAD bot token is a future enhancement.
+        """
+        if not ref.url:
+            return None
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as cx:
+            resp = await cx.get(ref.url)
+            resp.raise_for_status()
+            return resp.content
 
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser:
         """Synthetic anonymous identity ``teams-bot:<tenant>:<user>``.
