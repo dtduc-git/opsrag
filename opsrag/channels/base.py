@@ -23,6 +23,7 @@ from opsrag.auth.pomerium import CurrentUser
 from opsrag.channels.types import (
     AgentResult,
     FeedbackEvent,
+    ImageRef,
     InboundMessage,
     MessageHandle,
     ReactionKind,
@@ -77,6 +78,11 @@ class ChannelAdapter(Protocol):
     async def fetch_thread(
         self, channel_id: str, thread_id: str, *, cap: int,
     ) -> list[ThreadMessage]: ...  # [] where the platform has no thread model
+
+    async def fetch_image(self, ref: ImageRef) -> bytes | None:
+        """Download the bytes for an inbound image reference, or None on
+        failure. Called only after the permission check passes (FR-007)."""
+        ...
 
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser: ...
 

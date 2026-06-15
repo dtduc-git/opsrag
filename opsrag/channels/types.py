@@ -31,6 +31,21 @@ class ReactionKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class ImageRef:
+    """A lightweight, pre-fetch reference to a platform image attachment.
+
+    Adapters emit these without downloading; the dispatcher resolves them to
+    bytes (via ``adapter.fetch_image``) only AFTER the permission check passes
+    (spec FR-007). At least one of ``file_id`` / ``url`` is set.
+    """
+
+    file_id: str | None = None
+    url: str | None = None
+    mime_type: str = "image/png"
+    size: int | None = None
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     """A normalised inbound user message, platform-stripped.
 
@@ -48,6 +63,7 @@ class InboundMessage:
     thread_id: str | None           # Slack thread_ts / Discord+Teams reply id; None => flat
     is_dm: bool
     workspace: str | None           # team/guild/tenant id; namespaces the synthetic oid
+    images: tuple[ImageRef, ...] = field(default_factory=tuple)
     raw: dict = field(default_factory=dict)
 
 
