@@ -26,6 +26,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
+from opsrag.llms.content import to_openai_content
 
 
 class LiteLLMLLM:
@@ -70,7 +71,10 @@ class LiteLLMLLM:
         full_messages: list[dict] = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
-        full_messages.extend(messages)
+        full_messages.extend(
+            {"role": m["role"], "content": to_openai_content(m.get("content", ""))}
+            for m in messages
+        )
 
         kwargs: dict[str, Any] = {
             "model": self._model,
