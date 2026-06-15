@@ -67,10 +67,15 @@ jobs:
             context: .
             file: Dockerfile
             image: ${{ github.repository }}
+            platforms: linux/amd64,linux/arm64
+          # UI is a static nginx-served SPA -> amd64 only. Its Node build step
+          # crashes QEMU under arm64 emulation ("uncaught target signal 4"),
+          # and arm64 coverage isn't worth it for static assets.
           - name: opsrag-ui
             context: ./ui
             file: ui/Dockerfile
             image: ${{ github.repository }}-ui
+            platforms: linux/amd64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -118,7 +123,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
