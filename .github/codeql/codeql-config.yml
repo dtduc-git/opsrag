@@ -1,0 +1,8 @@
+name: "opsrag CodeQL config"
+
+# Don't scan test code. The test suite is full of intentionally-crafted inputs
+# (fixtures, fake URLs/tokens, assertion strings) that trip security queries
+# like py/incomplete-url-substring-sanitization with no real-world relevance --
+# they're not shipped code. CodeQL still analyzes all of opsrag/.
+paths-ignore:
+  - tests

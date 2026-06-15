@@ -28,8 +28,10 @@ COPY public ./public
 RUN npm run build
 
 # Stage 2 — serve via nginx. SSE-compatible config (chunked off, proxy_buffering off
-# inside nginx.conf).
-FROM nginx:alpine
+# inside nginx.conf). Non-root base image (runs as uid 101): nginx listens on
+# 3000 (>1024) so it needs no root -- satisfies the "image user should not be
+# root" hardening check (the default nginx:alpine runs the master as root).
+FROM nginxinc/nginx-unprivileged:alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf

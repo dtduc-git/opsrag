@@ -444,9 +444,12 @@ def extract_routing(manifests: list, source_id: str) -> tuple[dict, dict]:
                               "gateway-api", source_id, ents)
             elif ("traefik" in api) and kind in ("IngressRoute", "IngressRouteTCP"):
                 _traefik_ingressroute(m, source_id, ents, rels)
-            elif "projectcontour.io" in api and kind == "HTTPProxy":
+            # startswith (not substring `in`): the apiVersion is "group/version"
+            # and these groups ARE the prefix, so this matches identically while
+            # avoiding CodeQL's incomplete-substring-sanitization false positive.
+            elif api.startswith("projectcontour.io") and kind == "HTTPProxy":
                 _contour_httpproxy(m, source_id, ents, rels)
-            elif "getambassador.io" in api and kind == "Mapping":
+            elif api.startswith("getambassador.io") and kind == "Mapping":
                 _ambassador_mapping(m, source_id, ents, rels)
             elif "apisix" in api and kind == "ApisixRoute":
                 _apisix_route(m, source_id, ents, rels)
