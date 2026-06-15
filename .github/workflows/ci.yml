@@ -326,6 +326,39 @@ jobs:
           retention-days: 1
 
   # ---------------------------------------------------------------------------
+  # UI container image: build (do NOT push) on every PR/push so ui/Dockerfile is
+  # validated continuously alongside the backend image. Single-arch amd64 +
+  # GHA cache; release.yml does the multi-arch push on tags.
+  # ---------------------------------------------------------------------------
+  ui-image-build:
+    name: ui-image-build (amd64, no push)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify ui/Dockerfile present
+        run: |
+          if [ ! -f ui/Dockerfile ]; then
+            echo "ui/Dockerfile not present; skipping UI image build." >&2
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build UI image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ui
+          file: ui/Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: opsrag-ui:ci
+          cache-from: type=gha,scope=opsrag-ui
+          cache-to: type=gha,mode=max,scope=opsrag-ui
+
+  # ---------------------------------------------------------------------------
   # Trivy vulnerability scan of the CI-built image. Two passes:
   #   1. Gate: fails the job on any CRITICAL finding (exit-code 1).
   #   2. Report: non-failing CRITICAL+HIGH SARIF, uploaded to code scanning.

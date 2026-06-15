@@ -22,7 +22,7 @@
 # -----------------------------------------------------------------------------
 
 image:
-  repository: ghcr.io/OWNER/opsrag   # override with --set image.repository=...
+  repository: ghcr.io/dtduc-git/opsrag   # override with --set image.repository=...
   tag: "0.1.0"
 
 # --- OIDC (your IdP) ---------------------------------------------------------

@@ -45,7 +45,7 @@ holding runtime credentials:
 
 ```yaml
 image:
-  repository: ghcr.io/OWNER/opsrag
+  repository: ghcr.io/dtduc-git/opsrag
   tag: "0.1.0"
 auth:
   issuer: https://your-idp.example.com
@@ -93,7 +93,7 @@ exact shape; `values.schema.json` is the authoritative validation contract.
 |---|---|---|
 | `nameOverride` | `""` | Override the chart name component used in resource names and labels. |
 | `fullnameOverride` | `""` | Override the full release name used as the base for all resource names. |
-| `image.repository` | `ghcr.io/OWNER/opsrag` | API (and Slack bot) container image repository. Required. |
+| `image.repository` | `ghcr.io/dtduc-git/opsrag` | API (and Slack bot) container image repository. Required. |
 | `image.tag` | `"0.1.0"` | API image tag. Required. |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy. One of `Always`, `IfNotPresent`, `Never`. |
 | `imagePullSecrets` | `[]` | List of `imagePullSecrets` references for pulling private images. |
@@ -131,7 +131,7 @@ Opt-out React UI workload (Deployment + Service). Enabled by default.
 |---|---|---|
 | `ui.enabled` | `true` | Deploy the UI Deployment and Service. |
 | `ui.replicaCount` | `1` | UI replica count. |
-| `ui.image.repository` | `ghcr.io/OWNER/opsrag-ui` | UI container image repository. |
+| `ui.image.repository` | `ghcr.io/dtduc-git/opsrag-ui` | UI container image repository. |
 | `ui.image.tag` | `"0.1.0"` | UI image tag. |
 | `ui.image.pullPolicy` | `IfNotPresent` | UI image pull policy. |
 | `ui.port` | `5173` | UI container port. |

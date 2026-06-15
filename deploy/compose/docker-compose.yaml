@@ -17,8 +17,9 @@
 #   phoenix     -> http://localhost:6006  Local trace viewer
 #
 # Everything that varies between deployments comes from .env or
-# config.yaml. The placeholder image refs below use "your-org" and
-# must be replaced with your own registry path before publishing.
+# config.yaml. Image refs point at the published GHCR images
+# (ghcr.io/dtduc-git/opsrag[-ui]); `build:` lets you rebuild locally, or
+# remove it / `docker compose pull` to use the released images.
 # ============================================================
 
 services:
@@ -29,7 +30,7 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: ghcr.io/your-org/opsrag:latest
+    image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
       - .env
     environment:
@@ -81,7 +82,7 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: ghcr.io/your-org/opsrag:latest
+    image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
       - .env
     environment:
@@ -115,7 +116,7 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: ghcr.io/your-org/opsrag:latest
+    image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
       - .env
     environment:
@@ -139,7 +140,7 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: ghcr.io/your-org/opsrag:latest
+    image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
       - .env
     environment:
@@ -166,7 +167,7 @@ services:
     build:
       context: ../../ui
       dockerfile: Dockerfile
-    image: ghcr.io/your-org/opsrag-ui:latest
+    image: ghcr.io/dtduc-git/opsrag-ui:latest
     ports:
       - "5173:3000"   # browse http://localhost:5173 (nginx listens on 3000)
     depends_on:

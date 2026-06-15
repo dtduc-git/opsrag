@@ -52,9 +52,25 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   build-and-push:
-    name: build + push container image
+    # Matrix builds BOTH images: the backend (root Dockerfile) and the UI
+    # (ui/Dockerfile). Each is multi-arch, signed (SBOM + provenance), pushed to
+    # its own GHCR repo, and Trivy-gated on CRITICAL. fail-fast=false so one
+    # image's failure doesn't cancel the other's diagnostics.
+    name: build + push ${{ matrix.name }}
     runs-on: ubuntu-24.04
     needs: resolve-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: opsrag
+            context: .
+            file: Dockerfile
+            image: ${{ github.repository }}
+          - name: opsrag-ui
+            context: ./ui
+            file: ui/Dockerfile
+            image: ${{ github.repository }}-ui
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,23 +90,25 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ matrix.image }}
           tags: |
             type=raw,value=${{ needs.resolve-tag.outputs.tag }}
             type=semver,pattern={{version}},value=${{ needs.resolve-tag.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.resolve-tag.outputs.tag }}
             type=raw,value=latest,enable=${{ !contains(needs.resolve-tag.outputs.tag, '-') }}
           labels: |
-            org.opencontainers.image.title=opsrag
+            org.opencontainers.image.title=${{ matrix.name }}
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.resolve-tag.outputs.tag }}
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Verify Dockerfile present
+        env:
+          DOCKERFILE: ${{ matrix.file }}
         run: |
-          if [ ! -f Dockerfile ]; then
-            echo "Dockerfile not yet ported (T036); aborting release." >&2
+          if [ ! -f "${DOCKERFILE}" ]; then
+            echo "${DOCKERFILE} not present; aborting release." >&2
             exit 1
           fi
 
@@ -98,16 +116,16 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
       # Scan the pushed image (by immutable digest) and gate the release on
       # CRITICAL vulnerabilities. Runs after the multi-arch build/SBOM/
@@ -116,7 +134,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.REGISTRY }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
           format: table
           severity: CRITICAL
           ignore-unfixed: true
@@ -166,3 +184,30 @@ jobs:
           for tgz in charts/*.tgz; do
             helm push "$tgz" "oci://${REGISTRY_HOST}/${REPO_OWNER}/charts"
           done
+
+  github-release:
+    name: create GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [resolve-tag, build-and-push]
+    permissions:
+      contents: write   # only this job writes a release; default stays read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          name: ${{ needs.resolve-tag.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.resolve-tag.outputs.tag, '-') }}
+          body: |
+            Multi-arch (amd64/arm64) container images:
+
+            ```
+            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.resolve-tag.outputs.version }}
+            docker pull ${{ env.REGISTRY }}/${{ github.repository }}-ui:${{ needs.resolve-tag.outputs.version }}
+            ```
+
+            Helm chart: `oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/opsrag` (version `${{ needs.resolve-tag.outputs.version }}`)
+
+            See [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/${{ needs.resolve-tag.outputs.tag }}/CHANGELOG.md).
