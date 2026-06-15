@@ -22,7 +22,6 @@ from typing import Any
 
 from opsrag.agent.graph import query_with_session_events
 from opsrag.channels.base import ChannelAdapter
-from opsrag.config import VisionConfig
 from opsrag.channels.feedback import record_feedback
 from opsrag.channels.permission import ChannelPermission
 from opsrag.channels.streaming import (
@@ -36,6 +35,7 @@ from opsrag.channels.types import (
     InboundMessage,
     ThreadMessage,
 )
+from opsrag.config import VisionConfig
 
 _log = logging.getLogger("opsrag.channels.dispatcher")
 
@@ -230,22 +230,31 @@ class ChannelDispatcher:
 
         # ---- 4b. Resolve inbound images (only now, post-permission) ------
         # FR-007: bytes are fetched ONLY after the permission gate passes.
-        # FR-009: enforce the count + size caps from VisionConfig.
+        # FR-009: enforce enabled + mime + count + size from VisionConfig --
+        # the SAME policy the web path applies in api.images.decode_images, so
+        # the kill-switch and mime allow-list behave identically on every surface.
         # FR-014: a failed fetch degrades to text-only -- never crashes.
         turn_images: list[Any] = []
-        if msg.images:
+        if msg.images and self._vision.enabled:
             from opsrag.llms.content import ImagePart
 
             max_images = int(self._vision.max_images)
             max_bytes = int(self._vision.max_bytes)
-            # Clamp the count BEFORE fetching so we never download more than
-            # the cap allows.
-            refs = msg.images[:max_images]
-            if len(msg.images) > max_images:
+            allowed_mime = set(self._vision.allowed_mime)
+            # Drop disallowed mime types BEFORE fetching (parity with the web
+            # path), then clamp the count so we never download past the cap.
+            refs = [r for r in msg.images if r.mime_type in allowed_mime]
+            if len(refs) < len(msg.images):
+                _log.info(
+                    "dropped %d channel image(s) with disallowed mime channel=%s",
+                    len(msg.images) - len(refs), channel,
+                )
+            if len(refs) > max_images:
                 _log.info(
                     "clamped channel images %d -> %d channel=%s",
-                    len(msg.images), max_images, channel,
+                    len(refs), max_images, channel,
                 )
+                refs = refs[:max_images]
             for ref in refs:
                 try:
                     raw = await self._adapter.fetch_image(ref)
