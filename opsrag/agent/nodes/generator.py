@@ -214,11 +214,9 @@ def generate_node(
         user_content = user_text
 
         if turn_images:
-            # Match on the model id alone -- the markers are provider-agnostic
-            # and `provider_name` isn't part of the LLMProvider protocol.
-            active_can_see = is_vision_capable(
-                getattr(active_llm, "provider_name", ""), active_llm.model_name
-            ) or is_vision_capable("", active_llm.model_name)
+            # Match on the model id alone -- the vision markers are
+            # provider-agnostic, so is_vision_capable ignores the provider arg.
+            active_can_see = is_vision_capable("", active_llm.model_name)
             if active_can_see:
                 user_content = build_user_content(user_text, turn_images)
             elif vision_llm is not None:
