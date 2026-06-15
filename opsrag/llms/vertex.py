@@ -27,6 +27,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
+from opsrag.llms.content import to_anthropic_content, to_gemini_parts
 
 _log = logging.getLogger("opsrag.llms.vertex")
 
@@ -312,9 +313,13 @@ class VertexAILLM:
         self, messages, system_prompt, temperature, max_tokens, start
     ) -> LLMResponse:
         client = self._get_client()
+        converted = [
+            {"role": m["role"], "content": to_anthropic_content(m.get("content", ""))}
+            for m in messages
+        ]
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": messages,
+            "messages": converted,
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
@@ -344,14 +349,19 @@ class VertexAILLM:
         self, messages, system_prompt, temperature, max_tokens, start,
         response_schema: dict | None = None,
     ) -> LLMResponse:
-        from vertexai.generative_models import GenerationConfig
+        from vertexai.generative_models import Content, GenerationConfig, Part
 
         client = self._get_client()
-        prompt_parts = []
-        if system_prompt:
-            prompt_parts.append(system_prompt)
+        sys_parts = [Part.from_text(system_prompt)] if system_prompt else []
+        contents = []
         for msg in messages:
-            prompt_parts.append(f"{msg['role']}: {msg['content']}")
+            role = "model" if msg.get("role") == "assistant" else "user"
+            parts = to_gemini_parts(msg.get("content", ""))
+            contents.append(Content(role=role, parts=parts))
+        # Prepend the system prompt to the first user turn's parts (Gemini has
+        # no separate system role on this SDK path).
+        if sys_parts and contents:
+            contents[0] = Content(role=contents[0].role, parts=sys_parts + contents[0].parts)
 
         # T1.1: when response_schema is provided, force structured JSON
         # output. This makes Gemini's thinking phase a separate budget
@@ -371,7 +381,7 @@ class VertexAILLM:
         # (contextual chunking issues many concurrent calls).
         resp = await asyncio.to_thread(
             client.generate_content,
-            "\n\n".join(prompt_parts),
+            contents,
             generation_config=config,
         )
         latency_ms = (time.perf_counter() - start) * 1000
