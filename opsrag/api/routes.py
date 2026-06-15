@@ -597,6 +597,18 @@ async def query(
     source_url_bases = SourceUrlBases.from_app_config(cfg) if cfg else None
     semantic_router = getattr(request.app.state, "semantic_router", None)
 
+    # Vision: decode + validate any attached images against VisionConfig.
+    # Reject the WHOLE turn on the first invalid image (spec FR-013). Falls
+    # back to VisionConfig defaults when no config is on app.state.
+    from opsrag.api.images import ImageValidationError, decode_images
+    from opsrag.config import VisionConfig
+
+    vision_cfg = cfg.vision if cfg is not None else VisionConfig()
+    try:
+        turn_images = decode_images(req.images, vision_cfg)
+    except ImageValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # Authorization (IDOR): continuing an EXISTING thread requires owning it.
     # /query is a write+read path -- query_with_session(_events) loads the
     # thread's prior checkpoints (history) and appends to them -- so an
@@ -627,7 +639,7 @@ async def query(
             qa_cache = getattr(request.app.state, "qa_cache", None)
             investigation_cache = getattr(request.app.state, "investigation_cache", None)
             return StreamingResponse(
-                _stream_query(graph, req, providers, qa_cache, investigation_cache, source_url_bases, semantic_router, current_user.oid, current_user.email, current_user.name, owner_id),
+                _stream_query(graph, req, providers, qa_cache, investigation_cache, source_url_bases, semantic_router, current_user.oid, current_user.email, current_user.name, owner_id, turn_images),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -651,6 +663,8 @@ async def query(
                 semantic_router=semantic_router,
                 user_email=current_user.email,
                 user_name=current_user.name,
+                images=turn_images,
+                vision_llm=providers.vision_llm,
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"query failed: {exc}") from exc
@@ -926,7 +940,7 @@ def _extract_chart_components(tool_message_history: list[dict]) -> list[dict]:
     return components
 
 
-async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investigation_cache=None, source_url_bases: SourceUrlBases | None = None, semantic_router=None, user_oid: str | None = None, user_email: str | None = None, user_name: str | None = None, owner_id: str | None = None):
+async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investigation_cache=None, source_url_bases: SourceUrlBases | None = None, semantic_router=None, user_oid: str | None = None, user_email: str | None = None, user_name: str | None = None, owner_id: str | None = None, images=None):
     """SSE generator. Emits node-level progress events from
     LangGraph's `astream_events` plus chunked answer for progressive
     rendering. Event taxonomy::
@@ -970,6 +984,8 @@ async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investiga
             semantic_router=semantic_router,
             user_email=user_email,
             user_name=user_name,
+            images=images,
+            vision_llm=providers.vision_llm,
         ):
             kind = ev.get("type")
             if kind == "node_start":
