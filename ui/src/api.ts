@@ -561,6 +561,10 @@ export async function* streamQuery(
   query: string,
   userId: string,
   threadId?: string,
+  // Optional vision attachments. `data` is base64 (no `data:` prefix).
+  // Server enforces the limits (max 4, ~5 MB each, png/jpeg/gif/webp) and
+  // returns HTTP 400 with a `detail` message we surface below.
+  images?: { mime_type: string; data: string }[],
 ): AsyncGenerator<SSEEvent> {
   // Use apiFetch so a 401 flips the app into login mode BEFORE we start
   // reading the stream. apiFetch only inspects resp.status (never .json()),
@@ -570,9 +574,16 @@ export async function* streamQuery(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       query, user_id: userId, thread_id: threadId ?? null, stream: true,
+      images: images && images.length ? images : null,
     }),
   });
-  if (!resp.ok || !resp.body) throw new Error(`Query failed: ${resp.status}`);
+  if (!resp.ok || !resp.body) {
+    // Surface the server's validation message (e.g. too many / too-large /
+    // unsupported images → 400 { detail }) instead of a bare status code.
+    let detail = `Query failed: ${resp.status}`;
+    try { const j = await resp.json(); if (j?.detail) detail = String(j.detail); } catch { /* non-JSON / empty body */ }
+    throw new Error(detail);
+  }
 
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();

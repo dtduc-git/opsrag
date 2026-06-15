@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Sidebar, { type Page } from "./components/Sidebar";
 import ChatMessage, { type Message, type RichComponent } from "./components/ChatMessage";
-import ChatInput from "./components/ChatInput";
+import ChatInput, { type PendingImage } from "./components/ChatInput";
 import UsagePage from "./components/UsagePage";
 import MCPAuditPage from "./components/MCPAuditPage";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -341,11 +341,22 @@ export default function App({ me, reloadMe }: AppProps) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [channelMessages]);
 
-  const handleSend = async (query: string) => {
+  const handleSend = async (payload: { text: string; images: PendingImage[] }) => {
+    const query = payload.text;
+    const pendingImages = payload.images;
     // Stamp live turns with a timestamp so each message shows its time
     // (replayed/historical turns already carry `ts` from the backend).
     const nowIso = new Date().toISOString();
-    const userMsg: Message = { role: "user", content: query, ts: nowIso };
+    const userMsg: Message = {
+      role: "user",
+      content: query,
+      ts: nowIso,
+      // Optimistically render the user's attachments in the transcript.
+      // Client-only: the server is ephemeral, so these won't survive reload.
+      images: pendingImages.length
+        ? pendingImages.map((i) => ({ mime: i.mime, dataUrl: i.dataUrl }))
+        : undefined,
+    };
     const assistantMsg: Message = { role: "assistant", content: "", streaming: true, progress: [], ts: nowIso };
     setMessages((p) => [...p, userMsg, assistantMsg]);
     setLoading(true);
@@ -378,7 +389,9 @@ export default function App({ me, reloadMe }: AppProps) {
         });
       };
 
-      for await (const evt of streamQuery(query, USER_ID, activeThread ?? undefined)) {
+      // Map UI attachments → backend `{ mime_type, data }` (base64, no prefix).
+      const apiImages = pendingImages.map((i) => ({ mime_type: i.mime, data: i.b64 }));
+      for await (const evt of streamQuery(query, USER_ID, activeThread ?? undefined, apiImages)) {
         if (evt.event === "node_start") {
           const node = evt.data.node as string;
           const label = (evt.data.label as string) ?? node;
@@ -587,7 +600,7 @@ export default function App({ me, reloadMe }: AppProps) {
                           <button
                             key={p.text}
                             className={`suggestion ${p.tone ?? ""}`}
-                            onClick={() => handleSend(p.text)}
+                            onClick={() => handleSend({ text: p.text, images: [] })}
                           >
                             <div className="tag">{p.cat}</div>
                             <div className="text">{p.text}</div>
