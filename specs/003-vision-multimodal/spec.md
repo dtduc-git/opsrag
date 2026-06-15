@@ -26,6 +26,12 @@ new feature."
 - Q: What if the configured model isn't vision-capable when an image arrives? →
   A: **Auto-route to a vision model** — a configurable vision model is used for
   that turn; if none is configured, the image is dropped and the user is told.
+- Q: What vision model defaults? → A: **Provider-aware defaults** — on
+  AWS/Bedrock (and Anthropic-direct) default to `claude-sonnet-4-6`; on
+  GCP/Vertex default to `gemini-3-flash-preview`. Always overridable via
+  env/YAML.
+- Q: Image limits? → A: max **4 images/turn**, max **~5 MB/image**, mime =
+  **png, jpeg, gif, webp**.
 - Q: When a user sends an image with no caption/text? → A: **Auto-analyze** —
   treat a bare image as "Please analyze this image" and answer.
 
@@ -159,7 +165,9 @@ image; confirm the text question is still answered with a clear notice.
 - **FR-011**: Vision behavior MUST be configurable via environment and YAML
   (enable/disable, vision model id, vision provider, max count, max bytes,
   allowed mime types) with no rebuild required, consistent with the project's
-  model-selection flexibility.
+  model-selection flexibility. The vision model default MUST be provider-aware:
+  Bedrock/Anthropic → `claude-sonnet-4-6`; Vertex → `gemini-3-flash-preview`;
+  with an explicit `vision.model` override taking precedence.
 - **FR-012**: Vision token/cost usage MUST be captured by the existing per-user
   usage telemetry, the same as text turns.
 - **FR-013**: When some attached images are invalid (oversized / wrong type),
@@ -176,8 +184,9 @@ image; confirm the text question is still answered with a clear notice.
 - **ImageRef** — a lightweight, pre-fetch reference produced by a channel
   adapter: platform, file id / url, mime hint, size hint. Resolved to an
   `ImagePart` by the dispatcher after the permission check.
-- **VisionConfig** — configuration: `enabled`, `model`, `provider`,
-  `max_images`, `max_bytes`, `allowed_mime`. Env/YAML overridable.
+- **VisionConfig** — configuration: `enabled`, `model` (provider-aware default),
+  `provider`, `max_images` (default 4), `max_bytes` (default ~5 MB),
+  `allowed_mime` (default png/jpeg/gif/webp). Env/YAML overridable.
 - **Vision capability map** — a function `is_vision_capable(provider, model)`
   over known model-id patterns, used for auto-routing.
 
