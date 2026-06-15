@@ -97,11 +97,32 @@ class Providers:
     # "Agent Guidance" page (custom instructions). None when sessions aren't on
     # Postgres (prompt injection then uses the config seed only).
     agent_settings: Any | None = None
+    # Provider-aware vision fallback LLM. Built once at startup only when the
+    # active `llm` model can't see (else None; the generator reuses `llm`).
+    # Defaults to None so existing constructions don't break.
+    vision_llm: LLMProvider | None = None
 
 
 def _env(name: str) -> str | None:
     v = os.environ.get(name)
     return v if v else None
+
+
+def resolve_vision_model(vision, llm_cfg) -> tuple[str, str] | None:
+    """Return (provider, model) for the vision fallback LLM, or None when no
+    separate vision client is needed (disabled, or the active model already
+    sees). Explicit vision.model/provider always wins (spec FR-011)."""
+    from opsrag.llms.content import default_vision_model, is_vision_capable
+
+    if not getattr(vision, "enabled", True):
+        return None
+    if vision.model:
+        return (vision.provider or llm_cfg.provider, vision.model)
+    if is_vision_capable(llm_cfg.provider, llm_cfg.model):
+        return None  # active model can already see; generator reuses it
+    provider = vision.provider or llm_cfg.provider
+    model = default_vision_model(provider)
+    return (provider, model) if model else None
 
 
 def build_providers(config: OpsRAGConfig) -> Providers:
@@ -283,6 +304,50 @@ def build_providers(config: OpsRAGConfig) -> Providers:
     # already-built client (prompt-cache + back-compat invariant). Built here
     # (before the entity extractor) so the cheap `extract` lane can use it.
     purpose_router = PurposeRouter(config, default_llm=llm)
+
+    # Vision fallback LLM (only when the active model can't see). Built once at
+    # startup so per-turn vision routing costs no client setup.
+    vision_llm: LLMProvider | None = None
+    _vision_target = resolve_vision_model(config.vision, config.llm)
+    if _vision_target is not None:
+        v_provider, v_model = _vision_target
+        if v_provider == "anthropic":
+            vision_llm = AnthropicLLM(
+                api_key=_env(config.llm.api_key_env),
+                model=v_model,
+                default_max_tokens=config.llm.max_tokens,
+            )
+        elif v_provider == "bedrock":
+            from opsrag.llms.bedrock import BedrockLLM
+            vision_llm = BedrockLLM(
+                model=v_model,
+                region=config.llm.aws_region,
+                profile=config.llm.aws_profile,
+                default_max_tokens=config.llm.max_tokens,
+            )
+        elif v_provider == "vertex":
+            from opsrag.llms.vertex import VertexAILLM
+            vision_llm = VertexAILLM(
+                model=v_model,
+                project=config.llm.project,
+                location=config.llm.location or "us-central1",
+                default_max_tokens=config.llm.max_tokens,
+            )
+        elif v_provider == "openai":
+            from opsrag.llms.openai import OpenAILLM
+            vision_llm = OpenAILLM(
+                api_key=_env(config.llm.api_key_env),
+                model=v_model,
+                default_max_tokens=config.llm.max_tokens,
+            )
+        elif v_provider == "litellm":
+            from opsrag.llms.litellm_provider import LiteLLMLLM
+            vision_llm = LiteLLMLLM(
+                model=v_model,
+                default_max_tokens=config.llm.max_tokens,
+                api_base=config.llm.api_base,
+                api_key_env=config.llm.api_key_env,
+            )
 
     # Knowledge-graph store. Provider-selected via
     # `config.knowledge_graph.provider` (FR-019). The null backend is the
@@ -617,4 +682,5 @@ def build_providers(config: OpsRAGConfig) -> Providers:
         light_graph=light_graph,
         index_store=index_store,
         agent_settings=agent_settings,
+        vision_llm=vision_llm,
     )
