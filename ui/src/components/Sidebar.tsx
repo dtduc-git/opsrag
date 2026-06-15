@@ -9,6 +9,7 @@ import type { Session, InvestigationHistoryItem, MeResponse, Scope } from "../ap
 export type Page =
   | "home"
   | "chat"
+  | "channels"
   | "investigate"
   | "runbooks"
   | "runbook-edit"
@@ -76,6 +77,7 @@ const I = {
   home: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"><path d="M2.5 7L8 2.5 13.5 7M4 6v7h8V6"/></svg>,
   newchat: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 8a5 5 0 0 1-5 5l-3 2v-2a5 5 0 1 1 8-5z"/></svg>,
   conversations: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2 4h12M2 8h12M2 12h8"/></svg>,
+  channels: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h6A1.5 1.5 0 0 1 11 5.5v3A1.5 1.5 0 0 1 9.5 10H6l-2.5 2v-2H3.5A1.5 1.5 0 0 1 2 8.5z"/><path d="M11 6.5h1.5A1.5 1.5 0 0 1 14 8v3A1.5 1.5 0 0 1 12.5 12.5H12v1.5L10 12.5"/></svg>,
   investigate: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 2.5a1.5 1.5 0 0 0-1.5 1.5c0 5 4 9 9 9A1.5 1.5 0 0 0 13 11.5l-2-1.3-1.5 1.3a8 8 0 0 1-3-3l1.3-1.5L6.5 4.5A1.5 1.5 0 0 0 5 3z"/></svg>,
   runbooks: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M4 1h6l3 3v11H4z"/><path d="M10 1v3h3"/></svg>,
   sources: <svg className="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><ellipse cx="8" cy="4" rx="6" ry="2"/><path d="M2 4v8c0 1.1 2.7 2 6 2s6-.9 6-2V4"/><path d="M2 8c0 1.1 2.7 2 6 2s6-.9 6-2"/></svg>,
@@ -162,6 +164,7 @@ export default function Sidebar({
       label: "Workspace",
       items: [
         { page: "chat", label: "Conversations", icon: I.conversations, title: "Your conversations", badge: sessions.length || undefined, requires: "chat" },
+        { page: "channels", label: "Channels", icon: I.channels, title: "Browse shared chat-channel conversations (read-only)", requires: "chat" },
         { page: "investigate", label: "Investigations", icon: I.investigate, title: "Agentic root-cause analysis", badge: investigations.length || undefined, requires: "investigate", featureEnabled: investigationEnabled },
         { page: "runbooks", label: "Runbooks", icon: I.runbooks, title: "Hand-authored SRE playbooks", alsoActiveOn: ["runbook-edit"] },
         { page: "connections", label: "MCP Tokens", icon: I.mcptokens, title: "Personal access tokens for MCP clients (Claude Code, Cursor)", requires: "mcp" },

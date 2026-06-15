@@ -1590,6 +1590,11 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
     from opsrag.api.routes_investigations import investigations_router
     app.include_router(investigations_router)
 
+    # Read-only browse of shared-channel (Slack/Discord/Teams/Telegram-group)
+    # conversations -- scope-gated, never exposes private DMs or web threads.
+    from opsrag.api.routes_channels import channels_router
+    app.include_router(channels_router)
+
     # Admin RBAC: list users + assign roles (login-mode user management).
     from opsrag.api.routes_admin_users import admin_users_router
     app.include_router(admin_users_router)

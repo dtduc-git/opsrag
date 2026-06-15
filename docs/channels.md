@@ -169,6 +169,26 @@ Provide the token env vars via your secret (`api.envFromSecret`); the same image
 serves every role. The deprecated `slackBot:` values alias still maps to
 `channels.slack` for one release.
 
+## Reading channel conversations in the web UI
+
+Conversations that happen in **shared channels** (Slack/Discord/Teams channels,
+Telegram groups) are browsable **read-only** in the web UI under the **Channels**
+page by any authenticated user (scope `chat`; in `open` mode, anyone). The list
+and each conversation's messages come from `GET /channels/conversations` and
+`GET /channels/conversations/{thread_id}/messages`.
+
+Only **shared-channel** conversations are exposed. A session's privacy is encoded
+in its `thread_id` prefix: shared-channel sessions are `<platform>-thread:…`,
+while private 1:1 DMs are `<platform>-dm:…`. The endpoints expose **only** the
+`-thread:` sessions and validate the prefix server-side, so private DMs and
+private web conversations physically cannot be reached through them (the messages
+endpoint returns 404 for any non-`-thread:` id).
+
+The surface is read-only — there is no reply, continue, or delete. Consistent
+with the synthetic identity model above, the only identity shown is the
+**platform** ("Slack channel", "Telegram group", …); the channel users
+themselves remain anonymous.
+
 ## Security notes
 
 - **Secrets** are referenced only by `*_env` var name — never written to config,

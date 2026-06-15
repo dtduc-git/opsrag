@@ -39,21 +39,21 @@ class PostgresSessionStore:
             raise RuntimeError("PostgresSessionStore.open() must be awaited first")
         return self._saver
 
-    async def list_sessions(
-        self, user_id: str, *, include_all: bool = False
-    ) -> list[dict]:
+    async def _collect_sessions(self, keep) -> list[dict]:
+        """Single newest-first checkpoint walk -> per-thread summaries.
+
+        ``keep(thread_id, owner) -> bool`` decides which threads to include. In
+        this single pass we derive, per thread:
+          - title:      the FIRST user question (oldest query -> the last
+                        one we overwrite, since we iterate newest-first).
+          - preview:    the MOST RECENT answer (first generation we see).
+          - updated_at: newest checkpoint ts (first ts seen).
+          - created_at: oldest checkpoint ts (last ts overwritten).
+          - turn_count: number of distinct user questions.
+        No extra DB round-trips -- the same walk that counts checkpoints.
+        """
         if self._saver is None:
             return []
-        # ``alist(None)`` yields every checkpoint across all threads,
-        # NEWEST-FIRST. In this single pass we also derive, per thread:
-        #   - title:      the FIRST user question (oldest query -> the last
-        #                 one we overwrite, since we iterate newest-first).
-        #   - preview:    the MOST RECENT answer (first generation we see).
-        #   - updated_at: newest checkpoint ts (first ts seen).
-        #   - created_at: oldest checkpoint ts (last ts overwritten).
-        #   - turn_count: number of distinct user questions.
-        # No extra DB round-trips -- it's the same walk that already counted
-        # checkpoints, so the list endpoint stays a single query.
         seen: dict[str, dict] = {}
         queries: dict[str, set[str]] = {}
         async for cp_tuple in self._saver.alist(None):
@@ -63,13 +63,11 @@ class PostgresSessionStore:
                 continue
             # Owner == the checkpoint's ``user_id``. Newer LangGraph keeps
             # user-defined configurable keys in METADATA, not the rehydrated
-            # config (see get_session_owner), so read both -- otherwise the
-            # per-user filter is a silent no-op and every thread leaks to
-            # every caller. Admins (include_all) skip the filter entirely.
+            # config (see get_session_owner), so read both.
             owner = cfg.get("user_id")
             if owner is None:
                 owner = (cp_tuple.metadata or {}).get("user_id")
-            if not include_all and owner != user_id:
+            if not keep(thread_id, owner):
                 continue
             entry = seen.setdefault(
                 thread_id,
@@ -105,6 +103,29 @@ class PostgresSessionStore:
             if entry["preview"] is None and entry["title"]:
                 entry["preview"] = entry["title"][:160]
         return list(seen.values())
+
+    async def list_sessions(
+        self, user_id: str, *, include_all: bool = False
+    ) -> list[dict]:
+        # Per-user filter (admins/include_all skip it). Reading both config and
+        # metadata for the owner avoids the per-user filter being a silent
+        # no-op that leaks every thread to every caller.
+        return await self._collect_sessions(
+            lambda _tid, owner: include_all or owner == user_id
+        )
+
+    async def list_sessions_by_prefixes(
+        self, prefixes: tuple[str, ...]
+    ) -> list[dict]:
+        """List sessions whose ``thread_id`` starts with any of ``prefixes``,
+        regardless of owner. Used to surface shared channel conversations
+        (``<platform>-thread:``) to any authorized reader -- the prefix is the
+        authoritative privacy signal (set by the channel dispatcher), so this
+        never returns private web threads or 1:1 DMs."""
+        pfx = tuple(prefixes)
+        if not pfx:
+            return []
+        return await self._collect_sessions(lambda tid, _owner: tid.startswith(pfx))
 
     async def delete_session(self, thread_id: str) -> bool:
         async with self._pool.connection() as conn:
