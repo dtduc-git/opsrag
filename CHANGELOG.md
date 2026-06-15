@@ -9,12 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
-## [0.1.0] - 2026-06-15
+## [0.1.1] - 2026-06-15
 
-First public open-source release. Multi-arch container images
-(`ghcr.io/dtduc-git/opsrag` + `ghcr.io/dtduc-git/opsrag-ui`) and the Helm chart
-(`oci://ghcr.io/dtduc-git/charts/opsrag`) are published by the `release`
-workflow on the `v0.1.0` tag.
+First **complete** public release. (The `v0.1.0` tag's release build failed on
+the UI image — a stale `ui/package-lock.json` plus an arm64/QEMU crash — so
+`v0.1.1` is the first fully-published tag.) Published by the `release` workflow:
+the multi-arch (amd64+arm64) backend image `ghcr.io/dtduc-git/opsrag`, the
+amd64 UI image `ghcr.io/dtduc-git/opsrag-ui`, and the Helm chart
+`oci://ghcr.io/dtduc-git/charts/opsrag`.
 
 ### Added
 
