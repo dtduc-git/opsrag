@@ -22,6 +22,7 @@ from typing import Any
 
 from opsrag.agent.graph import query_with_session_events
 from opsrag.channels.base import ChannelAdapter
+from opsrag.config import VisionConfig
 from opsrag.channels.feedback import record_feedback
 from opsrag.channels.permission import ChannelPermission
 from opsrag.channels.streaming import (
@@ -125,6 +126,7 @@ class ChannelDispatcher:
         investigation_cache: Any = None,
         semantic_router: Any = None,
         feedback_store: Any = None,
+        vision: VisionConfig | None = None,
     ) -> None:
         self._adapter = adapter
         self._graph = agent_graph
@@ -137,6 +139,7 @@ class ChannelDispatcher:
         self._investigation_cache = investigation_cache
         self._semantic_router = semantic_router
         self._feedback_store = feedback_store
+        self._vision = vision or VisionConfig()
 
     @property
     def channel_name(self) -> str:
@@ -170,9 +173,11 @@ class ChannelDispatcher:
 
         # ---- 2. Extract the user query (already mention-stripped) --------
         user_query = (msg.text or "").strip()
-        if not user_query:
+        if not user_query and not msg.images:
             # Nothing to answer -- politely no-op rather than calling the
-            # agent with an empty string.
+            # agent with an empty string. A bare image (no caption) is still
+            # answerable (FR-006), so only no-op when there is NEITHER text
+            # NOR images.
             _log.info("empty query channel=%s", channel)
             return
 
@@ -223,6 +228,53 @@ class ChannelDispatcher:
             f"{thread_context}\n\n{user_query}" if thread_context else user_query
         )
 
+        # ---- 4b. Resolve inbound images (only now, post-permission) ------
+        # FR-007: bytes are fetched ONLY after the permission gate passes.
+        # FR-009: enforce the count + size caps from VisionConfig.
+        # FR-014: a failed fetch degrades to text-only -- never crashes.
+        turn_images: list[Any] = []
+        if msg.images:
+            from opsrag.llms.content import ImagePart
+
+            max_images = int(self._vision.max_images)
+            max_bytes = int(self._vision.max_bytes)
+            # Clamp the count BEFORE fetching so we never download more than
+            # the cap allows.
+            refs = msg.images[:max_images]
+            if len(msg.images) > max_images:
+                _log.info(
+                    "clamped channel images %d -> %d channel=%s",
+                    len(msg.images), max_images, channel,
+                )
+            for ref in refs:
+                try:
+                    raw = await self._adapter.fetch_image(ref)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("image fetch failed channel=%s err=%s", channel, exc)
+                    raw = None
+                if not raw:
+                    continue
+                if len(raw) > max_bytes:
+                    _log.info(
+                        "skipping oversize channel image %d > %d channel=%s",
+                        len(raw), max_bytes, channel,
+                    )
+                    continue
+                turn_images.append(
+                    ImagePart(
+                        data=raw,
+                        mime_type=ref.mime_type,
+                        name=ref.file_id or "image",
+                    )
+                )
+
+        # A bare image (no caption) still gets analyzed (spec FR-006).
+        if turn_images and not user_query:
+            user_query = "Please analyze this image."
+            combined_query = (
+                f"{thread_context}\n\n{user_query}" if thread_context else user_query
+            )
+
         # ---- 5. Resolve identity ----------------------------------------
         try:
             current_user = await self._adapter.resolve_identity(msg)
@@ -253,6 +305,8 @@ class ChannelDispatcher:
                 semantic_router=self._semantic_router,
                 user_email=getattr(current_user, "email", None),
                 user_name=getattr(current_user, "name", None),
+                images=turn_images,
+                vision_llm=getattr(self._providers, "vision_llm", None),
             ):
                 if ev.get("type") == "final":
                     final = ev

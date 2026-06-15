@@ -196,6 +196,7 @@ def build_teams_router(
     providers: Any,
     caches: Any,
     teams_cfg: Any,
+    vision: Any = None,
 ) -> APIRouter:
     """Construct the Teams webhook router + its adapter/dispatcher.
 
@@ -229,6 +230,7 @@ def build_teams_router(
         investigation_cache=getattr(caches, "investigation_cache", None),
         semantic_router=getattr(caches, "semantic_router", None),
         feedback_store=getattr(caches, "feedback_store", None),
+        vision=vision,
     )
     app_id = os.environ.get(getattr(teams_cfg, "app_id_env", ""), "").strip()
 
