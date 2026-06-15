@@ -144,6 +144,7 @@ from opsrag.interfaces.embedder import EmbeddingProvider
 from opsrag.interfaces.graphstore import KnowledgeGraphStore
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.memory import MemoryStore
+from opsrag.llms.content import ImagePart
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.reranker import Reranker
 from opsrag.interfaces.vectorstore import VectorStore
@@ -747,6 +748,8 @@ async def query_with_session(
     semantic_router=None,
     user_email: str | None = None,
     user_name: str | None = None,
+    images: list[ImagePart] | None = None,
+    vision_llm=None,
 ) -> dict:
     if thread_id is None:
         thread_id = f"{user_id}_{uuid4().hex[:8]}"
@@ -873,12 +876,28 @@ async def query_with_session(
     # replayed by ANOTHER user can show the original author's name
     # instead of a generic "You". user_email/user_name are None for
     # legacy / pre-Pomerium threads -- UI falls back to "You".
+    # EPHEMERAL vision side-channel: image bytes + the vision-fallback LLM ride
+    # in the runnable `config` ONLY (spec FR-003). LangGraph persists `state`
+    # (the `initial` dict below) to the Postgres checkpointer per thread_id, so
+    # bytes there would survive the turn. `configurable` is also persisted for
+    # the identity keys, but `turn_images`/`vision_llm` are read by the
+    # generator at run time and never written into state -- so nothing durable
+    # ever holds the bytes. The persisted query (in `initial`) records only a
+    # text marker noting an image was attached.
     config = {"configurable": {
         "thread_id": thread_id,
         "user_id": user_id,
         "user_email": user_email,
         "user_name": user_name,
+        "turn_images": images or [],
+        "vision_llm": vision_llm,
     }}
+    # History/checkpoint must record THAT an image was attached (so follow-up
+    # turns + the session transcript make sense) but NEVER the bytes.
+    query_for_state = query
+    if images:
+        names = ", ".join(img.name or "image" for img in images)
+        query_for_state = f"{query} [attached image: {names}]".strip()
     # Per-turn state. CRITICAL: explicitly reset every retrieval/generation
     # field so prior-turn chunks don't leak through the LangGraph checkpointer.
     # Without these resets, rerank_node reads `merged_results` from the
@@ -886,7 +905,7 @@ async def query_with_session(
     # `retrieved_chunks` is checked -> the LLM answers using last turn's
     # context regardless of what we just retrieved.
     initial: dict = {
-        "query": query,
+        "query": query_for_state,
         "user_id": user_id,
         "thread_id": thread_id,
         # Loop budgets + per-turn scratch. ALL must reset every turn -- the
@@ -1128,6 +1147,8 @@ async def query_with_session_events(
     semantic_router=None,
     user_email: str | None = None,
     user_name: str | None = None,
+    images: list[ImagePart] | None = None,
+    vision_llm=None,
 ) -> AsyncIterator[dict]:
     """Yields progress events as the agent runs.
 
@@ -1254,14 +1275,24 @@ async def query_with_session_events(
     # replayed by ANOTHER user can show the original author's name
     # instead of a generic "You". user_email/user_name are None for
     # legacy / pre-Pomerium threads -- UI falls back to "You".
+    # EPHEMERAL vision side-channel (see query_with_session for the full
+    # rationale): image bytes + vision-fallback LLM ride in the runnable
+    # `config` only; never written into the checkpointed graph `state` below.
     config = {"configurable": {
         "thread_id": thread_id,
         "user_id": user_id,
         "user_email": user_email,
         "user_name": user_name,
+        "turn_images": images or [],
+        "vision_llm": vision_llm,
     }}
+    # History/checkpoint records THAT an image was attached, never the bytes.
+    query_for_state = query
+    if images:
+        names = ", ".join(img.name or "image" for img in images)
+        query_for_state = f"{query} [attached image: {names}]".strip()
     initial: dict = {
-        "query": query,
+        "query": query_for_state,
         "user_id": user_id,
         "thread_id": thread_id,
         # Per-turn budgets + scratch -- ALL reset (checkpointer leaks otherwise;
