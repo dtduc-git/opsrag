@@ -878,12 +878,17 @@ async def query_with_session(
     # legacy / pre-Pomerium threads -- UI falls back to "You".
     # EPHEMERAL vision side-channel: image bytes + the vision-fallback LLM ride
     # in the runnable `config` ONLY (spec FR-003). LangGraph persists `state`
-    # (the `initial` dict below) to the Postgres checkpointer per thread_id, so
-    # bytes there would survive the turn. `configurable` is also persisted for
-    # the identity keys, but `turn_images`/`vision_llm` are read by the
-    # generator at run time and never written into state -- so nothing durable
-    # ever holds the bytes. The persisted query (in `initial`) records only a
-    # text marker noting an image was attached.
+    # (the `initial` dict below) to the checkpointer per thread_id, so bytes
+    # there would survive the turn. `configurable` is only PARTLY persisted:
+    # LangGraph promotes a configurable value into the durable checkpoint
+    # metadata ONLY when it is a scalar (str/int/float/bool) -- see langgraph
+    # `_internal._config._exclude_as_metadata`. That's how the identity strings
+    # below (user_email/user_name) survive for cross-user replay. `turn_images`
+    # (a list[ImagePart]) and `vision_llm` (an object) are NON-scalar, so they
+    # are never promoted, never serialized, and never persisted -- the generator
+    # reads them from config at run time only. (Footgun: never put an image as a
+    # base64 STRING here; a scalar WOULD be persisted.) The persisted query
+    # (in `initial`) records only a text marker noting an image was attached.
     config = {"configurable": {
         "thread_id": thread_id,
         "user_id": user_id,
@@ -1270,14 +1275,17 @@ async def query_with_session_events(
             }
             return
 
-    # `configurable` is persisted alongside every checkpoint by langgraph
-    # postgres saver. We embed the author identity here so a session
-    # replayed by ANOTHER user can show the original author's name
-    # instead of a generic "You". user_email/user_name are None for
-    # legacy / pre-Pomerium threads -- UI falls back to "You".
+    # Scalar `configurable` values are promoted into the durable checkpoint
+    # metadata by langgraph (see `_exclude_as_metadata`). We embed the author
+    # identity here so a session replayed by ANOTHER user can show the original
+    # author's name instead of a generic "You". user_email/user_name are None
+    # for legacy / pre-Pomerium threads -- UI falls back to "You".
     # EPHEMERAL vision side-channel (see query_with_session for the full
     # rationale): image bytes + vision-fallback LLM ride in the runnable
-    # `config` only; never written into the checkpointed graph `state` below.
+    # `config` only. They are NON-scalar, so langgraph never promotes them to
+    # checkpoint metadata and never writes them to the graph `state` below --
+    # nothing durable holds the bytes. (Footgun: never pass an image as a
+    # base64 STRING via configurable; a scalar WOULD be persisted.)
     config = {"configurable": {
         "thread_id": thread_id,
         "user_id": user_id,
