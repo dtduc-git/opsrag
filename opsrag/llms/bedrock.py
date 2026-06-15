@@ -21,6 +21,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
+from opsrag.llms.content import to_bedrock_content
 
 # boto3 is an OPTIONAL dependency (the `bedrock` extra). Importing it lazily in
 # __init__ keeps this module -- and everything that imports it transitively, e.g.
@@ -73,7 +74,7 @@ class BedrockLLM:
         for msg in messages:
             converse_messages.append({
                 "role": msg["role"],
-                "content": [{"text": msg["content"]}],
+                "content": to_bedrock_content(msg.get("content", "")),
             })
 
         inf_cfg: dict[str, Any] = {
