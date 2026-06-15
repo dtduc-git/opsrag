@@ -251,7 +251,8 @@ channels:
     enabled: false
     bot_token_env: OPSRAG_SLACK_BOT_TOKEN
     app_token_env: OPSRAG_SLACK_APP_TOKEN
-    allowlist: []                # Slack channel ids (C...); DMs bypass
+    allowlist: []                # Slack channel ids (C...) the bot answers in
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     streaming_enabled: true
     web_ui_base_url: ""          # deep-link base for "View in OpsRAG UI"
@@ -259,12 +260,14 @@ channels:
     enabled: false
     bot_token_env: OPSRAG_TELEGRAM_BOT_TOKEN
     allowlist: []                # chat ids (may be negative for groups)
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     web_ui_base_url: ""
   discord:
     enabled: false
     bot_token_env: OPSRAG_DISCORD_BOT_TOKEN
     allowlist: []                # channel ids
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     web_ui_base_url: ""
   teams:
@@ -272,6 +275,7 @@ channels:
     app_id_env: OPSRAG_TEAMS_APP_ID
     app_password_env: OPSRAG_TEAMS_APP_PASSWORD
     allowlist: []                # conversation ids
+    dm_allowlist: []             # user ids allowed to DM (empty => no DMs; ["*"] => anyone)
     per_user_daily_quota: 200
     web_ui_base_url: ""
 

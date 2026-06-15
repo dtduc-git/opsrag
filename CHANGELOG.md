@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Chat-bot DMs are now deny-by-default.** Previously any user who found a bot
+  could DM it and query internal data (DMs bypassed the allowlist; only the
+  per-user quota applied). Each channel now has a `dm_allowlist` (platform user
+  ids): an empty list denies every DM, listed ids are allowed, and `["*"]`
+  re-opens DMs to anyone. Unauthorized DMs are denied **silently** (logged, no
+  reply, so the bot's existence isn't confirmed). Applies uniformly to
+  Slack/Telegram/Discord/Teams via `ChannelPermission`.
+
 ### Added
 
 - **Browse shared-channel conversations in the web UI** — a read-only

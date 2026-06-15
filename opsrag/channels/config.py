@@ -48,6 +48,10 @@ class _BaseChannelConfig(BaseModel):
 
     enabled: bool = False
     allowlist: list[str] = Field(default_factory=list)
+    # Per-user DM allowlist (platform user ids). DENY-BY-DEFAULT: empty => no
+    # one may DM the bot (DMs aren't covered by ``allowlist``). List ids to
+    # allow them, or ["*"] to allow anyone. Unauthorized DMs are denied silently.
+    dm_allowlist: list[str] = Field(default_factory=list)
     per_user_daily_quota: int = 200
     web_ui_base_url: str = ""
     # How many prior thread messages to pull for context (mentions in a
