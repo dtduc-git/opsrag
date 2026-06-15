@@ -81,7 +81,7 @@ jobs:
       - name: audit (json artefact)
         if: always()
         run: scripts/audit-vendor-neutrality.sh --json > audit-report.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: audit-report
@@ -319,7 +319,7 @@ jobs:
       - name: Export image tarball for the scan job
         run: docker save opsrag:ci -o /tmp/opsrag-ci-image.tar
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ci-image
           path: /tmp/opsrag-ci-image.tar
