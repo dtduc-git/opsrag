@@ -12,7 +12,7 @@ fullnameOverride: ""
 
 image:
   repository: ghcr.io/dtduc-git/opsrag
-  tag: "0.1.0"
+  tag: "0.1.1"
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -58,7 +58,7 @@ ui:
   replicaCount: 1
   image:
     repository: ghcr.io/dtduc-git/opsrag-ui
-    tag: "0.1.0"
+    tag: "0.1.1"
     pullPolicy: IfNotPresent
   port: 5173
   service:
