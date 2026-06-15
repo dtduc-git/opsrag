@@ -59,6 +59,13 @@ RUN uv venv "$VIRTUAL_ENV" \
     && for e in $(echo "$OPSRAG_EXTRAS" | tr ',' ' '); do EXTRA_FLAGS="$EXTRA_FLAGS --extra $e"; done \
     && uv pip install --python "$VIRTUAL_ENV/bin/python" -r pyproject.toml $EXTRA_FLAGS
 
+# Security hardening: bump transitive build/utility deps that image scanners flag
+# (wheel -> malicious-wheel-unpack escalation; jaraco.context -> tar path
+# traversal) to their patched releases. Neither is runtime-exploitable by the
+# service (the bot never installs untrusted wheels / extracts untrusted tars),
+# but pinning the patched versions keeps the published image CVE-clean.
+RUN uv pip install --python "$VIRTUAL_ENV/bin/python" --upgrade wheel "jaraco.context"
+
 # Bundle the spaCy model into the venv at BUILD time so the slim runtime (which
 # has no pip) never tries to download it on first use. Both mem0's BM25
 # lemmatization and the Q&A-cache NER load `en_core_web_sm`; without this they

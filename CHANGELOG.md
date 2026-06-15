@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- Cleared the code-scanning backlog (all High, no Critical): UI image now runs
+  as a non-root user (`nginxinc/nginx-unprivileged`); build/utility deps `wheel`
+  + `jaraco.context` upgraded to patched releases; the `samples/` Kubernetes
+  example got a hardened `securityContext` (non-root, read-only rootfs, drop
+  ALL caps); CodeQL no longer scans `tests/` (intentional fixtures tripped the
+  URL-substring query); the two real `routing.py` matches use `startswith` (an
+  exact group-prefix match, not a substring). Added a Dependabot config (pip /
+  npm / Actions / Docker).
 
 ## [0.2.0] - 2026-06-15
 
