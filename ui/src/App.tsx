@@ -20,7 +20,7 @@ import RetrievalQualityPage from "./components/RetrievalQualityPage";
 import IndexingJobsPage from "./components/IndexingJobsPage";
 import ConversationListPane from "./components/ConversationListPane";
 import InvestigationListPane from "./components/InvestigationListPane";
-import { fetchSessions, fetchSessionMessages, deleteSession, streamQuery, fetchUIConfig, fetchInvestigationHistory, logout, type Session, type UIConfig, type InvestigationHistoryItem, type MeResponse } from "./api";
+import { fetchSessions, fetchSessionMessages, deleteSession, streamQuery, fetchUIConfig, fetchInvestigationHistory, logout, fetchChannelConversations, fetchChannelMessages, channelPlatformLabel, type Session, type UIConfig, type InvestigationHistoryItem, type MeResponse } from "./api";
 import type { ProgressStep, CacheHitInfo } from "./components/ThinkingProgress";
 // IconBolt previously powered the chat empty-state glyph; the premium
 // redesign replaces it with the brand logo PNG, so the import is dead.
@@ -49,7 +49,7 @@ const SUGGESTED_PROMPTS: Array<{ cat: string; text: string; tone?: "q" | "h" | "
 //   `cache` / `usage` / `quality` / `investigate` / `docs` → that page
 //   `mcp-tokens` (legacy) → connections
 const SIMPLE_PAGES: Page[] = [
-  "home", "usage", "indexing", "cache", "investigate", "docs",
+  "home", "usage", "indexing", "cache", "investigate", "docs", "channels",
   "connections", "sources", "graph", "integrations", "quality", "mcpaudit", "users", "guidance",
 ];
 
@@ -113,6 +113,13 @@ export default function App({ me, reloadMe }: AppProps) {
   );
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  // Read-only public Channels browser (shared chat-channel conversations).
+  // Separate state from the owned-web `sessions`/`messages` so the two panes
+  // never cross-contaminate. No new/delete/reply here — strictly read-only.
+  const [channelConversations, setChannelConversations] = useState<Session[]>([]);
+  const [activeChannelThread, setActiveChannelThread] = useState<string | null>(null);
+  const [channelMessages, setChannelMessages] = useState<Message[]>([]);
+  const channelBodyRef = useRef<HTMLDivElement>(null);
   // Sidebar collapse — persisted across reloads. Premium design dropped
   // dark mode entirely so the localStorage key for theme is no longer
   // read; we keep the same `opsrag-` prefix for the new key.
@@ -294,6 +301,45 @@ export default function App({ me, reloadMe }: AppProps) {
   useEffect(() => {
     if (page === "investigate") refreshInvestigations();
   }, [page, refreshInvestigations]);
+
+  // ── Public Channels browser (read-only) ──────────────────────────────
+  const refreshChannelConversations = useCallback(async () => {
+    try {
+      const c = await fetchChannelConversations();
+      setChannelConversations(c);
+    } catch { /* best-effort — empty list is a fine fallback */ }
+  }, []);
+
+  const loadChannelMessages = useCallback(async (id: string) => {
+    setChannelMessages([]);
+    try {
+      const replayed = await fetchChannelMessages(id);
+      setChannelMessages(replayed.map((m) => ({
+        role: m.role,
+        content: m.content,
+        sources: m.sources,
+        sourceUrls: m.source_urls,
+        grounded: m.grounded,
+        queryType: m.query_type ?? null,
+        investigationId: m.investigation_id ?? null,
+        // Channel users are anonymous — never surface author identity here.
+        authorEmail: null,
+        authorName: null,
+        ts: m.ts ?? null,
+      })));
+    } catch { /* empty pane is a fine fallback */ }
+  }, []);
+
+  // Lazy-load the channel list the first time the page is opened.
+  useEffect(() => {
+    if (page === "channels") refreshChannelConversations();
+  }, [page, refreshChannelConversations]);
+
+  // Keep the channel detail pinned to the bottom as messages load.
+  useEffect(() => {
+    const el = channelBodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [channelMessages]);
 
   const handleSend = async (query: string) => {
     // Stamp live turns with a timestamp so each message shows its time
@@ -580,6 +626,85 @@ export default function App({ me, reloadMe }: AppProps) {
             </div>
           </section>
         )}
+
+        {page === "channels" && (() => {
+          const active = activeChannelThread
+            ? channelConversations.find((c) => c.thread_id === activeChannelThread) ?? null
+            : null;
+          const activePlatformLabel = channelPlatformLabel(active?.platform ?? null);
+          return (
+          <section className="page">
+            <div className="topbar">
+              <h1>
+                Channels <span className="dim">· {
+                  active
+                    ? (active.title ?? `conversation ${active.thread_id.slice(0, 8)}`)
+                    : "shared chat-channel conversations"
+                }</span>
+              </h1>
+              <div className="actions">
+                <span className="hdr-badge">read-only</span>
+              </div>
+            </div>
+            <div className="md-body">
+              <aside className="md-list">
+                <ConversationListPane
+                  sessions={channelConversations}
+                  activeThread={activeChannelThread}
+                  onSelect={async (id) => {
+                    setActiveChannelThread(id);
+                    await loadChannelMessages(id);
+                  }}
+                  // Read-only browse: no new / delete affordances. These are
+                  // required props on the shared pane, so they're inert no-ops.
+                  onNew={() => { /* read-only — no new */ }}
+                  onDelete={() => { /* read-only — no delete */ }}
+                  readOnly
+                />
+              </aside>
+              <div className="md-detail">
+                <div className="chat-wrap">
+                  <div className="chat-body" ref={channelBodyRef}>
+                    {!activeChannelThread ? (
+                      <div className="chat-empty">
+                        <div className="chat-empty-inner">
+                          <div className="glyph">
+                            <img src="/opsrag-logo.png" alt="OpsRAG" />
+                          </div>
+                          <h2>Browse <em>channel</em> conversations.</h2>
+                          <p>
+                            Read conversations that happened in shared
+                            Slack / Discord / Telegram / Teams channels via the
+                            chat bots. Private DMs and web threads stay private.
+                            Select a conversation to read it — this view is
+                            read-only.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="chat-messages">
+                        <div className="msg-meta-row" style={{ marginBottom: 8 }}>
+                          <span className="badge badge-type">{activePlatformLabel}</span>
+                        </div>
+                        {channelMessages.map((msg, i) => (
+                          <ChatMessage
+                            key={i}
+                            msg={msg}
+                            // Read-only ctx: omit threadId so the feedback path
+                            // can't render, and set readOnly to also drop Copy.
+                            // Identity is platform-only — no viewer email/name.
+                            ctx={{ readOnly: true }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+          );
+        })()}
 
         {page === "usage" && (
           <section className="page">

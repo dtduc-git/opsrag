@@ -16,12 +16,10 @@ class InMemorySessionStore:
     def get_checkpointer(self) -> Any:
         return self._saver
 
-    async def list_sessions(
-        self, user_id: str, *, include_all: bool = False
-    ) -> list[dict]:
+    def _collect_sessions(self, keep) -> list[dict]:
         # Mirror the postgres store: derive title/preview/timestamps/turns in
-        # the same checkpoint walk (newest-first). See postgres.py for the
-        # field-by-field rationale and the owner-from-metadata note.
+        # the same checkpoint walk (newest-first). ``keep(thread_id, owner)``
+        # decides inclusion. See postgres.py for the field-by-field rationale.
         sessions: dict[str, dict] = {}
         queries: dict[str, set[str]] = {}
         for cp_tuple in self._saver.list(None):
@@ -32,7 +30,7 @@ class InMemorySessionStore:
             owner = cfg.get("user_id")
             if owner is None:
                 owner = (cp_tuple.metadata or {}).get("user_id")
-            if not include_all and owner != user_id:
+            if not keep(thread_id, owner):
                 continue
             entry = sessions.setdefault(
                 thread_id,
@@ -66,6 +64,23 @@ class InMemorySessionStore:
             if entry["preview"] is None and entry["title"]:
                 entry["preview"] = entry["title"][:160]
         return list(sessions.values())
+
+    async def list_sessions(
+        self, user_id: str, *, include_all: bool = False
+    ) -> list[dict]:
+        return self._collect_sessions(
+            lambda _tid, owner: include_all or owner == user_id
+        )
+
+    async def list_sessions_by_prefixes(
+        self, prefixes: tuple[str, ...]
+    ) -> list[dict]:
+        """List sessions whose ``thread_id`` starts with any of ``prefixes``
+        (owner-agnostic). See PostgresSessionStore for the rationale."""
+        pfx = tuple(prefixes)
+        if not pfx:
+            return []
+        return self._collect_sessions(lambda tid, _owner: tid.startswith(pfx))
 
     async def delete_session(self, thread_id: str) -> bool:
         storage = getattr(self._saver, "storage", None)

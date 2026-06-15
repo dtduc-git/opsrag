@@ -76,6 +76,11 @@ export interface ChatMessageContext {
   // otherwise we render the original author's display name.
   viewerEmail?: string | null;
   viewerName?: string | null;
+  // Read-only render (e.g. the public Channels browser): suppress the
+  // interactive feedback (👍/👎 + correction) AND copy affordances. The
+  // feedback path is also gated on `threadId` being present, but `readOnly`
+  // makes the intent explicit and also hides the Copy button.
+  readOnly?: boolean;
 }
 
 function displayAuthorLabel(msg: Message, ctx?: ChatMessageContext): string {
@@ -590,12 +595,13 @@ export default function ChatMessage({ msg, ctx }: { msg: Message; ctx?: ChatMess
               </div>
             ) : null}
             <div className="msg-actions">
-              <CopyButton text={msg.content} />
+              {!ctx?.readOnly && <CopyButton text={msg.content} />}
               {/* Feedback (👍/👎 + correction) for any COMPLETED answer, not
                   just investigations. Chat answers have no investigation id,
                   so the thread id is the audit anchor; a 👎 still opens the
-                  correction form that writes a high-weight Qdrant chunk. */}
-              {!msg.streaming && (msg.investigationId || ctx?.threadId) && (
+                  correction form that writes a high-weight Qdrant chunk.
+                  Suppressed entirely in read-only views (public Channels). */}
+              {!ctx?.readOnly && !msg.streaming && (msg.investigationId || ctx?.threadId) && (
                 <FeedbackButtons
                   investigationId={msg.investigationId ?? ctx?.threadId ?? ""}
                   threadId={ctx?.threadId ?? null}

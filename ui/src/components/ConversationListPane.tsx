@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { Session } from "../api";
+import { channelPlatformLabel, type Session } from "../api";
 
 interface Props {
   sessions: Session[];
@@ -7,6 +7,10 @@ interface Props {
   onSelect: (threadId: string) => void;
   onNew: () => void;
   onDelete: (threadId: string) => void;
+  // Read-only browse (public Channels view): hide the delete affordance and
+  // the "Start a conversation" empty-state CTA. Also surfaces a per-row
+  // platform badge when a conversation carries a `platform`.
+  readOnly?: boolean;
 }
 
 // Relative time from an ISO 8601 string. Null/unparseable -> "".
@@ -39,6 +43,7 @@ export default function ConversationListPane({
   onSelect,
   onNew,
   onDelete,
+  readOnly = false,
 }: Props) {
   const [search, setSearch] = useState("");
 
@@ -78,9 +83,11 @@ export default function ConversationListPane({
       {sessions.length === 0 ? (
         <div className="mdl-empty">
           <div>No conversations yet.</div>
-          <button className="mdl-empty-cta" type="button" onClick={onNew}>
-            Start a conversation
-          </button>
+          {!readOnly && (
+            <button className="mdl-empty-cta" type="button" onClick={onNew}>
+              Start a conversation
+            </button>
+          )}
         </div>
       ) : filtered.length === 0 ? (
         <div className="mdl-empty">
@@ -102,17 +109,26 @@ export default function ConversationListPane({
               >
                 <span className="mdl-title">{title}</span>
                 {s.preview ? <span className="mdl-preview">{s.preview}</span> : null}
-                <span className="mdl-meta">{meta}</span>
-                <span
-                  className="mdl-del"
-                  role="button"
-                  tabIndex={-1}
-                  aria-label="Delete conversation"
-                  title="Delete conversation"
-                  onClick={(e) => handleDelete(e, s.thread_id)}
-                >
-                  ✕
+                <span className="mdl-meta">
+                  {s.platform ? (
+                    <span className="badge badge-type" style={{ marginRight: 6 }}>
+                      {channelPlatformLabel(s.platform)}
+                    </span>
+                  ) : null}
+                  {meta}
                 </span>
+                {!readOnly && (
+                  <span
+                    className="mdl-del"
+                    role="button"
+                    tabIndex={-1}
+                    aria-label="Delete conversation"
+                    title="Delete conversation"
+                    onClick={(e) => handleDelete(e, s.thread_id)}
+                  >
+                    ✕
+                  </span>
+                )}
               </button>
             );
           })}

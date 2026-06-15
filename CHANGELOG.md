@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Browse shared-channel conversations in the web UI** — a read-only
+  **Channels** page lets any authenticated user (scope `chat`) list and read
+  conversations that happened in shared chat channels (Slack/Discord/Teams
+  channels, Telegram groups) via `GET /channels/conversations` and
+  `GET /channels/conversations/{thread_id}/messages`. Privacy is enforced by the
+  `thread_id` prefix: only `<platform>-thread:` sessions are exposed; private 1:1
+  DMs (`<platform>-dm:`) and web threads are excluded server-side (the messages
+  endpoint 404s on any non-`-thread:` id). Channel users stay anonymous — only
+  the platform is shown — and the surface is read-only (no reply/continue/delete).
+  See [`docs/channels.md`](docs/channels.md).
 
 ## [0.1.1] - 2026-06-15
 

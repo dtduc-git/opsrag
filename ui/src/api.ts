@@ -174,7 +174,10 @@ export async function purgeCache(req: CachePurgeRequest): Promise<CachePurgeResp
 
 export interface Session {
   thread_id: string;
-  user_id: string;
+  // Optional for the public Channels view: the channel-conversations endpoint
+  // strips the synthetic bot `user_id` (channel users are anonymous), so it's
+  // absent there but present for owned web sessions.
+  user_id?: string;
   checkpoint_count: number;
   // Enriched by the session store so the conversation list can show a real
   // title/preview/time instead of the opaque thread id. Optional for safety.
@@ -183,7 +186,15 @@ export interface Session {
   updated_at?: string | null;
   created_at?: string | null;
   turn_count?: number;
+  // Present only on public-channel conversations (slack|discord|telegram|teams).
+  // Undefined for ordinary web sessions.
+  platform?: ChannelPlatform | null;
 }
+
+// The chat-bot platforms that surface shared-channel conversations in the
+// read-only Channels browser. Mirrors the backend's PUBLIC_CHANNEL_THREAD
+// platforms (opsrag/channels/origin.py).
+export type ChannelPlatform = "slack" | "discord" | "telegram" | "teams";
 
 export interface PurposeUsage {
   call_count: number;
@@ -464,6 +475,38 @@ export async function fetchSessionMessages(threadId: string): Promise<ReplayedMe
 
 export async function deleteSession(threadId: string): Promise<void> {
   await fetch(`${BASE}/sessions/${encodeURIComponent(threadId)}`, { method: "DELETE" });
+}
+
+// ── Public channel conversations (read-only) ────────────────────────────
+// Shared chat-channel conversations (Slack/Discord/Telegram/Teams) anyone with
+// the `chat` scope can browse. Auth is the same-origin session cookie. The
+// backend exposes only `<platform>-thread:` conversations and validates the
+// prefix server-side, so private 1:1 DMs and web threads can't leak here. The
+// list response strips the synthetic bot user_id (identity is platform-only).
+
+export async function fetchChannelConversations(): Promise<Session[]> {
+  const resp = await apiFetch(`${BASE}/channels/conversations`);
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  return (data.conversations ?? []) as Session[];
+}
+
+export async function fetchChannelMessages(threadId: string): Promise<ReplayedMessage[]> {
+  const resp = await apiFetch(`${BASE}/channels/conversations/${encodeURIComponent(threadId)}/messages`);
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  return (data.messages ?? []) as ReplayedMessage[];
+}
+
+// Human-readable label for a channel platform badge.
+export function channelPlatformLabel(p: ChannelPlatform | null | undefined): string {
+  switch (p) {
+    case "slack": return "Slack channel";
+    case "discord": return "Discord channel";
+    case "telegram": return "Telegram group";
+    case "teams": return "Teams channel";
+    default: return "Channel";
+  }
 }
 
 export async function fetchUsage(): Promise<UsageSummary> {
