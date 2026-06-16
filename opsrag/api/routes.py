@@ -678,7 +678,10 @@ async def query(
                 vision_llm=providers.vision_llm,
             )
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"query failed: {exc}") from exc
+            # Log the detail server-side; return a generic message so the
+            # raw exception text (paths/internals) never reaches the client.
+            _log.exception("query failed")
+            raise HTTPException(status_code=500, detail="query failed") from exc
         # Drop fields QueryResponse doesn't declare (cache_hit, similarity, etc.)
         # -- they're for internal observability, not part of the public contract.
         public = {k: v for k, v in result.items() if k in QueryResponse.model_fields}
@@ -1022,8 +1025,11 @@ async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investiga
                 return
             elif kind == "final":
                 final = ev
-    except Exception as exc:
-        yield _sse("error", {"detail": str(exc)})
+    except Exception:
+        # Log the full exception server-side; never leak the raw message
+        # (which can carry stack/internal detail) to the SSE client.
+        _log.exception("stream query failed")
+        yield _sse("error", {"detail": "internal error while answering the query"})
         return
 
     if final is None:
