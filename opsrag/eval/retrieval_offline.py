@@ -25,10 +25,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opsrag.eval.loaders import match_path
-from opsrag.eval.metrics.ranking import _expected_hits_in_topk
 
 if TYPE_CHECKING:
     from opsrag.eval.loaders import GoldenQuery
+
+
+def _expected_hits_in_topk(
+    expected: list[str], retrieved: list[str], k: int
+) -> list[str]:
+    """Subset of ``expected`` that has a path-match in ``retrieved[:k]``.
+
+    Inlined (instead of importing from ``opsrag.eval.metrics.ranking``) so this
+    offline gate imports NO deepeval/vertexai: importing that metrics submodule
+    triggers ``metrics/__init__`` -> faithfulness -> vertex_judge -> vertexai,
+    none of which the secret-free retrieval gate needs. Same logic as ranking's.
+    """
+    top = retrieved[:k]
+    return [e for e in expected if any(match_path(e, r) for r in top)]
 
 # 384-dim local ONNX embedder; matches the validated offline recipe.
 _OFFLINE_EMBED_MODEL = "BAAI/bge-small-en-v1.5"

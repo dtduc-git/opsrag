@@ -22,13 +22,13 @@ The offline tier is the no-secrets proof that retrieval works; the answer
 tier adds the LLM judge for faithfulness/answer-quality. The two share the
 golden set and the path-matching rules.
 
-## Tier 1 — offline retrieval eval (no secrets)
+## Tier 1 -- offline retrieval eval (no secrets)
 
 `tests/integration/test_eval_samples_retrieval.py` indexes `samples/` into an
 **in-process Qdrant** (`url=":memory:"`) using a **local FastEmbed ONNX
-embedder** (`BAAI/bge-small-en-v1.5`, 384-dim — no API key), loads the public
+embedder** (`BAAI/bge-small-en-v1.5`, 384-dim -- no API key), loads the public
 goldens, runs retrieval for every scored golden, and asserts aggregate
-**Recall@5 ≥ 0.85** (observed ~1.0 on the validated recipe). Negative goldens
+**Recall@5 >= 0.85** (observed ~1.0 on the validated recipe). Negative goldens
 (empty relevant set) are skipped for ranking. Run it:
 
 ```sh
@@ -40,9 +40,9 @@ The reusable harness is `opsrag/eval/retrieval_offline.py`:
 `build_offline_index(samples_dir) -> (embedder, vector_store)` and
 `retrieval_scores(embedder, vector_store, goldens, k=5)` (returns per-golden
 Recall@K + MRR and the aggregate means). The `eval-offline` CI job runs this
-on every push/PR — it's the always-on, secret-free gate.
+on every push/PR -- it's the always-on, secret-free gate.
 
-## Tier 2 — answer-quality eval (live server + judge)
+## Tier 2 -- answer-quality eval (live server + judge)
 
 The rest of this document covers the live-server tier driven by
 `python -m opsrag.eval run`.
@@ -50,8 +50,8 @@ The rest of this document covers the live-server tier driven by
 ## What it measures
 
 Each golden query is sent to a running opsrag instance (`POST /query`,
-`stream: false`), and the response — answer, retrieved source paths, and
-chunk content — is scored by a suite of metrics
+`stream: false`), and the response -- answer, retrieved source paths, and
+chunk content -- is scored by a suite of metrics
 (`opsrag/eval/runner.py:_run_metrics`). Metrics are computed cheap-first
 (deterministic set/ranking metrics) then expensive-last (the LLM judge):
 
@@ -74,8 +74,8 @@ which localizes a re-ranking regression.
 Path matching (`opsrag/eval/loaders.py:match_path`) is forgiving across
 chunker versions: canonical-form equality, suffix match on a `/` or `:`
 boundary, and a `<page_id>:<slug>` stem-only fallback for slug drift. Authoring
-rules — including why `expected_sources` must be path-qualified and must never
-contain chunk IDs — live in [`opsrag/eval/golden/README.md`](../opsrag/eval/golden/README.md).
+rules -- including why `expected_sources` must be path-qualified and must never
+contain chunk IDs -- live in [`opsrag/eval/golden/README.md`](../opsrag/eval/golden/README.md).
 
 ## Running it
 
@@ -97,10 +97,10 @@ python -m opsrag.eval run --tag ci --gate
 
 Key environment:
 
-- `OPSRAG_URL` — the opsrag instance to query (default `http://localhost:8000`).
-- `OPSRAG_JUDGE_MODEL` — the faithfulness judge model (default `gemini-2.5-pro`,
+- `OPSRAG_URL` -- the opsrag instance to query (default `http://localhost:8000`).
+- `OPSRAG_JUDGE_MODEL` -- the faithfulness judge model (default `gemini-2.5-pro`,
   via `VertexGeminiJudge`; needs Vertex credentials).
-- `OPSRAG_DISABLE_QA_CACHE=1` — **must be set on the target server** (see below).
+- `OPSRAG_DISABLE_QA_CACHE=1` -- **must be set on the target server** (see below).
 
 Every run writes a diff-able markdown report and a JSON sibling to
 `tests/eval/reports/<tag>.{md,json}` (`opsrag/eval/report.py:write_report`).
@@ -126,7 +126,7 @@ is below:
 | `Faithfulness` | 0.70 |
 
 `MustContain` / `MustNotContain` are reported per query but are not part of
-the aggregate floor — they assert on individual goldens, not a corpus mean.
+the aggregate floor -- they assert on individual goldens, not a corpus mean.
 Thresholds mirror the per-test-case thresholds the metric classes define and
 are tuned as the golden set matures.
 
@@ -134,7 +134,7 @@ are tuned as the golden set matures.
 
 `POST /query` runs through the QA cache, classifier, and generation. A cache
 hit serves a **stored** answer and sources, so the ranking metrics would
-measure the cache, not retrieval — masking a regression. Before a gated run,
+measure the cache, not retrieval -- masking a regression. Before a gated run,
 the CLI probes the target (`_assert_cache_bypassed`): it sends a cacheable
 query twice, and if the second call returns `cache_hit: true` it **aborts the
 gate** (exit 3) with a message telling you to launch the eval server with
@@ -143,7 +143,7 @@ the gate.
 
 ## Vacuous-case handling
 
-Not every golden has expected/acceptable sources — `negative` goldens and
+Not every golden has expected/acceptable sources -- `negative` goldens and
 meta-pattern goldens may have none. For those, a ranking metric is **vacuous**
 and marks itself `skipped=True`. Vacuous evaluations are **excluded** from
 the aggregate means rather than scored a free 1.0 (or a penalizing 0.0):
@@ -159,8 +159,8 @@ the aggregate means rather than scored a free 1.0 (or a penalizing 0.0):
 
 Adversarial goldens are a related but distinct case: they are *designed* to
 partially fail, and carry an `expected_baseline_faith` field recording the
-design-intended Faithfulness score. That field is **documentation-only** — the
-framework does not enforce or compare against it — so reviewers don't misread
+design-intended Faithfulness score. That field is **documentation-only** -- the
+framework does not enforce or compare against it -- so reviewers don't misread
 a stable-by-design 0.30 as a defect. See the golden README's "Adversarial
 baselines" section.
 
@@ -170,7 +170,7 @@ The `eval-regression` job in `.github/workflows/ci.yml` runs the gate, but
 only when it can be meaningful:
 
 - **Path-scoped trigger.** The job diffs the PR and runs only when
-  eval-relevant paths changed — `opsrag/{agent,agents,mcp,eval,ingestion,parsers,chunkers,vectorstores,embedders}/`.
+  eval-relevant paths changed -- `opsrag/{agent,agents,mcp,eval,ingestion,parsers,chunkers,vectorstores,embedders}/`.
   These cover both the agent/MCP/eval code and the retrieval pipeline, since a
   change to chunking or embedding changes what gets retrieved and so must be
   able to trip the gate. Unrelated changes skip it.
@@ -180,7 +180,7 @@ only when it can be meaningful:
   quality against an empty index). The target must run with
   `OPSRAG_DISABLE_QA_CACHE=1`.
 - **Fail-closed on a dropped secret.** Set `OPSRAG_EVAL_REQUIRED=1` to turn
-  the "no URL → skip" silent no-op into a hard failure, so a missing secret
+  the "no URL -> skip" silent no-op into a hard failure, so a missing secret
   can't make the gate pass green.
 
 When all conditions hold, CI runs `python -m opsrag.eval run --tag ci --gate`
@@ -188,8 +188,8 @@ and the build fails if any gated metric is below threshold.
 
 ## See also
 
-- [`opsrag/eval/golden/README.md`](../opsrag/eval/golden/README.md) — golden
+- [`opsrag/eval/golden/README.md`](../opsrag/eval/golden/README.md) -- golden
   authoring policy, the matching contract, and anti-patterns.
-- [`architecture.md`](./architecture.md) — the `/query` path the eval drives.
-- [`operations.md`](./operations.md) — cost/observability of eval runs (the
+- [`architecture.md`](./architecture.md) -- the `/query` path the eval drives.
+- [`operations.md`](./operations.md) -- cost/observability of eval runs (the
   judge consumes Vertex Pro tokens) and indexing the corpus under eval.

@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from opsrag.interfaces.chunker import Chunk
-from opsrag.interfaces.parser import DocType
-from opsrag.vectorstores.qdrant import QdrantVectorStore
+# upsert() auto-computes BM25 sparse vectors via fastembed; skip cleanly in jobs
+# that don't install the `fastembed` extra (e.g. the plain `unit` job). The
+# in-memory + upsert + search path is also exercised by the offline eval gate.
+pytest.importorskip("fastembed")
+
+from opsrag.interfaces.chunker import Chunk  # noqa: E402
+from opsrag.interfaces.parser import DocType  # noqa: E402
+from opsrag.vectorstores.qdrant import QdrantVectorStore  # noqa: E402
 
 
 @pytest.mark.asyncio

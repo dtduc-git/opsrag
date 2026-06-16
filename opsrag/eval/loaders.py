@@ -21,9 +21,18 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
-from deepeval.test_case import LLMTestCase
+
+# NB: `deepeval` is imported lazily inside `to_llm_test_case` (the only user) so
+# the dependency-light parts of this module -- `load_golden`, `match_path`,
+# `canonical_path`, `GoldenQuery` -- import WITHOUT the `eval` extra. The offline
+# retrieval gate reuses those without pulling in deepeval/vertexai. The
+# TYPE_CHECKING import keeps the return annotation resolvable for type-checkers
+# without a runtime dependency.
+if TYPE_CHECKING:
+    from deepeval.test_case import LLMTestCase
 
 _log = logging.getLogger("opsrag.eval.loaders")
 
@@ -297,6 +306,8 @@ def to_llm_test_case(
     `retrieved_sources` is the raw list of source paths used for SourceRecall
     set-intersection. If omitted, falls back to retrieval_context.
     """
+    from deepeval.test_case import LLMTestCase  # lazy: only the judge path needs it
+
     return LLMTestCase(
         input=g.query,
         actual_output=actual_output,
