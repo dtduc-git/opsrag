@@ -5,16 +5,17 @@ how to choose an auth mode, how to wire each one up against real identity
 providers, how scopes and roles work, how to mint MCP tokens, and how to
 harden a production deployment.
 
-OpsRAG has three authentication modes, set by `auth.mode`:
+Authentication is ALWAYS enforced -- there is no anonymous / "open"
+mode. Every non-allowlisted request must carry a valid identity or it is
+rejected with HTTP 401. OpsRAG has two authentication modes, set by
+`auth.mode`:
 
-- `open` -- no enforcement. Every request is an anonymous user that
-  carries all scopes. This is the zero-config local-dev / demo default.
+- `login` (the default) -- OpsRAG runs its own first-party login: email +
+  password and/or SSO (Google / Microsoft / GitHub), backed by signed
+  cookie sessions and a local user store, with a seeded `admin` account.
 - `oidc` -- OpsRAG verifies an incoming `Authorization: Bearer <JWT>`
   against an external identity provider (IdP). There is no user database;
   identity lives entirely in the token.
-- `login` -- OpsRAG runs its own first-party login: email + password
-  and/or SSO (Google / Microsoft / GitHub), backed by signed cookie
-  sessions and a local user store.
 
 On top of authentication ("who is calling"), OpsRAG enforces:
 
@@ -39,62 +40,58 @@ On top of authentication ("who is calling"), OpsRAG enforces:
                        Do you have an existing IdP
                     (Okta / Entra / Google / Keycloak)
                       that already issues JWTs to your
-                            users or services?
+                            users or services, or a
+                      gateway that injects a Bearer JWT
+                            per request?
                                    |
                   +----------------+----------------+
                  yes                                no
                   |                                  |
-        Callers are mostly                Do you want users to log in
-       machines/scripts/CI, or            WITH OpsRAG itself (its own
-       a gateway already injects          login screen, password + SSO,
-       a Bearer JWT per request?          first-party admin account)?
-                  |                                  |
-                 yes                       +---------+---------+
-                  |                       yes                 no
-            ->  mode: oidc                 |                   |
-                                     ->  mode: login    ->  mode: open
-                                                          (local dev /
-                                                           demo only)
+            ->  mode: oidc                    ->  mode: login
+                                              (the default; OpsRAG runs
+                                               its own login screen +
+                                               seeded admin account)
 ```
 
 Quick rules of thumb:
 
 - You are **evaluating OpsRAG locally** or running the compose demo
-  -> `open` (the default for the bundled compose stack).
-- You already run an **IdP and want OpsRAG to trust its tokens**, or
-  OpsRAG sits **behind a gateway** (Pomerium, oauth2-proxy, an API
-  gateway) that mints/forwards a JWT -> `oidc`.
+  -> `login` (the default). You will hit a sign-in screen and log in as
+  the seeded `admin` account (see [The admin user](#the-admin-user)).
 - You want OpsRAG to **be the login system** -- a hosted product with its
   own login page, a real `admin` account, password and/or "Sign in with
   Google" buttons -> `login`.
+- You already run an **IdP and want OpsRAG to trust its tokens**, or
+  OpsRAG sits **behind a gateway** (Pomerium, oauth2-proxy, an API
+  gateway) that mints/forwards a JWT -> `oidc`.
 
 ### Mode comparison
 
-| Property | `open` | `oidc` | `login` |
-|---|---|---|---|
-| Identity source | none (anonymous) | external IdP JWT | OpsRAG's own users |
-| User database | no | no | yes (`opsrag_auth_user`) |
-| First-party admin account | no | no | yes (seeded from env) |
-| Credential the client sends | none | `Authorization: Bearer <JWT>` | signed session cookie |
-| Web UI shows a login screen | no | no (UI assumes a token/gateway) | yes |
-| SSO (Google / MS / GitHub) | -- | via your IdP | built in (`sso` block) |
-| Password login | -- | -- | yes (`password_enabled`) |
-| RBAC scopes enforced | no (all scopes) | yes (from token `groups`) | yes (from stored roles) |
-| Per-session ownership | no-op (anonymous) | yes | yes |
-| Required config | none | `issuer` + `audience` | `session.signing_key` + admin env |
-| Typical use | local dev, demo | API/CI, behind a gateway | hosted product |
+| Property | `login` | `oidc` |
+|---|---|---|
+| Identity source | OpsRAG's own users | external IdP JWT |
+| User database | yes (`opsrag_auth_user`) | no |
+| First-party admin account | yes (seeded from env) | no |
+| Credential the client sends | signed session cookie | `Authorization: Bearer <JWT>` |
+| Web UI shows a login screen | yes | no (UI assumes a token/gateway) |
+| SSO (Google / MS / GitHub) | built in (`sso` block) | via your IdP |
+| Password login | yes (`password_enabled`) | -- |
+| RBAC scopes enforced | yes (from stored roles) | yes (from token `groups`) |
+| Per-session ownership | yes | yes |
+| Required config | `session.signing_key` + admin env | `issuer` + `audience` |
+| Typical use | hosted product, local dev / demo | API/CI, behind a gateway |
 
-The default when **no `auth` block** is present is identical to
-`auth.mode: open` -- the verifier is absent and every request passes
-through with all scopes. Configure `auth` for any shared or production
-deployment.
+The default when **no `auth` block** is present is `auth.mode: login`.
+Authentication is always enforced: a non-allowlisted request without a
+valid identity is rejected with 401 in either mode -- there is no
+anonymous / all-scopes path.
 
 ---
 
 ## How verification works (oidc mode)
 
-In `oidc` mode every endpoint except the open paths below requires an
-`Authorization: Bearer <token>` header. The always-open paths are:
+In `oidc` mode every endpoint except the public allowlist below requires
+an `Authorization: Bearer <token>` header. The always-allowed paths are:
 `/healthz`, `/readyz`, the legacy `/health`, the schema/docs routes
 (`/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc`), the
 pre-auth branding endpoint `/ui-config`, the SCM webhooks
@@ -138,13 +135,16 @@ A rejected request returns HTTP 401 with a stable JSON envelope:
 
 `reason` is one of a closed set:
 
-| reason              | meaning                                              |
-|---------------------|------------------------------------------------------|
-| `missing_bearer`    | no `Authorization: Bearer ...` header                |
-| `invalid_signature` | signature/kid/malformed token (catch-all reject)     |
-| `issuer_mismatch`   | token `iss` does not match `auth.issuer`             |
-| `audience_mismatch` | token `aud` does not match `auth.audience`           |
-| `expired`           | token `exp` is in the past                           |
+| reason               | mode  | meaning                                              |
+|----------------------|-------|------------------------------------------------------|
+| `missing_bearer`     | oidc  | no `Authorization: Bearer ...` header                |
+| `invalid_signature`  | oidc  | signature/kid/malformed token (catch-all reject)     |
+| `issuer_mismatch`    | oidc  | token `iss` does not match `auth.issuer`             |
+| `audience_mismatch`  | oidc  | token `aud` does not match `auth.audience`           |
+| `expired`            | oidc  | token `exp` is in the past                           |
+| `missing_session`    | login | no / invalid / expired signed session cookie         |
+| `login_unavailable`  | login | login mode configured but the session manager isn't wired (fails closed) |
+| `auth_misconfigured` | oidc  | oidc mode but no verifier is wired (fails closed; no anonymous fallback) |
 
 The `request_id` is also stamped onto logs for the same request, so a
 rejection can be correlated without logging the token.
@@ -215,9 +215,12 @@ curl -s http://localhost:8080/usage -H "Authorization: Bearer $TOKEN"
   it.
 
 This Dex config is for local eval only. Do not use the placeholder client
-secret or static password outside local development. (The compose demo
-itself runs in `open` mode, so this Dex token is accepted but not
-required -- it exists to demonstrate the `oidc` path.)
+secret or static password outside local development. The bundled Dex
+exists to demonstrate the `oidc` path: point `auth.mode: oidc` at it (set
+`OPSRAG_OIDC_ISSUER` / `OPSRAG_OIDC_AUDIENCE`) and the minted token above
+becomes the required Bearer credential. The compose demo defaults to
+`login` mode, where you sign in as the seeded admin instead (see
+[login mode setup](#login-mode-setup-first-party-accounts)).
 
 #### The Dex issuer-vs-cluster-host gotcha
 
@@ -581,8 +584,6 @@ Unknown role names contribute no scopes (default-deny).
 
 ### How users get roles
 
-- **open mode**: every (anonymous) user carries ALL scopes; `require_scope`
-  always allows. This preserves zero-config behavior.
 - **oidc mode**: roles are derived from the token's `groups` (or `roles`)
   claim via `auth.role_mappings` (`{group: [roles]}`). A user whose groups
   match nothing gets `member_investigate`. Example:
@@ -672,8 +673,9 @@ The response includes the plaintext token EXACTLY ONCE:
 ```
 
 Store the `token` value immediately -- it is hashed at rest and is NOT
-retrievable again. (Minting requires a concrete identified user; in
-`open` mode the anonymous user has no id, so minting is refused.)
+retrievable again. (Minting requires a concrete identified user holding
+the `mcp` scope; an unauthenticated caller is rejected by the auth layer
+before it reaches the handler.)
 
 ### Listing and revoking
 
@@ -722,9 +724,11 @@ properties:
 - **Cross-user access returns 404, not 403.** A non-owner gets "session
   not found" -- the same response as a thread that does not exist.
   Returning 403 would be an existence oracle.
-- **Open / anonymous mode is a no-op.** When the caller is anonymous
-  (open mode, or no usable identity), ownership is not enforced -- every
-  caller shares one anonymous identity.
+- **Every protected request has a real owner.** Because authentication is
+  always enforced, any caller that reaches a session read/delete route is
+  an authenticated identity with a stable `oid`, so the owner check always
+  runs. (The ownership guard short-circuits only for an anonymous caller,
+  which can no longer reach these routes -- there is no open mode.)
 - **Legacy anonymous-owned threads are grandfathered.** Threads created
   before owner binding existed (empty or `"anonymous"` owner) stay
   readable/deletable by anyone; only threads with a real authenticated
@@ -788,8 +792,10 @@ the multi-replica checklist.
 
 General
 
-- [ ] Set `auth.mode` to `oidc` or `login`. Never run `open` mode on a
-      shared or internet-reachable deployment.
+- [ ] Pick `auth.mode` deliberately (`login` default, or `oidc`).
+      Authentication is always enforced -- there is no `open` mode to
+      disable -- but verify the seeded admin password / IdP config is
+      production-grade before exposing the deployment.
 - [ ] Terminate TLS in front of OpsRAG; serve every route over HTTPS.
 - [ ] Restrict the always-open paths (`/docs`, `/redoc`, `/openapi.json`)
       at the gateway if you do not want the schema public.

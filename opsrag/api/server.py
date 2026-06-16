@@ -204,9 +204,9 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 await check_apoc()
 
         # mode='login': build first-party login runtime state. Lazy imports
-        # keep the `login` extra out of open/oidc deployments. Best-effort:
+        # keep the `login` extra out of oidc deployments. Best-effort:
         # a setup failure logs + disables login rather than crashing boot.
-        if cfg.auth is not None and cfg.auth.mode == "login":
+        if cfg.auth.mode == "login":
             try:
                 import os as _os
 
@@ -1500,30 +1500,26 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
     # Stable error envelope on every non-2xx response (contracts/http-api.md).
     register_error_handlers(app)
 
-    # Auth (FR-016): OIDC Bearer enforcement. Build one verifier from the
-    # `auth` block and attach it to app.state; the global middleware rejects
-    # unauthenticated requests on every route except the health/metadata
-    # allowlist. Construction is cheap -- JWKS discovery is lazy on first
-    # verify -- so this is safe at create_app time. When no `auth` block is
-    # configured, the verifier is absent and the middleware runs in open
-    # (local-dev) mode. The legacy X-API-Key gate is removed.
-    _auth_mode = cfg.auth.mode if cfg.auth is not None else "open"
-    if cfg.auth is not None and _auth_mode == "oidc":
+    # Auth (FR-016): authentication is ALWAYS enforced -- there is no
+    # anonymous / "open" mode. The global middleware rejects unauthenticated
+    # requests on every route except the public allowlist (health/metadata,
+    # /auth/*, SCM webhooks, MCP wire endpoints). `oidc` builds a Bearer
+    # verifier from the `auth` block (construction is cheap -- JWKS discovery
+    # is lazy on first verify); `login` (default) enforces the first-party
+    # session cookie. The legacy X-API-Key gate is removed.
+    _auth_mode = cfg.auth.mode
+    if _auth_mode == "oidc":
         app.state.oidc_verifier = build_verifier_from_settings(cfg.auth)
         _log.info("auth: OIDC enforcement enabled (issuer=%s)", cfg.auth.issuer)
     else:
         app.state.oidc_verifier = None
-        if _auth_mode == "login":
-            _log.info("auth: login mode (password + SSO); first-party sessions")
-        else:
-            _log.info("auth: open mode; all routes open (local-dev)")
+        _log.info("auth: login mode (password + SSO); first-party sessions")
     # RBAC: expose auth mode + role->scope mappings so opsrag.auth.scopes can
-    # resolve each request's roles/scopes. Absent `auth` block -> open mode
-    # (everyone gets all scopes), preserving today's behavior.
+    # resolve each request's roles/scopes.
     app.state.auth_config = cfg.auth
-    app.state.role_mappings = cfg.auth.role_mappings if cfg.auth else {}
+    app.state.role_mappings = cfg.auth.role_mappings
     # mode='login': register the first-party login/SSO router. Imported
-    # lazily so open/oidc deployments don't need the `login` extra (authlib,
+    # lazily so oidc deployments don't need the `login` extra (authlib,
     # pwdlib, ...). The login-mode runtime state (SessionManager, user store,
     # SSO registry, rate limiter) is built in the lifespan (needs async open).
     if _auth_mode == "login":

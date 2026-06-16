@@ -3,7 +3,9 @@
 Covers:
   * resolve_roles: group->role mapping, default role, admin signal.
   * scopes_for_roles / ROLE_SCOPES bundle correctness.
-  * CurrentUser RBAC fields + has_scope + open-mode (anonymous) all-scopes.
+  * CurrentUser RBAC fields + has_scope. Authentication is ALWAYS enforced
+    -- there is no anonymous / "open" mode that grants scopes; the
+    anonymous identity carries NO scopes.
   * require_scope dependency: allow/deny via a FastAPI TestClient and via
     direct dependency invocation with a fake CurrentUser.
 """
@@ -95,32 +97,32 @@ def test_role_scopes_map_shape():
 
 
 # ---------------------------------------------------------------------------
-# CurrentUser RBAC fields + open mode
+# CurrentUser RBAC fields -- anonymous is SCOPELESS (no open mode)
 # ---------------------------------------------------------------------------
-def test_open_mode_anonymous_has_all_scopes():
+def test_anonymous_has_no_scopes():
+    # Auth is always enforced: the anonymous identity (only reachable on a
+    # public allowlist route) carries NO scopes, so it passes no guard.
     u = CurrentUser.anonymous()
     assert u.is_anonymous
-    assert u.scopes == frozenset(ALL_SCOPES)
+    assert u.scopes == frozenset()
     for s in (Scope.CHAT, Scope.INVESTIGATE, Scope.MCP, Scope.ADMIN):
-        assert u.has_scope(s)
+        assert not u.has_scope(s)
 
 
-def test_attach_authz_open_mode_grants_all():
-    u = CurrentUser(
-        sub="u1", email=None, name=None, picture_url=None,
-        groups=("member_chat-grp",), is_anonymous=False,
-    )
-    enriched = attach_authz(u, role_mappings={}, open_mode=True)
-    assert enriched.scopes == frozenset(ALL_SCOPES)
+def test_attach_authz_anonymous_gets_no_scopes():
+    # An anonymous user is never granted scopes.
+    u = CurrentUser.anonymous()
+    enriched = attach_authz(u, role_mappings={})
+    assert enriched.scopes == frozenset()
 
 
-def test_attach_authz_oidc_resolves_from_groups():
+def test_attach_authz_resolves_from_groups():
     u = CurrentUser(
         sub="u1", email=None, name=None, picture_url=None,
         groups=("chat-only",), is_anonymous=False,
     )
     enriched = attach_authz(
-        u, role_mappings={"chat-only": ["member_chat"]}, open_mode=False,
+        u, role_mappings={"chat-only": ["member_chat"]},
     )
     assert enriched.roles == frozenset({"member_chat"})
     assert enriched.scopes == frozenset({Scope.CHAT})
@@ -181,12 +183,14 @@ def test_require_scope_denies_when_missing():
     assert body["scope"] == Scope.ADMIN
 
 
-def test_require_scope_open_mode_anonymous_allows_all():
-    # Open-mode anonymous carries ALL scopes -> every guard passes.
+def test_require_scope_anonymous_denied_all():
+    # Auth is always enforced: a (scopeless) anonymous user passes NO guard.
+    # In practice the global middleware 401s these requests before they reach
+    # a guarded handler; here we assert the guard itself denies (403).
     user = CurrentUser.anonymous()
     client = TestClient(_build_app(user))
-    assert client.get("/needs-chat").status_code == 200
-    assert client.get("/needs-admin").status_code == 200
+    assert client.get("/needs-chat").status_code == 403
+    assert client.get("/needs-admin").status_code == 403
 
 
 def test_member_chat_user_denied_admin_route():

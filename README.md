@@ -52,7 +52,7 @@ account, and no external identity provider required.
 | 🖼️ **Image understanding** | Attach a screenshot or diagram on the web UI or any channel bot — ephemeral, vision pass-through with provider-aware auto-routing to a vision model when the active one can't see (bytes are never persisted). |
 | 🔌 **23 MCP connectors** | Read-only, opt-in connectors, grouped by category — Cloud (AWS, Azure, GCP, Cloudflare), Observability (Prometheus, Datadog, Grafana, Loki, Splunk, Sentry, Elasticsearch, CloudWatch, Stackdriver), Source & Code (GitHub, GitLab), Incident Management (PagerDuty, Rootly, Slack), Kubernetes, and the local knowledge base. |
 | 🌍 **Multi-environment** | One instance targeting many environments' Kubernetes / Prometheus / Elasticsearch via a single `environments:` registry. |
-| 🔐 **Auth built in** | `open` / `oidc` / first-party `login` modes, SSO (Google · GitHub · Microsoft), per-session ownership, optional Redis rate limiting. |
+| 🔐 **Auth built in** | first-party `login` (default) / `oidc` modes, SSO (Google · GitHub · Microsoft), a seeded admin account, per-session ownership, optional Redis rate limiting. |
 | 🧩 **Pluggable everything** | Vector store, knowledge graph, and LLM / embedding / reranker providers are all swappable from config — no rebuild. |
 | 📊 **Observability** | Per-request token + cost telemetry, Phoenix / OTLP traces, and an evaluation harness wired into CI gates. |
 | 📏 **Runnable eval** | A two-tier golden eval over the shipped `samples/` corpus — an offline retrieval gate (`pytest tests/integration/test_eval_samples_retrieval.py`, no secrets) plus a full answer-quality judge (`python -m opsrag.eval run`). |
@@ -111,27 +111,42 @@ curl -sf http://localhost:8080/readyz
 docker compose -f deploy/compose/docker-compose.yaml exec opsrag-api \
   scripts/seed-sample-corpus.sh
 
-# 5. (Illustrates OIDC) Get a token from the bundled Dex — the stand-in for a
-#    real IdP. NOTE: the compose demo runs in OPEN mode (see "Authentication"
-#    below), so this token is ACCEPTED but not REQUIRED. It shows the `oidc`
-#    path; there is no first-party "admin" user in this mode.
-TOKEN=$(curl -sf -X POST \
-  -d 'grant_type=password' \
-  -d 'username=evaluator@example.com' -d 'password=evaluator' \
-  -d 'client_id=opsrag-local' -d 'client_secret=local-secret' \
-  -d 'scope=openid profile email' \
-  http://localhost:5556/dex/token | jq -r .access_token)
+# 5. Log in. The compose demo runs in LOGIN mode (the default), so the API
+#    enforces auth: open the web UI at http://localhost:5173 and you will hit
+#    the SIGN-IN screen. Log in as the seeded admin — by default
+#    admin@opsrag.local with the password from your .env
+#    (OPSRAG_ADMIN_EMAIL / OPSRAG_ADMIN_PASSWORD). To drive the API directly,
+#    grab a session cookie:
+curl -sf -X POST http://localhost:8080/auth/login \
+  -d "email=admin@opsrag.local" -d "password=$OPSRAG_ADMIN_PASSWORD" \
+  -c cookies.txt
 
-# 6. Ask a question. In the open-mode demo the Authorization header is OPTIONAL
-#    (the same call works without it); in `oidc` mode it would be required.
-curl -sf -X POST http://localhost:8080/query \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+# 6. Ask a question (authenticated with the session cookie from step 5):
+curl -sf -X POST http://localhost:8080/query -b cookies.txt \
+  -H 'Content-Type: application/json' \
   -d '{"query":"How do I roll back an Acme Notes deployment?"}' | jq
 ```
 
 You get back a cited answer drawn from the indexed `samples/` corpus, plus a
 `session_id` and a `trace_id`. Open the web UI at <http://localhost:5173>, or
 inspect the full LangGraph trace in Phoenix at <http://localhost:6006>.
+
+> **Using an external IdP instead?** Switch to `oidc` mode and point OpsRAG at
+> your IdP. The bundled Dex (`:5556`) illustrates that path — mint a token with
+> the resource-owner password grant and send it as a Bearer:
+>
+> ```sh
+> TOKEN=$(curl -sf -X POST \
+>   -d 'grant_type=password' \
+>   -d 'username=evaluator@example.com' -d 'password=evaluator' \
+>   -d 'client_id=opsrag-local' -d 'client_secret=local-secret' \
+>   -d 'scope=openid profile email' \
+>   http://localhost:5556/dex/token | jq -r .access_token)
+>
+> curl -sf -X POST http://localhost:8080/query \
+>   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+>   -d '{"query":"How do I roll back an Acme Notes deployment?"}' | jq
+> ```
 
 > **Heads-up:** the bundled Dex advertises its issuer as
 > `http://localhost:5556/dex` while the API reaches it in-cluster at
@@ -141,39 +156,42 @@ inspect the full LangGraph trace in Phoenix at <http://localhost:6006>.
 The full walkthrough lives in
 [`docs/getting-started.md`](docs/getting-started.md).
 
-## 🔑 Authentication: the Dex user vs. the admin user
+## 🔑 Authentication: the admin user vs. the Dex user
 
-The Dex token above and the first-party `admin@opsrag.local` account belong to
-**two different auth modes** — a common point of confusion. OpsRAG has three:
+Authentication is **always enforced** — there is no anonymous / "open" mode.
+The seeded `admin@opsrag.local` account and the Dex `evaluator@example.com`
+token belong to **two different auth modes** — a common point of confusion.
+OpsRAG has two:
 
 | Mode | Who proves identity | First-party users? | Used by |
 |---|---|---|---|
-| `open` | nobody — every request is anonymous with all scopes | — | the **compose demo** (so the cookie-less UI works with no login screen) |
-| `oidc` | an **external IdP** issues a Bearer token; OpsRAG only *validates* it | **No** — no user database; identity lives entirely in the token | the **Dex** flow above; in production, your Okta / Entra / Google |
-| `login` | OpsRAG's own login: password + SSO (Google/GitHub/Microsoft) + cookies | **Yes** — including the bootstrap **`admin@opsrag.local`** | first-party deployments |
+| `login` *(default)* | OpsRAG's own login: password + SSO (Google/GitHub/Microsoft) + cookies | **Yes** — including the bootstrap **`admin@opsrag.local`** | the **compose demo** and first-party deployments |
+| `oidc` | an **external IdP** issues a Bearer token; OpsRAG only *validates* it | **No** — no user database; identity lives entirely in the token | the **Dex** illustration above; in production, your Okta / Entra / Google |
 
-**The key point: by default there is no admin account.** In `oidc` mode the
-"user" is whoever the token says — the Dex `evaluator@example.com` above — and
-OpsRAG keeps **no user records at all**. The `admin@opsrag.local` account only
-exists when you run **`login` mode**. So the "Dex user" and the "admin user"
-are not the same thing, and you can't swap one for the other within a single
-mode.
+**The key point.** The compose demo runs in `login` mode, so the web UI shows a
+**sign-in screen** and you log in as the seeded **`admin@opsrag.local`**
+account. In `oidc` mode there is no admin account at all — the "user" is
+whoever the token says (the Dex `evaluator@example.com` above) and OpsRAG keeps
+**no user records**. So the "admin user" and the "Dex user" are not the same
+thing, and you can't swap one for the other within a single mode.
 
-**Getting the admin user.** There is no pre-baked password to retrieve — you
-create it. Switch to `login` mode and set your own credentials via env (never
-inline in config):
+**The admin user.** There is no pre-baked password to retrieve — you set it.
+OpsRAG **seeds** the admin (role `admin`, idempotent) on boot in `login` mode
+from your env (never inline in config); the compose demo defaults to
+`admin@opsrag.local`:
 
 ```sh
-# config.yaml ->  auth: { mode: login }
+# .env (login mode is the default — no config.yaml change needed)
 OPSRAG_SESSION_SIGNING_KEY=<32+ random bytes>      # signs session cookies
 OPSRAG_ADMIN_EMAIL=admin@opsrag.local
 OPSRAG_ADMIN_PASSWORD=<choose-a-strong-password>
 ```
 
-On boot OpsRAG **seeds** that admin (role `admin`, idempotent). Log in via the
-web UI's login screen, or `POST /auth/login` to get a session cookie. Full
-steps (SSO, refresh tokens, RBAC) are in [docs/auth.md](docs/auth.md), which
-covers all three modes end to end.
+Log in via the web UI's sign-in screen, or `POST /auth/login` to get a session
+cookie (see the Quickstart). For an `http://localhost` demo the session cookie
+must be sent over plain HTTP, so set `cookie_secure: false` in that case. Full
+steps (SSO, refresh tokens, RBAC, the `oidc` setup) are in
+[docs/auth.md](docs/auth.md), which covers both modes end to end.
 
 ## 🧭 Documentation
 

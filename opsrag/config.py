@@ -734,12 +734,13 @@ class AuthConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Auth mode. `open` = no enforcement (same as `auth is None`); `oidc` =
-    # verify incoming Bearer JWTs against `issuer`/`audience` (today's
-    # behavior, requires both); `login` = first-party login (password + SSO,
-    # built in the auth feature track). Default `oidc` preserves prior
-    # behavior whenever an `auth` block is present.
-    mode: Literal["open", "oidc", "login"] = "oidc"
+    # Auth mode. Authentication is ALWAYS enforced -- there is no anonymous /
+    # "open" mode. `login` (default) = first-party login: a built-in admin
+    # account plus optional SSO providers, with signed cookie sessions. `oidc`
+    # = verify incoming Bearer JWTs against an external IdP's `issuer`/
+    # `audience` (requires both). Non-allowlisted requests without a valid
+    # identity are rejected (401) in either mode.
+    mode: Literal["oidc", "login"] = "login"
     issuer: str | None = Field(
         default=None,
         description="OIDC discovery base URL; no trailing slash. Required when mode='oidc'.",
@@ -794,7 +795,10 @@ class Settings(BaseModel):
     # deployment context. Every value that varies between deployments
     # belongs under ``deployment`` per Constitution Principle VI.
     # ------------------------------------------------------------------
-    auth: AuthConfig | None = None
+    # Auth is ALWAYS present -- the product never serves anonymous traffic.
+    # When no `auth` block is supplied (e.g. the compose demo), it defaults
+    # to first-party `login` mode (built-in admin + optional SSO).
+    auth: AuthConfig = Field(default_factory=lambda: AuthConfig(mode="login"))
     mcp: dict[str, MCPConfigBlock] = Field(default_factory=_default_mcp_map)
     deployment: DeploymentContext = Field(default_factory=DeploymentContext)
 

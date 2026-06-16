@@ -72,9 +72,9 @@ class CurrentUser:
     authoritative check shared by the ``/me`` payload and the guards so
     the UI never shows nav the server then 403s.
 
-    In OPEN mode the user carries every scope (no enforcement); see
-    :meth:`anonymous`, which is the open-mode identity and returns all
-    scopes.
+    Authentication is ALWAYS enforced -- there is no anonymous / "open"
+    mode that grants scopes. The :meth:`anonymous` identity carries NO
+    scopes and is only reachable on the public allowlist routes.
     """
 
     sub: str | None
@@ -88,16 +88,14 @@ class CurrentUser:
 
     @classmethod
     def anonymous(cls) -> CurrentUser:
-        """Open-mode / unauthenticated identity.
+        """Unauthenticated identity, only reachable on public allowlist routes.
 
-        Carries ALL scopes so that, in open mode (no auth configured),
-        every request passes every ``require_scope`` guard -- preserving
-        today's zero-config behavior where everyone can do everything.
-        ``ALL_SCOPES`` is imported lazily to avoid an import cycle
-        (scopes.py imports CurrentUser).
+        Carries NO roles and NO scopes -- authentication is always enforced,
+        so an anonymous user passes no ``require_scope`` guard. The global
+        middleware 401s every non-allowlisted request before a handler runs,
+        so this identity is only ever produced for the public allowlist
+        (``/healthz``, ``/ui-config``, ...) where scopes are not consulted.
         """
-        from opsrag.auth.scopes import ALL_SCOPES
-
         return cls(
             sub=None,
             email=None,
@@ -106,7 +104,7 @@ class CurrentUser:
             groups=(),
             is_anonymous=True,
             roles=frozenset(),
-            scopes=frozenset(ALL_SCOPES),
+            scopes=frozenset(),
         )
 
     def with_authz(

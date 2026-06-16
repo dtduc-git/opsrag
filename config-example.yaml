@@ -12,10 +12,15 @@
 #   - The root model forbids unknown keys: a typo'd block name fails startup.
 # =============================================================================
 
-# --- Authentication (OIDC) ---------------------------------------------------
+# --- Authentication ----------------------------------------------------------
+# Authentication is ALWAYS enforced -- there is no anonymous / "open" mode.
+#   mode: oidc  -> validate Bearer JWTs against an external IdP (issuer/audience).
+#   mode: login -> first-party login (built-in admin + optional SSO); the
+#                  default when no `auth` block is supplied.
 auth:
-  issuer: https://your-idp.example.com        # OIDC discovery base URL
-  audience: opsrag                             # expected token audience
+  mode: oidc                                   # oidc | login
+  issuer: https://your-idp.example.com        # OIDC discovery base URL (mode=oidc)
+  audience: opsrag                             # expected token audience (mode=oidc)
   jwks_cache_seconds: 300                      # how long to cache signing keys
 
 # --- Cloud model bundle (optional shortcut) ----------------------------------
