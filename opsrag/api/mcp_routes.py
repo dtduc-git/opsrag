@@ -440,14 +440,18 @@ async def mcp_messages(
     try:
         envelope = await request.json()
     except json.JSONDecodeError as exc:
+        # Log detail server-side; return a generic message to the client
+        # (the raw exc can leak request internals -- py/stack-trace-exposure).
+        _log.warning("MCP parse error: %s", exc)
         return {
             "jsonrpc": "2.0", "id": None,
-            "error": {"code": -32700, "message": f"parse error: {exc}"},
+            "error": {"code": -32700, "message": "parse error"},
         }
     except Exception as exc:  # noqa: BLE001
+        _log.warning("MCP parse error: %s", exc)
         return {
             "jsonrpc": "2.0", "id": None,
-            "error": {"code": -32700, "message": f"parse error: {exc}"},
+            "error": {"code": -32700, "message": "parse error"},
         }
 
     ctx = _MCPCallCtx(
