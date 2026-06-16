@@ -170,6 +170,50 @@ def _messages_to_gemini_contents(messages: list[dict]) -> list:
     return contents
 
 
+def _assemble_gemini_contents(
+    messages: list[dict],
+    system_prompt: str | None,
+    *,
+    content_cls: Callable[..., Any],
+    part_from_text: Callable[[str], Any],
+    parts_builder: Callable[[Any], list],
+) -> list:
+    """Build the ordered list of Gemini ``Content`` turns for a chat call.
+
+    Pure / dependency-injected so it can be unit-tested without importing
+    the ``vertexai`` SDK: callers pass the ``Content`` constructor, a
+    ``Part.from_text`` factory, and a parts-builder (``to_gemini_parts``).
+
+    Roles: ``assistant`` -> ``model``, everything else -> ``user``.
+
+    System-prompt placement: Gemini on this SDK path has no separate
+    system role, so the system guidance must ride on a USER turn -- never
+    a ``model`` turn. We attach the system text Part to the first
+    user-role Content's parts. If there is no user-role content (e.g. the
+    history starts with a ``model`` turn), we insert a NEW leading
+    ``Content(role="user", parts=[system_part])`` at the front.
+    """
+    contents: list = []
+    for msg in messages:
+        role = "model" if msg.get("role") == "assistant" else "user"
+        parts = parts_builder(msg.get("content", ""))
+        contents.append(content_cls(role=role, parts=parts))
+
+    if system_prompt:
+        sys_part = part_from_text(system_prompt)
+        first_user_idx = next(
+            (i for i, c in enumerate(contents) if c.role == "user"), None
+        )
+        if first_user_idx is None:
+            contents.insert(0, content_cls(role="user", parts=[sys_part]))
+        else:
+            target = contents[first_user_idx]
+            contents[first_user_idx] = content_cls(
+                role="user", parts=[sys_part] + list(target.parts)
+            )
+    return contents
+
+
 def _extract_gemini_text(resp: Any) -> str:
     # `resp.text` raises "Multiple content parts are not supported" when the
     # candidate has more than one part (e.g. text + thought, or text + function
@@ -352,16 +396,16 @@ class VertexAILLM:
         from vertexai.generative_models import Content, GenerationConfig, Part
 
         client = self._get_client()
-        sys_parts = [Part.from_text(system_prompt)] if system_prompt else []
-        contents = []
-        for msg in messages:
-            role = "model" if msg.get("role") == "assistant" else "user"
-            parts = to_gemini_parts(msg.get("content", ""))
-            contents.append(Content(role=role, parts=parts))
-        # Prepend the system prompt to the first user turn's parts (Gemini has
-        # no separate system role on this SDK path).
-        if sys_parts and contents:
-            contents[0] = Content(role=contents[0].role, parts=sys_parts + contents[0].parts)
+        # Assemble turns + attach the system prompt to a USER turn (never a
+        # model turn) -- see `_assemble_gemini_contents`. Gemini has no
+        # separate system role on this SDK path.
+        contents = _assemble_gemini_contents(
+            messages,
+            system_prompt,
+            content_cls=Content,
+            part_from_text=Part.from_text,
+            parts_builder=to_gemini_parts,
+        )
 
         # T1.1: when response_schema is provided, force structured JSON
         # output. This makes Gemini's thinking phase a separate budget

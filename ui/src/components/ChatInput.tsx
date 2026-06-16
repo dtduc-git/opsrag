@@ -63,7 +63,13 @@ export default function ChatInput({ onSend, disabled }: Props) {
   const addFiles = async (files: FileList | File[]) => {
     const picked = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (!picked.length) return;
-    const decoded = await Promise.all(picked.map(readFileAsImage));
+    // allSettled (not all): one unreadable file must not reject the whole
+    // batch. Keep the fulfilled results, silently drop the rejected ones.
+    const settled = await Promise.allSettled(picked.map(readFileAsImage));
+    const decoded = settled
+      .filter((r): r is PromiseFulfilledResult<PendingImage> => r.status === "fulfilled")
+      .map((r) => r.value);
+    if (!decoded.length) return;
     setImages((prev) => [...prev, ...decoded].slice(0, MAX_IMAGES));
   };
 
