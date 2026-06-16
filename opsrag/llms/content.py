@@ -142,12 +142,13 @@ _VISION_MODEL_MARKERS = (
 )
 
 # Provider-aware default when the active model can't see and no explicit
-# `vision.model` is configured (spec FR-011). These ids are valid in this
-# codebase out of the box; for Sonnet 4.6 specifically set OPSRAG_VISION_MODEL
-# / vision.model to your exact id.
+# `vision.model` is configured (spec FR-011). Aligned with the project's
+# reason/pro tier (Sonnet 4.6 -- see model_bundles.py + pricing.py); override
+# with OPSRAG_VISION_MODEL / vision.model for a different id. The Bedrock id is
+# the region-prefixed inference profile AWS deployments use (model_bundles "aws").
 _DEFAULT_VISION_MODEL = {
-    "anthropic": "claude-sonnet-4-20250514",
-    "bedrock": "anthropic.claude-sonnet-4-20250514-v1:0",
+    "anthropic": "claude-sonnet-4-6",
+    "bedrock": "us.anthropic.claude-sonnet-4-6",
     "vertex": "gemini-3-flash-preview",
     "openai": "gpt-4o",
     "litellm": None,
