@@ -1,0 +1,70 @@
+# Procedure how-to goldens over the shipped `samples/` corpus.
+# expected_sources are paths RELATIVE TO samples/.
+- id: howto_001
+  category: runbook_howto
+  query: "How do I scale the acme-notes API manually?"
+  expected_sources:
+    - runbooks/003-acme-notes-scaling.md
+  must_contain:
+    - "scale"
+    - "replicas"
+  must_not_contain:
+    - "I don't know"
+  notes: "Manual scale via `kubectl ... scale deploy/acme-notes-api --replicas=8`."
+
+- id: howto_002
+  category: runbook_howto
+  query: "What are the first triage steps for an acme-notes incident?"
+  expected_sources:
+    - runbooks/004-acme-notes-incident-response.md
+  must_contain:
+    - "golden signals"
+  must_not_contain:
+    - "I don't know"
+  notes: "First-responder triage checklist."
+
+- id: howto_003
+  category: runbook_howto
+  query: "How do I deploy a new acme-notes-api image version?"
+  expected_sources:
+    - runbooks/001-acme-notes-deploy.md
+  must_contain:
+    - "set image"
+    - "rollout status"
+  must_not_contain:
+    - "I don't know"
+  notes: "Deploy procedure: `set image` then watch `rollout status`."
+
+- id: howto_004
+  category: runbook_howto
+  query: "How do I roll back a bad acme-notes database migration?"
+  expected_sources:
+    - runbooks/002-acme-notes-db-failover.md
+  must_contain:
+    - "snapshot"
+  must_not_contain:
+    - "I don't know"
+  notes: "Migration rollback restores the pre-migration snapshot."
+
+- id: howto_005
+  category: runbook_howto
+  query: "How do I selectively flush only stale acme-notes cache keys?"
+  expected_sources:
+    - runbooks/005-acme-notes-cache-flush.md
+  must_contain:
+    - "selective"
+    - "key prefix"
+  must_not_contain:
+    - "I don't know"
+  notes: "Selective flush (preferred): delete only the affected key prefix."
+
+- id: howto_006
+  category: runbook_howto
+  query: "How do I verify the acme-notes database failover succeeded?"
+  expected_sources:
+    - runbooks/002-acme-notes-db-failover.md
+  must_contain:
+    - "pg_isready"
+  must_not_contain:
+    - "I don't know"
+  notes: "Verification step uses `pg_isready` + the API /readyz endpoint."

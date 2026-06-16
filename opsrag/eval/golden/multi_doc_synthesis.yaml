@@ -1,0 +1,47 @@
+# Multi-document synthesis goldens -- answering well needs 2+ docs.
+# expected_sources are paths RELATIVE TO samples/, AND-semantics (must find ALL).
+- id: synth_001
+  category: multi_doc_synthesis
+  query: "An acme-notes deploy caused a latency spike -- what happened and how was it fixed?"
+  expected_sources:
+    - postmortems/2026-02-03-acme-notes-api-latency.md
+    - runbooks/001-acme-notes-deploy.md
+  must_contain:
+    - "N+1"
+    - "Rolled back"
+  must_not_contain:
+    - "I don't know"
+  notes: |
+    The latency postmortem describes the N+1 regression and the rollback; the
+    deploy runbook is the referenced rollback procedure. Both are required
+    (AND-semantics) to fully ground the synthesis. must_contain "Rolled back"
+    matches the postmortem mitigation line verbatim.
+
+- id: synth_002
+  category: multi_doc_synthesis
+  query: "Summarize the acme-notes auth/login outage and its cause."
+  expected_sources:
+    - postmortems/2026-03-20-acme-notes-auth-outage.md
+  must_contain:
+    - "OIDC"
+    - "cert"
+  must_not_contain:
+    - "I don't know"
+  notes: |
+    The login outage was caused by the OIDC signing certificate expiring
+    without rotation. "cert" matches "certificate" as a substring.
+
+- id: synth_003
+  category: multi_doc_synthesis
+  query: "What caused the acme-notes database outage and what action items came out of it?"
+  expected_sources:
+    - postmortems/2026-01-15-acme-notes-db-outage.md
+  must_contain:
+    - "disk"
+    - "WAL"
+  must_not_contain:
+    - "I don't know"
+  notes: |
+    The DB outage was a full disk from WAL segments accumulating because WAL
+    archiving fell behind; action items cover alert thresholds + WAL lag
+    monitoring + backfill rate-limiting.

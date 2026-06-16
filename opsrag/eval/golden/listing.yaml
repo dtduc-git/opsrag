@@ -1,0 +1,15 @@
+# Enumeration goldens over the shipped `samples/` corpus.
+# expected_sources are paths RELATIVE TO samples/.
+- id: listing_001
+  category: listing
+  query: "What are the four golden signals to check during an acme-notes incident?"
+  expected_sources:
+    - runbooks/004-acme-notes-incident-response.md
+  must_contain:
+    - "latency"
+    - "traffic"
+    - "errors"
+    - "saturation"
+  must_not_contain:
+    - "I don't know"
+  notes: "The incident runbook lists latency, traffic, errors, saturation."

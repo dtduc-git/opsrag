@@ -1,0 +1,30 @@
+# Negative goldens -- the asked-about fact is NOT in the `samples/` corpus, so
+# the answer must hedge/refuse rather than fabricate. These have empty
+# expected_sources AND empty acceptable_sources, so the ranking/recall metric
+# SKIPS them (no relevant doc exists). They exist for the answer-quality tier
+# (`python -m opsrag.eval run`), where must_not_contain guards against
+# hallucinated specs.
+- id: negative_001
+  category: negative
+  query: "What is the acme-notes Kafka topic retention policy?"
+  expected_sources: []
+  acceptable_sources: []
+  must_not_contain:
+    - "retention.ms"
+  notes: |
+    Kafka is NOT in the corpus -- acme-notes uses PostgreSQL + Redis only.
+    The answer must NOT invent a retention config (e.g. a "retention.ms" value).
+    Scored-retrieval is SKIPPED (empty relevant set); answer-quality tier
+    asserts no fabricated spec.
+
+- id: negative_002
+  category: negative
+  query: "What is the acme-notes API rate-limit per API key?"
+  expected_sources: []
+  acceptable_sources: []
+  must_not_contain:
+    - "requests per second"
+  notes: |
+    No rate-limit-per-API-key fact exists in the corpus. The answer must
+    refuse / hedge rather than invent a per-key throughput figure. Scored
+    retrieval is SKIPPED (empty relevant set).
