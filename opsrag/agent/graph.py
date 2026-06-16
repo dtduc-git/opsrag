@@ -144,6 +144,7 @@ from opsrag.interfaces.embedder import EmbeddingProvider
 from opsrag.interfaces.graphstore import KnowledgeGraphStore
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.memory import MemoryStore
+from opsrag.llms.content import ImagePart
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.reranker import Reranker
 from opsrag.interfaces.vectorstore import VectorStore
@@ -747,6 +748,8 @@ async def query_with_session(
     semantic_router=None,
     user_email: str | None = None,
     user_name: str | None = None,
+    images: list[ImagePart] | None = None,
+    vision_llm=None,
 ) -> dict:
     if thread_id is None:
         thread_id = f"{user_id}_{uuid4().hex[:8]}"
@@ -805,6 +808,10 @@ async def query_with_session(
         _skip_cache = (
             should_skip_cache(query)
             or _qa_cache_globally_disabled()
+            # Image turns bypass the cache: it is keyed on the text embedding
+            # only (image-blind), so a matching prior text-only Q must not be
+            # served here. The store below is guarded the same way.
+            or bool(images)
             or (
                 _classification is not None
                 and policy_for(_classification.category)["skip_cache"]
@@ -873,12 +880,33 @@ async def query_with_session(
     # replayed by ANOTHER user can show the original author's name
     # instead of a generic "You". user_email/user_name are None for
     # legacy / pre-Pomerium threads -- UI falls back to "You".
+    # EPHEMERAL vision side-channel: image bytes + the vision-fallback LLM ride
+    # in the runnable `config` ONLY (spec FR-003). LangGraph persists `state`
+    # (the `initial` dict below) to the checkpointer per thread_id, so bytes
+    # there would survive the turn. `configurable` is only PARTLY persisted:
+    # LangGraph promotes a configurable value into the durable checkpoint
+    # metadata ONLY when it is a scalar (str/int/float/bool) -- see langgraph
+    # `_internal._config._exclude_as_metadata`. That's how the identity strings
+    # below (user_email/user_name) survive for cross-user replay. `turn_images`
+    # (a list[ImagePart]) and `vision_llm` (an object) are NON-scalar, so they
+    # are never promoted, never serialized, and never persisted -- the generator
+    # reads them from config at run time only. (Footgun: never put an image as a
+    # base64 STRING here; a scalar WOULD be persisted.) The persisted query
+    # (in `initial`) records only a text marker noting an image was attached.
     config = {"configurable": {
         "thread_id": thread_id,
         "user_id": user_id,
         "user_email": user_email,
         "user_name": user_name,
+        "turn_images": images or [],
+        "vision_llm": vision_llm,
     }}
+    # History/checkpoint must record THAT an image was attached (so follow-up
+    # turns + the session transcript make sense) but NEVER the bytes.
+    query_for_state = query
+    if images:
+        names = ", ".join(img.name or "image" for img in images)
+        query_for_state = f"{query} [attached image: {names}]".strip()
     # Per-turn state. CRITICAL: explicitly reset every retrieval/generation
     # field so prior-turn chunks don't leak through the LangGraph checkpointer.
     # Without these resets, rerank_node reads `merged_results` from the
@@ -886,7 +914,7 @@ async def query_with_session(
     # `retrieved_chunks` is checked -> the LLM answers using last turn's
     # context regardless of what we just retrieved.
     initial: dict = {
-        "query": query,
+        "query": query_for_state,
         "user_id": user_id,
         "thread_id": thread_id,
         # Loop budgets + per-turn scratch. ALL must reset every turn -- the
@@ -1045,6 +1073,11 @@ async def query_with_session(
         and answer
         and not grounded_explicitly_failed
         and not tool_path_answer
+        # Image turns are NOT cached: the answer may depend on the attached
+        # image, but the cache is keyed on the text embedding only -- so a
+        # later text-only turn with matching text could be served an
+        # image-dependent answer. Mirrors the lookup skip above.
+        and not images
     ):
         try:
             # TTL per category -- forensic 90d, procedural 30d, mixed 5min,
@@ -1128,6 +1161,8 @@ async def query_with_session_events(
     semantic_router=None,
     user_email: str | None = None,
     user_name: str | None = None,
+    images: list[ImagePart] | None = None,
+    vision_llm=None,
 ) -> AsyncIterator[dict]:
     """Yields progress events as the agent runs.
 
@@ -1183,6 +1218,10 @@ async def query_with_session_events(
         _skip_cache = (
             should_skip_cache(query)
             or _qa_cache_globally_disabled()
+            # Image turns bypass the cache: it is keyed on the text embedding
+            # only (image-blind), so a matching prior text-only Q must not be
+            # served here. The store below is guarded the same way.
+            or bool(images)
             or (
                 _classification is not None
                 and policy_for(_classification.category)["skip_cache"]
@@ -1249,19 +1288,32 @@ async def query_with_session_events(
             }
             return
 
-    # `configurable` is persisted alongside every checkpoint by langgraph
-    # postgres saver. We embed the author identity here so a session
-    # replayed by ANOTHER user can show the original author's name
-    # instead of a generic "You". user_email/user_name are None for
-    # legacy / pre-Pomerium threads -- UI falls back to "You".
+    # Scalar `configurable` values are promoted into the durable checkpoint
+    # metadata by langgraph (see `_exclude_as_metadata`). We embed the author
+    # identity here so a session replayed by ANOTHER user can show the original
+    # author's name instead of a generic "You". user_email/user_name are None
+    # for legacy / pre-Pomerium threads -- UI falls back to "You".
+    # EPHEMERAL vision side-channel (see query_with_session for the full
+    # rationale): image bytes + vision-fallback LLM ride in the runnable
+    # `config` only. They are NON-scalar, so langgraph never promotes them to
+    # checkpoint metadata and never writes them to the graph `state` below --
+    # nothing durable holds the bytes. (Footgun: never pass an image as a
+    # base64 STRING via configurable; a scalar WOULD be persisted.)
     config = {"configurable": {
         "thread_id": thread_id,
         "user_id": user_id,
         "user_email": user_email,
         "user_name": user_name,
+        "turn_images": images or [],
+        "vision_llm": vision_llm,
     }}
+    # History/checkpoint records THAT an image was attached, never the bytes.
+    query_for_state = query
+    if images:
+        names = ", ".join(img.name or "image" for img in images)
+        query_for_state = f"{query} [attached image: {names}]".strip()
     initial: dict = {
-        "query": query,
+        "query": query_for_state,
         "user_id": user_id,
         "thread_id": thread_id,
         # Per-turn budgets + scratch -- ALL reset (checkpointer leaks otherwise;
@@ -1428,6 +1480,11 @@ async def query_with_session_events(
         and answer
         and not grounded_explicitly_failed
         and not tool_path_answer
+        # Image turns are NOT cached: the answer may depend on the attached
+        # image, but the cache is keyed on the text embedding only -- so a
+        # later text-only turn with matching text could be served an
+        # image-dependent answer. Mirrors the lookup skip above.
+        and not images
     ):
         try:
             # TTL per category -- forensic 90d, procedural 30d, mixed 5min,

@@ -51,6 +51,27 @@ llm:
   #   aws_region: us-east-1
   #   aws_profile: your-aws-profile
 
+# --- Vision (image understanding) --------------------------------------------
+# Attach images to a chat turn on the web UI AND every channel bot
+# (Telegram/Discord/Slack/Teams). The image is sent to a vision-capable model
+# alongside the question for THAT turn only -- bytes are ephemeral (never written
+# to the checkpoint, session store, or any durable store; history keeps just a
+# "[attached image: <name>]" marker).
+#
+# `model`/`provider` are an auto-route FALLBACK, used only when the active
+# llm.model can't see. Left null, a provider-aware default is resolved at
+# startup: Bedrock/Anthropic -> claude-sonnet-4-6 ; Vertex -> gemini-3-flash-preview.
+# If no vision model is available the image is dropped and the answer says so.
+# All keys are env/YAML overridable (no rebuild): OPSRAG_VISION_ENABLED,
+# OPSRAG_VISION_MODEL, OPSRAG_VISION_PROVIDER (see .env.example).
+vision:
+  enabled: true
+  model: null            # explicit override wins, e.g. "anthropic.claude-sonnet-4-6-v1:0"
+  provider: null         # defaults to llm.provider above
+  max_images: 4          # per turn (whole turn rejected if exceeded)
+  max_bytes: 5242880     # 5 MB per image
+  allowed_mime: ["image/png", "image/jpeg", "image/gif", "image/webp"]
+
 # --- Embeddings --------------------------------------------------------------
 embedding:
   provider: fastembed            # fastembed | openai | vertex | bedrock

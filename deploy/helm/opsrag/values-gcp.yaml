@@ -46,6 +46,14 @@ config:
     apiKeyEnv: ANTHROPIC_API_KEY   # unused on Vertex (WI), kept for schema
     project: <PROJECT_ID>
     location: us-central1
+  vision:
+    # Image understanding (ephemeral). Leaving model empty keeps the
+    # provider-aware default for Vertex (gemini-3-flash-preview), used as the
+    # auto-route fallback when the active model can't see. Pin a model id to
+    # force a specific vision model.
+    enabled: true
+    model: ""                      # e.g. "gemini-3-flash-preview"
+    provider: ""                   # defaults to llm.provider
   embedding:
     # Defaults left at fastembed so the gcp bundle promotes them to Vertex
     # gemini-embedding-001. dimension filled to 3072 by the bundle; pinned here

@@ -95,6 +95,7 @@ async def build_and_start(
         investigation_cache=getattr(caches, "investigation_cache", None),
         semantic_router=getattr(caches, "semantic_router", None),
         feedback_store=getattr(caches, "feedback_store", None),
+        vision=getattr(cfg, "vision", None),
     )
 
     await adapter.connect(dispatcher)

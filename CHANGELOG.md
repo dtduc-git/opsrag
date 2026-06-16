@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Image understanding (vision) across web + channels.** Users can now attach
+  images to a chat turn from the web UI (file picker, clipboard paste, and
+  drag-and-drop) and from every channel bot (Slack/Telegram/Discord/Teams). The
+  image is sent to a vision-capable model alongside the question for that turn
+  (pass-through). Bytes are **ephemeral** — never written to the LangGraph
+  checkpoint, the session store, or any durable store; conversation history keeps
+  only a `[attached image: <name>]` marker. When the active model can't see,
+  OpsRAG auto-routes the turn to a configured vision model with **provider-aware
+  defaults** (Bedrock/Anthropic → `claude-sonnet-4-6`; Vertex →
+  `gemini-3-flash-preview`); if none is available the image is dropped and the
+  reply notes it. Channel adapters fetch image bytes only **after** the existing
+  permission check passes (no fetch on denied messages), and the per-turn limits
+  (max 4 images, ≤5 MB each, png/jpeg/gif/webp) are enforced on both the web and
+  channel paths. Configurable via the new `vision:` block and the
+  `OPSRAG_VISION_ENABLED` / `OPSRAG_VISION_PROVIDER` / `OPSRAG_VISION_MODEL` env
+  overrides (no rebuild). See [`docs/configuration.md`](docs/configuration.md).
+
 ### Security
 
 - Cleared the code-scanning backlog (all High, no Critical): UI image now runs

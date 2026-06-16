@@ -38,6 +38,20 @@ llm:
   api_key_env: ANTHROPIC_API_KEY
   max_tokens: 4096
 
+# --- Vision (image understanding) --------------------------------------------
+# On by default: attach an image in the web UI or a channel bot and it is sent,
+# ephemerally, to a vision-capable model for that turn. With the Anthropic
+# default above the active model already sees, so no fallback is needed; left
+# null, `model`/`provider` resolve a provider-aware default when the active
+# model can't see (Bedrock/Anthropic -> claude-sonnet-4-6; Vertex ->
+# gemini-3-flash-preview). See config-example.yaml for every knob.
+vision:
+  enabled: true
+  model: null            # null -> provider-aware default (override: OPSRAG_VISION_MODEL)
+  provider: null         # null -> llm.provider
+  max_images: 4
+  max_bytes: 5242880     # 5 MB
+
 # --- Embeddings --------------------------------------------------------------
 # fastembed keeps the quickstart single-key: the model downloads on first use
 # (~45 MB) and runs on-device. Switch to provider: openai (api_key_env:
