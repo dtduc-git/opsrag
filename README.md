@@ -12,6 +12,7 @@ postmortems into **cited, trustworthy answers** — and let an agent run
 
 [![CI](https://github.com/dtduc-git/opsrag/actions/workflows/ci.yml/badge.svg)](https://github.com/dtduc-git/opsrag/actions/workflows/ci.yml)
 [![Security](https://github.com/dtduc-git/opsrag/actions/workflows/security.yml/badge.svg)](https://github.com/dtduc-git/opsrag/actions/workflows/security.yml)
+[![Eval: Recall@5 1.0](https://img.shields.io/badge/eval%20Recall%405-1.0-brightgreen.svg)](docs/evaluation.md)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
@@ -249,7 +250,9 @@ tests/                   contract / integration / unit
 ## 🤝 Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow and the mandatory
-checks (lint, types, tests, vendor-neutrality audit, helm-lint, eval-regression).
+checks (lint, types, tests, vendor-neutrality audit, helm-lint, and the
+always-on, no-secrets `eval-offline` retrieval gate). `master` is protected:
+every PR must pass the required checks before it can merge.
 
 ## 🔒 Security
 
