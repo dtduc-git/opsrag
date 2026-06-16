@@ -24,22 +24,19 @@ Two distinct hardening properties of the CHAT multi-agent path:
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from opsrag.agent.nodes.multi_agent import (
-    MAX_TOOL_CALLS,
-    MAX_UNKNOWN_TOOL_ROUNDS,
     _SYSTEM_GENERATOR,
     _SYSTEM_REASONER_BASE,
     _UNKNOWN_TOOL_ERROR_PREFIX,
+    MAX_TOOL_CALLS,
+    MAX_UNKNOWN_TOOL_ROUNDS,
     _flatten_tool_history,
     reasoner_node,
     tool_caller_node,
 )
 from opsrag.llms.vertex import ToolCall, ToolCallingResponse
-
 
 # --- 1. untrusted-data flattening -----------------------------------
 

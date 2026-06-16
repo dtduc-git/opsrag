@@ -15,7 +15,6 @@ import asyncio
 
 import pytest
 
-from opsrag.indexing import pg_store
 from opsrag.indexing.pg_store import (
     _BACKFILL_PROGRESS,
     _UPSERT_PROGRESS,

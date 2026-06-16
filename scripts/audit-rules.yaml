@@ -199,6 +199,7 @@ hardcoded_hosts_allowlist:
   - "*.loganalytics.io"
   - "*.azmk8s.io"                    # AKS API server FQDNs (azure MCP samples)
   - api.github.com                   # github MCP default host
+  - users.noreply.github.com         # GitHub Actions bot commit-author email (CI eval-badge commit-back)
   - api.datadoghq.com                # datadog MCP (also *.datadoghq.com region sites)
   - "*.datadoghq.com"
   - api.rootly.com                   # rootly MCP

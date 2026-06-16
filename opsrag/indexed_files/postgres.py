@@ -45,7 +45,7 @@ def _repo_lock_key(repo: str, branch: str) -> int:
     so distinct repos never contend with one another.
     """
     digest = hashlib.blake2b(
-        f"{repo}@{branch}".encode("utf-8"), digest_size=8
+        f"{repo}@{branch}".encode(), digest_size=8
     ).digest()
     return int.from_bytes(digest, "big", signed=True)
 

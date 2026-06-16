@@ -21,7 +21,6 @@ from opsrag.indexed_files.postgres import (
 )
 from opsrag.ingestion.pipeline import IngestionPipeline
 
-
 # --------------------------------------------------------------------------- #
 # F3 -- advisory-lock key + repo_lock context-manager behaviour
 # --------------------------------------------------------------------------- #
@@ -41,7 +40,7 @@ def test_repo_lock_key_differs_per_repo_and_branch():
 
 
 class _FakeCursor:
-    def __init__(self, conn: "_FakeStandaloneConn") -> None:
+    def __init__(self, conn: _FakeStandaloneConn) -> None:
         self._conn = conn
         self._result = None
 
@@ -268,6 +267,7 @@ class _FakeAsyncpgConn:
 
 @pytest.mark.asyncio
 async def test_pgvector_allow_change_drops_table_on_mismatch():
+    pytest.importorskip("asyncpg")  # pgvector extra; skip when absent (CI unit job)
     from opsrag.vectorstores.pgvector import PgVectorStore
 
     store = PgVectorStore.__new__(PgVectorStore)
@@ -281,6 +281,7 @@ async def test_pgvector_allow_change_drops_table_on_mismatch():
 
 @pytest.mark.asyncio
 async def test_pgvector_mismatch_without_allow_change_raises():
+    pytest.importorskip("asyncpg")  # pgvector extra; skip when absent (CI unit job)
     from opsrag.vectorstores.pgvector import PgVectorStore
 
     store = PgVectorStore.__new__(PgVectorStore)
@@ -295,6 +296,7 @@ async def test_pgvector_mismatch_without_allow_change_raises():
 
 @pytest.mark.asyncio
 async def test_pgvector_matching_dimension_is_noop():
+    pytest.importorskip("asyncpg")  # pgvector extra; skip when absent (CI unit job)
     from opsrag.vectorstores.pgvector import PgVectorStore
 
     store = PgVectorStore.__new__(PgVectorStore)
