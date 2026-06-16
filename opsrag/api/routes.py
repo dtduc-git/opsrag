@@ -609,6 +609,17 @@ async def query(
     except ImageValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Bare-image turn (FR-006): the web UI can send an image with no text
+    # (query=""). Mirror channels/dispatcher.py: substitute a default prompt
+    # so the image is analyzed. A genuinely-empty turn (no text AND no image)
+    # is still rejected. Mutating req.query here covers BOTH the streaming and
+    # non-streaming branches below (and _stream_query, which reads req.query).
+    if not req.query.strip():
+        if turn_images:
+            req.query = "Please analyze this image."
+        else:
+            raise HTTPException(status_code=400, detail="Query must not be empty")
+
     # Authorization (IDOR): continuing an EXISTING thread requires owning it.
     # /query is a write+read path -- query_with_session(_events) loads the
     # thread's prior checkpoints (history) and appends to them -- so an

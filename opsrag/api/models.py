@@ -11,7 +11,10 @@ class ImageInput(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, description="User question")
+    # Empty string allowed: a bare-image turn (web UI) posts query="". The
+    # /query handler substitutes a default prompt when images are attached,
+    # and still rejects genuinely-empty (no text + no images) turns with 400.
+    query: str = Field("", description="User question")
     user_id: str = Field("anonymous", description="Stable user id for session routing")
     thread_id: str | None = Field(None, description="Optional existing thread to resume")
     stream: bool = Field(False, description="If true, return SSE stream instead of JSON")
