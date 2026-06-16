@@ -45,6 +45,14 @@ config:
     model: claude-sonnet-4-20250514
     apiKeyEnv: ANTHROPIC_API_KEY   # unused on Bedrock (IRSA), kept for schema
     awsRegion: us-east-1
+  vision:
+    # Image understanding (ephemeral). With Bedrock Sonnet as the active model
+    # the model already sees, so no fallback is built. Leaving model empty keeps
+    # the provider-aware default (Bedrock -> claude-sonnet-4-6); set it to a
+    # pinned id if you run a text-only default model and want vision routing.
+    enabled: true
+    model: ""                      # e.g. "anthropic.claude-sonnet-4-6-v1:0"
+    provider: ""                   # defaults to llm.provider (bedrock via bundle)
   embedding:
     # Defaults left at fastembed so the aws bundle promotes them to Cohere
     # Embed v4 on Bedrock. dimension is filled to 1536 by the bundle; we pin it

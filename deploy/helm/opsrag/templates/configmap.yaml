@@ -77,6 +77,25 @@ data:
       location: {{ . | quote }}
       {{- end }}
     {{- end }}
+    {{- with .Values.config.vision }}
+    vision:
+      enabled: {{ .enabled }}
+      {{- with .model }}
+      model: {{ . | quote }}
+      {{- end }}
+      {{- with .provider }}
+      provider: {{ . | quote }}
+      {{- end }}
+      {{- with .maxImages }}
+      max_images: {{ int . }}
+      {{- end }}
+      {{- with .maxBytes }}
+      max_bytes: {{ int . }}
+      {{- end }}
+      {{- with .allowedMime }}
+      allowed_mime: {{ toJson . }}
+      {{- end }}
+    {{- end }}
     vector_store:
       provider: {{ .Values.config.vectorStore.provider }}
       url: {{ .Values.config.vectorStore.url | quote }}
