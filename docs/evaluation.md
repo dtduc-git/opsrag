@@ -6,6 +6,47 @@ regression gate that fails a build when any gated metric drops below
 threshold. It lives in `opsrag/eval/` with the golden YAML under
 `opsrag/eval/golden/`.
 
+The goldens grade against the **synthetic `samples/` corpus shipped in this
+repo** (a fictional "Acme Notes" SaaS: runbooks, postmortems, a k8s manifest,
+and a Terraform module), so the eval is runnable publicly with no private
+corpus.
+
+## Two tiers
+
+| Tier | Command | Needs | When |
+|---|---|---|---|
+| **Offline retrieval** | `pytest tests/integration/test_eval_samples_retrieval.py` | nothing but the one-time FastEmbed model fetch | always-on CI gate (`eval-offline`) |
+| **Answer quality** | `python -m opsrag.eval run` | a live opsrag + LLM + judge credentials | the live-server `eval-regression` gate |
+
+The offline tier is the no-secrets proof that retrieval works; the answer
+tier adds the LLM judge for faithfulness/answer-quality. The two share the
+golden set and the path-matching rules.
+
+## Tier 1 — offline retrieval eval (no secrets)
+
+`tests/integration/test_eval_samples_retrieval.py` indexes `samples/` into an
+**in-process Qdrant** (`url=":memory:"`) using a **local FastEmbed ONNX
+embedder** (`BAAI/bge-small-en-v1.5`, 384-dim — no API key), loads the public
+goldens, runs retrieval for every scored golden, and asserts aggregate
+**Recall@5 ≥ 0.85** (observed ~1.0 on the validated recipe). Negative goldens
+(empty relevant set) are skipped for ranking. Run it:
+
+```sh
+uv sync --extra dev --extra eval --extra fastembed
+pytest tests/integration/test_eval_samples_retrieval.py -v
+```
+
+The reusable harness is `opsrag/eval/retrieval_offline.py`:
+`build_offline_index(samples_dir) -> (embedder, vector_store)` and
+`retrieval_scores(embedder, vector_store, goldens, k=5)` (returns per-golden
+Recall@K + MRR and the aggregate means). The `eval-offline` CI job runs this
+on every push/PR — it's the always-on, secret-free gate.
+
+## Tier 2 — answer-quality eval (live server + judge)
+
+The rest of this document covers the live-server tier driven by
+`python -m opsrag.eval run`.
+
 ## What it measures
 
 Each golden query is sent to a running opsrag instance (`POST /query`,
