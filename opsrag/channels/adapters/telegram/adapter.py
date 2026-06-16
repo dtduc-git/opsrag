@@ -341,20 +341,26 @@ class TelegramAdapter(ChannelAdapter):
         Telegram is a two-step fetch -- ``getFile`` resolves the ``file_id`` to a
         ``file_path``, then the bytes are pulled from the file CDN under the bot
         token. Returns ``None`` if there is no ``file_id`` to resolve.
+
+        The actual byte download is routed through the shared hardened
+        :func:`fetch_image_bytes` (FIX 3/4): https-only, SSRF IP block, absolute
+        size ceiling, and -- critically here -- credential scrubbing, since the
+        download URL embeds the bot token in its PATH and must never reach a log.
+        The ``getFile`` step hits the fixed, trusted ``api.telegram.org`` host.
         """
         if not ref.file_id:
             return None
         import httpx
+
+        from opsrag.channels.image_fetch import fetch_image_bytes
         base = f"https://api.telegram.org/bot{self._token}"
         async with httpx.AsyncClient(timeout=30) as client:
             meta = await client.get(f"{base}/getFile", params={"file_id": ref.file_id})
             meta.raise_for_status()
             file_path = meta.json()["result"]["file_path"]
-            dl = await client.get(
-                f"https://api.telegram.org/file/bot{self._token}/{file_path}"
-            )
-            dl.raise_for_status()
-            return dl.content
+        return await fetch_image_bytes(
+            f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+        )
 
     def _group_trigger(
         self, message: dict[str, Any], raw_text: str,

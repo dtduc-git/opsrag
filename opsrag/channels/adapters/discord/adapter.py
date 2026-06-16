@@ -297,14 +297,15 @@ class DiscordAdapter(ChannelAdapter):
         return out
 
     async def fetch_image(self, ref: ImageRef) -> bytes | None:
-        """Download a Discord attachment from its CDN ``url`` (no auth needed)."""
+        """Download a Discord attachment from its CDN ``url`` (no auth needed).
+
+        Routed through the shared hardened :func:`fetch_image_bytes` (FIX 3):
+        https-only + SSRF IP block + absolute size ceiling.
+        """
         if not ref.url:
             return None
-        import httpx
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
-            return resp.content
+        from opsrag.channels.image_fetch import fetch_image_bytes
+        return await fetch_image_bytes(ref.url)
 
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser:
         """Synthetic, traceable-but-anonymous identity.

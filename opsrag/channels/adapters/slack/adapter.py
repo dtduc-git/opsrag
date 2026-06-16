@@ -247,12 +247,13 @@ class SlackAdapter(ChannelAdapter):
         bot_token = getattr(client, "_bot_token", None) if client is not None else None
         if not bot_token:
             return None
-        import httpx
-        headers = {"Authorization": f"Bearer {bot_token}"}
-        async with httpx.AsyncClient(timeout=30) as cx:
-            resp = await cx.get(ref.url, headers=headers)
-            resp.raise_for_status()
-            return resp.content
+        # Routed through the shared hardened helper (FIX 3/4): https-only + SSRF
+        # IP block + size ceiling, and the bearer token in the header is never
+        # echoed into any error/log line.
+        from opsrag.channels.image_fetch import fetch_image_bytes
+        return await fetch_image_bytes(
+            ref.url, headers={"Authorization": f"Bearer {bot_token}"},
+        )
 
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser:
         # Rebuild the minimal Slack event shape the identity helper expects.
