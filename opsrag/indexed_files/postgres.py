@@ -21,13 +21,33 @@ see ``sweep_deleted`` and ``IngestionPipeline.index_repo``.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from datetime import datetime
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 _log = logging.getLogger("opsrag.indexed_files.postgres")
+
+
+def _repo_lock_key(repo: str, branch: str) -> int:
+    """Derive a stable SIGNED 64-bit advisory-lock key for a (repo, branch).
+
+    ``pg_try_advisory_lock`` takes a bigint (signed 64-bit). We hash the
+    ``repo@branch`` identity with blake2b (digest_size=8 -> 8 bytes), then
+    interpret those bytes as a signed big-endian integer so the value always
+    fits Postgres' bigint domain (the unsigned interpretation overflows for
+    high bytes and raises ``numeric out of range``). Mirrors the fixed-key
+    advisory-lock pattern in ``opsrag.db.migrate`` but scoped per repo/branch
+    so distinct repos never contend with one another.
+    """
+    digest = hashlib.blake2b(
+        f"{repo}@{branch}".encode("utf-8"), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big", signed=True)
 
 # Two statements run separately -- psycopg with prepare_threshold=0 rejects
 # multi-statement prepared queries.
@@ -75,6 +95,85 @@ class PostgresIndexedFilesTracker:
     async def close(self) -> None:
         await self._pool.close()
         self._ready = False
+
+    @asynccontextmanager
+    async def repo_lock(self, repo: str, branch: str) -> AsyncIterator[bool]:
+        """Non-blocking per-(repo, branch) advisory lock for index_repo runs.
+
+        Yields True if THIS caller acquired the lock, False if another run
+        already holds it (the caller should SKIP its overlapping run rather
+        than block). Uses ``pg_try_advisory_lock`` (non-blocking) so we never
+        park a pooled connection for minutes waiting on a concurrent reindex.
+
+        The lock is session-scoped to a DEDICATED, standalone connection (NOT
+        the shared worker pool) held for the whole ``async with`` body, and
+        released with ``pg_advisory_unlock`` in ``finally`` on that SAME
+        connection. A dedicated connection matters: the lock is held for the
+        entire (minutes-long) index run, and the indexing workers
+        (``OPSRAG_FILE_PARALLEL``) draw from the shared tracker pool -- parking
+        the lock on a pooled connection peaks demand at 1+workers and can
+        exhaust/deadlock the pool (zero headroom at the default max_size~5, and
+        raising file_parallel deadlocks outright). The standalone connection
+        never competes with workers. If the tracker isn't ready (no schema yet)
+        we yield True so behaviour matches the no-op tracker -- the lock is an
+        optimization, never a correctness gate that could wedge indexing on a
+        transient Postgres hiccup.
+        """
+        if not self._ready:
+            yield True
+            return
+        key = _repo_lock_key(repo, branch)
+        conn: psycopg.AsyncConnection | None = None
+        # Scope the broad except to ONLY the acquisition (open connection +
+        # pg_try_advisory_lock). A locking failure must never block indexing
+        # (parity with the no-op tracker) -- treat it as "acquired" so the run
+        # proceeds; the operator can investigate Postgres separately. Crucially
+        # the body's `yield True` is OUTSIDE this except, so an exception raised
+        # by the caller's `async with` body propagates cleanly instead of being
+        # swallowed here (which would mask the real error as a confusing
+        # "generator didn't stop after athrow()").
+        try:
+            conn = await psycopg.AsyncConnection.connect(
+                self._dsn, autocommit=True, prepare_threshold=0
+            )
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+                row = await cur.fetchone()
+            got = bool(row and row[0])
+        except Exception as exc:
+            if conn is not None:
+                await conn.close()
+            _log.warning(
+                "repo_lock failed repo=%s branch=%s: %s -- proceeding without lock",
+                repo, branch, exc,
+            )
+            yield True
+            return
+        if not got:
+            # Lost a real contention race: another run holds the lock. Close the
+            # spare connection and signal the caller to skip its overlapping run.
+            await conn.close()
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            # Release on the SAME session/connection that holds it, then close.
+            # Swallow a release hiccup: Postgres auto-releases session advisory
+            # locks on disconnect (the conn.close() below triggers that), and an
+            # unlock error must never override a caller-body exception that is
+            # being unwound through this finally.
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            except Exception as exc:  # noqa: BLE001 -- release is best-effort
+                _log.warning(
+                    "repo_lock release failed repo=%s branch=%s: %s "
+                    "(session lock auto-released on close)",
+                    repo, branch, exc,
+                )
+            finally:
+                await conn.close()
 
     async def should_skip(
         self, repo: str, branch: str, path: str, content_hash: str

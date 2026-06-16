@@ -3,7 +3,8 @@
 No API keys, no running services: a local FastEmbed ONNX embedder
 (``BAAI/bge-small-en-v1.5``, 384-dim) + an in-process Qdrant
 (``url=":memory:"``) index the synthetic ``samples/`` corpus, then we score
-the public golden set with pure-arithmetic ranking metrics (Recall@K, MRR).
+the public golden set with pure-arithmetic ranking metrics (Recall@K, MRR,
+Precision@K, NDCG@K).
 
 The only network the harness needs is the one-time FastEmbed model fetch
 (cached after the first run). This is the always-on, secret-free proof that
@@ -15,16 +16,21 @@ Public API
 ``build_offline_index(samples_dir)`` -> ``(embedder, vector_store)``
 ``retrieval_scores(embedder, vector_store, goldens, k=5)`` -> aggregate dict
 
+``retrieval_scores`` returns aggregate ``mean_recall_at_k``, ``mean_mrr``,
+``mean_precision_at_k`` and ``mean_ndcg_at_k`` (all computed inline with
+binary relevance -- no deepeval/vertexai import).
+
 Both reuse the production ingestion pipeline and the shared ``match_path`` /
 ``_expected_hits_in_topk`` logic so the eval grades against the same matching
 rules SourceRecall uses in the live gate.
 """
 from __future__ import annotations
 
+from math import log2
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from opsrag.eval.loaders import match_path
+from opsrag.eval.loaders import canonical_path, match_path
 
 if TYPE_CHECKING:
     from opsrag.eval.loaders import GoldenQuery
@@ -42,6 +48,26 @@ def _expected_hits_in_topk(
     """
     top = retrieved[:k]
     return [e for e in expected if any(match_path(e, r) for r in top)]
+
+
+def _dedupe_to_documents(retrieved: list[str]) -> list[str]:
+    """Collapse a per-CHUNK retrieved list to DOCUMENT granularity.
+
+    Retrieval returns one entry per chunk, so a single source doc surfaces
+    several times. Precision@K/NDCG@K must grade distinct docs (like Recall@K),
+    not chunk positions -- otherwise one relevant doc split into 5 chunks reads
+    as P@5=1.0. Keep first occurrence per ``canonical_path`` (the same
+    chunker-stable key Recall@K matches on), preserving rank order.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in retrieved:
+        key = canonical_path(r)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
 
 # 384-dim local ONNX embedder; matches the validated offline recipe.
 _OFFLINE_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
@@ -119,15 +145,37 @@ async def retrieval_scores(
       - else (``acceptable_sources`` only) -> OR-recall: 1.0 if ANY acceptable
         source is in the top-K, else 0.0.
 
-    MRR (per golden): reciprocal rank of the first retrieved source matching
-    any expected OR acceptable source; 0.0 if none.
+    MRR (per golden): reciprocal rank of the first relevant DOCUMENT in the
+    top-K deduped list (the per-chunk retrieved list is collapsed to distinct
+    docs and bounded by K first, matching the Precision@K/NDCG@K basis below);
+    0.0 if no expected/acceptable source appears.
 
-    Aggregate keys: ``mean_recall_at_k``, ``mean_mrr``, ``k``,
-    ``num_scored``, ``num_skipped``, ``per_golden`` (list of dicts).
+    Precision@K and NDCG@K are computed at DOCUMENT granularity: the raw
+    retrieved list is per-CHUNK (the same source doc surfaces as several
+    chunks), so before scoring it is deduped to first-occurrence per canonical
+    doc id/path -- mirroring how Recall@K above counts distinct expected docs.
+    This keeps both metrics document-level and directly comparable to Recall
+    (one relevant doc retrieved as 5 chunks no longer reads as P@5=1.0).
+
+    Precision@K (per golden): fraction of the top-K deduped (document-level)
+    retrieved positions that match a relevant (expected OR acceptable) source.
+    Binary relevance; the denominator is ``min(k, len(deduped))`` so a short
+    result list isn't penalised for positions that never existed.
+
+    NDCG@K (per golden): binary-gain DCG over the top-K deduped (document-level)
+    positions (gain 1 for a relevant doc, discount ``1/log2(rank+1)``)
+    normalised by the ideal DCG -- all relevant docs ranked first, capped at K.
+    0.0 when nothing relevant exists in range.
+
+    Aggregate keys: ``mean_recall_at_k``, ``mean_mrr``,
+    ``mean_precision_at_k``, ``mean_ndcg_at_k``, ``k``, ``num_scored``,
+    ``num_skipped``, ``per_golden`` (list of dicts).
     """
     per_golden: list[dict] = []
     recall_sum = 0.0
     mrr_sum = 0.0
+    precision_sum = 0.0
+    ndcg_sum = 0.0
     scored = 0
     skipped = 0
 
@@ -155,20 +203,54 @@ async def retrieval_scores(
             )
 
         relevant = list(g.expected_sources) + list(g.acceptable_sources)
+        # Dedupe the per-chunk list to DOCUMENT granularity first (first
+        # occurrence per canonical path), then take the top-K. This makes
+        # Precision@K/NDCG@K document-level and comparable to Recall@K -- a doc
+        # split into N chunks no longer counts as N relevant positions.
+        documents = _dedupe_to_documents(retrieved)
+        top = documents[:k]
+        # Per-position binary relevance over the top-K docs (a retrieved doc is
+        # relevant if it matches ANY expected OR acceptable source). Shared by
+        # MRR, Precision@K and NDCG@K so they grade identical relevance.
+        rels = [any(match_path(e, r) for e in relevant) for r in top]
+
         mrr = 0.0
-        for rank, r in enumerate(retrieved, start=1):
-            if any(match_path(e, r) for e in relevant):
+        for rank, is_rel in enumerate(rels, start=1):
+            if is_rel:
                 mrr = 1.0 / rank
                 break
 
+        # Precision@K: relevant positions / K (denominator clamped to the
+        # number of positions that actually exist so a short list isn't
+        # under-credited for ranks it never filled).
+        num_relevant_positions = sum(rels)
+        denom = min(k, len(top)) or 1
+        precision = num_relevant_positions / denom
+
+        # NDCG@K with binary gains. DCG sums 1/log2(rank+1) over relevant
+        # positions; IDCG is the same sum with the relevant positions packed at
+        # the front (count capped at K). Normalising by IDCG keeps it in [0, 1].
+        dcg = sum(
+            1.0 / log2(rank + 1)
+            for rank, is_rel in enumerate(rels, start=1)
+            if is_rel
+        )
+        ideal_count = min(num_relevant_positions, k)
+        idcg = sum(1.0 / log2(rank + 1) for rank in range(1, ideal_count + 1))
+        ndcg = (dcg / idcg) if idcg else 0.0
+
         recall_sum += recall
         mrr_sum += mrr
+        precision_sum += precision
+        ndcg_sum += ndcg
         per_golden.append(
             {
                 "id": g.id,
                 "category": g.category,
                 "recall_at_k": recall,
                 "mrr": mrr,
+                "precision_at_k": precision,
+                "ndcg_at_k": ndcg,
                 "retrieved": retrieved,
             }
         )
@@ -179,5 +261,7 @@ async def retrieval_scores(
         "num_skipped": skipped,
         "mean_recall_at_k": (recall_sum / scored) if scored else 0.0,
         "mean_mrr": (mrr_sum / scored) if scored else 0.0,
+        "mean_precision_at_k": (precision_sum / scored) if scored else 0.0,
+        "mean_ndcg_at_k": (ndcg_sum / scored) if scored else 0.0,
         "per_golden": per_golden,
     }

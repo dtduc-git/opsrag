@@ -12,7 +12,7 @@ postmortems into **cited, trustworthy answers** — and let an agent run
 
 [![CI](https://github.com/dtduc-git/opsrag/actions/workflows/ci.yml/badge.svg)](https://github.com/dtduc-git/opsrag/actions/workflows/ci.yml)
 [![Security](https://github.com/dtduc-git/opsrag/actions/workflows/security.yml/badge.svg)](https://github.com/dtduc-git/opsrag/actions/workflows/security.yml)
-[![Eval: Recall@5 1.0](https://img.shields.io/badge/eval%20Recall%405-1.0-brightgreen.svg)](docs/evaluation.md)
+[![Eval](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/dtduc-git/opsrag/master/docs/eval-badge.json)](docs/evaluation.md)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
@@ -31,8 +31,9 @@ postmortems into **cited, trustworthy answers** — and let an agent run
 ---
 
 OpsRAG is an open-source, vendor-neutral retrieval system built for SRE and
-platform teams. It bundles a LangGraph agent, a pluggable retrieval pipeline
-(vector + optional knowledge graph + 23 opt-in, categorized MCP connectors), a FastAPI
+platform teams. It bundles a LangGraph agent, a pluggable vector-retrieval
+pipeline (with 23 opt-in, categorized MCP connectors) plus an optional Neo4j
+knowledge graph that captures service/dependency relationships, a FastAPI
 surface with OIDC/SSO auth, a React UI, chat bots for Slack/Telegram/Discord/Teams
 (with image understanding), an evaluation harness, a first-class Helm chart, and a
 one-command local stack.
@@ -69,19 +70,32 @@ flowchart LR
 
     SRC --> ING[Ingestion<br/>parent-child chunking<br/>contextual embeddings]
     ING --> VS[(Vector store<br/>Qdrant · pgvector)]
-    ING --> KG[(Knowledge graph<br/>Neo4j · optional)]
+    ING --> KG[(Knowledge graph<br/>rule + LLM extractor<br/>Neo4j · optional)]
 
     VS --> AGENT
-    KG --> AGENT
     MCP[23 read-only<br/>MCP connectors<br/>6 categories] --> AGENT
 
     AGENT{{LangGraph agent<br/>hybrid retrieval · RRF · MMR<br/>CRAG / Self-RAG · grounding gates}}
+
+    KG --> TOPO[Topology viewer<br/>separate, on-demand]
 
     AGENT --> API[FastAPI<br/>HTTP · SSE · webhooks]
     API --> UI[React UI]
     API --> SLACK[Slack bot]
     API --> INV[Incident<br/>investigations]
 ```
+
+> **On "GraphRAG."** The vector-retrieval lane (dense + BM25 + code-aware,
+> fused with RRF and diversified with MMR) is what answers a `/query`. OpsRAG
+> has **two distinct graphs**, neither of which is the main retrieval path:
+> - The **Neo4j knowledge graph** captures relationships between services,
+>   libraries, features, and dependencies. It is built at ingest by a hybrid
+>   rule + LLM extractor (the default — set `entity_extraction.method:
+>   rule_based` for a fully deterministic, no-LLM build). It powers the
+>   topology viewer and is **not** consulted during vector retrieval.
+> - An optional **light entity-graph** (Postgres, zero-LLM rule-based) adds a
+>   1-hop entity expansion to retrieval when `light_graph.enabled: true`. It is
+>   **off by default**, so by default vector retrieval consults no graph at all.
 
 See [docs/architecture.md](docs/architecture.md) for the request flow, the
 provider seams, and the investigation engine.

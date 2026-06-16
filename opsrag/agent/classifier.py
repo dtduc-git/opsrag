@@ -58,10 +58,11 @@ class QueryCategory(str, Enum):
     LIVE = "live"
     PROCEDURAL = "procedural"
     MIXED = "mixed"
-    # Structural infrastructure questions answerable from the
-    # Cartography graph (cross-cluster RBAC, GCP asset inventory,
-    # DNS lookups, WI bridging, blast-radius, etc.). Routed to the
-    # cartography_* MCP family before knowledge_search / code_grep.
+    # Structural infrastructure / topology questions (cross-cluster RBAC,
+    # asset inventory, DNS lookups, blast-radius, service<->dependency
+    # relationships, etc.). infra-graph family (formerly cartography_*) --
+    # routed to knowledge_search/code_grep + live tools when no cartography_*
+    # MCP tool is bound (see _cartography_enabled in agent/nodes/multi_agent).
     INFRA_GRAPH = "infra_graph"
     # Friendly chitchat: greetings, thanks, meta-questions about the
     # bot itself ("what can you do", "who built you"). Bypasses both
@@ -715,10 +716,12 @@ CATEGORY_POLICY: dict[QueryCategory, dict] = {
     QueryCategory.PROCEDURAL: {"ttl_seconds": 30 * 86400, "skip_cache": False, "qa_threshold": 0.93},
     QueryCategory.MIXED:      {"ttl_seconds":      300,   "skip_cache": False, "qa_threshold": 0.96},
     QueryCategory.LIVE:       {"ttl_seconds":        0,   "skip_cache": True,  "qa_threshold": 0.99},
-    # INFRA_GRAPH -- cartography data refreshes daily; we cache for 4 h
-    # which is well inside one ingest cycle. qa_threshold mid-tight
-    # (between forensic and live) because the same question may yield
-    # different answers as the graph re-ingests.
+    # INFRA_GRAPH -- infra-graph family (formerly cartography_*) -- routed
+    # to knowledge_search/code_grep + live tools when no cartography_* MCP
+    # tool is bound; topology data refreshes daily, so we cache for 4 h which is
+    # well inside one ingest cycle. qa_threshold mid-tight (between
+    # forensic and live) because the same question may yield different
+    # answers as the graph re-ingests.
     QueryCategory.INFRA_GRAPH: {"ttl_seconds":   4 * 3600, "skip_cache": False, "qa_threshold": 0.94},
     # CASUAL -- no point caching "hi". Each greeting deserves a fresh
     # response so OpsRAG can react to the moment (time of day, recent

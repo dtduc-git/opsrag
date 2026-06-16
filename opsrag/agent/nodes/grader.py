@@ -49,8 +49,16 @@ async def _grade_one(llm: LLMProvider, query: str, chunk: Chunk) -> bool:
             system_prompt=GRADER_SYSTEM,
         )
         return result.relevant
-    except Exception:
-        return True  # Fail open -- don't drop docs when the grader errors
+    except Exception as exc:
+        # Fail OPEN here (deliberately, unlike the groundedness gate): the grader
+        # only *removes* recall, so dropping docs on a grader error is strictly
+        # worse than keeping them -- a missing chunk yields a wrong/empty answer,
+        # whereas an extra chunk is filtered downstream by rerank + the
+        # fail-closed groundedness check. Log so silent grader outages are
+        # visible (they'd otherwise look like "everything is relevant").
+        _log.warning("grader errored for %s; failing OPEN (keeping doc): %s",
+                     getattr(chunk, "source_path", "?"), exc)
+        return True
 
 
 def grade_documents_node(

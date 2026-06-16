@@ -813,11 +813,14 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 model_router=model_router,
                 code_embedder=providers.code_embedder,
                 code_store=providers.code_vector_store,
                 light_graph=providers.light_graph,
+                verify_grounding=cfg.agent.verify_grounding_default,
             )
         elif cfg.agent.mode == "tool_calling":
             agent_graph = build_tool_calling_graph(
@@ -830,6 +833,8 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 model_router=model_router,
                 code_embedder=providers.code_embedder,
@@ -847,6 +852,8 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 code_embedder=providers.code_embedder,
                 code_store=providers.code_vector_store,
@@ -866,6 +873,8 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 light_graph=providers.light_graph,
                 # Pro/answer model (Sonnet 4.6) for the final generation; cheap
@@ -1199,20 +1208,13 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         # `_is_indexer` (== role in {"", "indexer"}) wrongly excluded the
         # common compose/dev case -- gate on "not backend" instead.
         _is_index_writer = _role != "backend"
-        app.state._index_flush_task = None
-        app.state._index_flush_stop = None
-        if _is_index_writer and app.state.index_store is not None:
-            from opsrag.indexing.pg_store import flush_loop
-            stop_event = asyncio.Event()
-            app.state._index_flush_stop = stop_event
-            app.state._index_flush_task = asyncio.create_task(
-                flush_loop(app.state.index_store, indexing_tracker, stop_event=stop_event)
-            )
-            _log.info("indexing job-state flush loop started (writer role)")
 
         # Indexing trigger: in production POST /index/repo creates an ephemeral
         # k8s Job (the API stays pure-serving). In dev / no-cluster the launcher
         # is None and the routes run indexing in-process (legacy behaviour).
+        # Initialised BEFORE the flush loop so we know whether a separate Job
+        # writer can exist -- that decides whether the serving pod's flush must
+        # be guarded (see below).
         try:
             from opsrag.job.launcher import JobLauncher
             app.state.job_launcher = JobLauncher.from_env()
@@ -1223,6 +1225,28 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             _log.warning("job launcher init failed (%s); using in-process indexing", exc)
             app.state.job_launcher = None
+
+        app.state._index_flush_task = None
+        app.state._index_flush_stop = None
+        if _is_index_writer and app.state.index_store is not None:
+            from opsrag.indexing.pg_store import flush_loop
+            # When a Job launcher is active, indexing runs in a separate
+            # ephemeral Job that owns the live `listing`/`indexing` PROGRESS
+            # rows. The serving pod must NOT flush those rows back to `done`
+            # with its own stale (restored-from-Qdrant) counts -> guard it.
+            # Dev/in-process (no launcher) runs indexing here, so it stays
+            # unguarded and can advance its own `indexing` -> `done`.
+            _flush_guarded = app.state.job_launcher is not None
+            stop_event = asyncio.Event()
+            app.state._index_flush_stop = stop_event
+            app.state._index_flush_task = asyncio.create_task(
+                flush_loop(app.state.index_store, indexing_tracker,
+                           stop_event=stop_event, guarded=_flush_guarded)
+            )
+            _log.info(
+                "indexing job-state flush loop started (writer role, guarded=%s)",
+                _flush_guarded,
+            )
 
         if _is_indexer and cfg.scm.auto_index and repo_pairs:
             pipeline = app.state.ingestion_pipeline

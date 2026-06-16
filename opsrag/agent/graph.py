@@ -32,6 +32,17 @@ def _qa_cache_globally_disabled() -> bool:
         "1", "true", "yes", "on",
     )
 
+
+def _swr_env_default() -> bool:
+    """Default for stale-while-revalidate, read from OPSRAG_QA_CACHE_SWR (on by
+    default). This is read-only config: callers that need to override SWR per
+    request pass `serve_stale=` to query_with_session instead of mutating the
+    process-global environment (which would race across concurrent requests)."""
+    import os
+    return os.environ.get("OPSRAG_QA_CACHE_SWR", "1").lower() in (
+        "1", "true", "yes", "on",
+    )
+
 # Retry meta-command: short user inputs that mean "re-run my previous question"
 # rather than a literal investigation topic. Detected by normalize +
 # set-membership (NOT a regex) so it is linear and cannot ReDoS on adversarial
@@ -150,6 +161,7 @@ from opsrag.agent.nodes import (
 # T1.5 -- HyDE retrieval expansion node. Imported at module level so all
 # 3 graph builders can wire it before vector_retrieve.
 from opsrag.agent.nodes.hyde_expansion import hyde_expansion_node
+from opsrag.agent.nodes.multi_agent import MULTI_AGENT_RECURSION_LIMIT
 from opsrag.agent.nodes.reranker import rerank_decision
 from opsrag.agent.state import OpsRAGState
 from opsrag.interfaces.embedder import EmbeddingProvider
@@ -177,6 +189,8 @@ def build_minimal_graph(
     # the other graphs' default of 5.
     rerank_top_k: int = 5,
     rerank_diversity: float = 0.0,
+    rerank_content_dedup: bool = True,
+    rerank_content_dedup_threshold: float = 0.0,
     known_repos: list[str] | None = None,
     code_embedder: EmbeddingProvider | None = None,
     code_store: VectorStore | None = None,
@@ -193,7 +207,7 @@ def build_minimal_graph(
         ),
     )
     if reranker:
-        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
+        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity, content_dedup=rerank_content_dedup, content_dedup_threshold=rerank_content_dedup_threshold))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
     graph.add_node("verify_answer", verify_answer_node(llm, vector_store, observability))
 
@@ -221,6 +235,8 @@ def build_full_graph(
     top_k: int = 10,
     rerank_top_k: int = 5,
     rerank_diversity: float = 0.0,
+    rerank_content_dedup: bool = True,
+    rerank_content_dedup_threshold: float = 0.0,
     known_repos: list[str] | None = None,
     light_graph=None,
     model_router=None,
@@ -246,7 +262,7 @@ def build_full_graph(
             code_embedder=code_embedder, code_store=code_store,
         ),
     )
-    graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
+    graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity, content_dedup=rerank_content_dedup, content_dedup_threshold=rerank_content_dedup_threshold))
     if light_graph is not None:
         from opsrag.agent.nodes.entity_expand import entity_expand_node
         graph.add_node(
@@ -406,6 +422,8 @@ def build_tool_calling_graph(
     top_k: int = 10,
     rerank_top_k: int = 5,
     rerank_diversity: float = 0.0,
+    rerank_content_dedup: bool = True,
+    rerank_content_dedup_threshold: float = 0.0,
     known_repos: list[str] | None = None,
     model_router=None,
     code_embedder: EmbeddingProvider | None = None,
@@ -440,7 +458,7 @@ def build_tool_calling_graph(
         ),
     )
     if reranker:
-        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
+        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity, content_dedup=rerank_content_dedup, content_dedup_threshold=rerank_content_dedup_threshold))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
     if light_graph is not None:
         from opsrag.agent.nodes.entity_expand import entity_expand_node
@@ -494,14 +512,22 @@ def build_multi_agent_graph(
     top_k: int = 10,
     rerank_top_k: int = 5,
     rerank_diversity: float = 0.0,
+    rerank_content_dedup: bool = True,
+    rerank_content_dedup_threshold: float = 0.0,
     known_repos: list[str] | None = None,
     model_router=None,
     code_embedder: EmbeddingProvider | None = None,
     code_store: VectorStore | None = None,
     light_graph=None,
+    verify_grounding: bool = True,
 ):
     """Sub-sprint 1 -- multi-agent graph: triage -> tool_caller <-> reasoner -> generator,
     with retrieval fall-through.
+
+    ``verify_grounding`` (cfg.agent.verify_grounding_default, default True) turns
+    on the shared, fail-closed groundedness gate inside the generator on the
+    default path -- the same check build_full_graph runs. Set False to trade
+    safety for ~1 fewer LLM call/turn.
 
         START -> entry_route
                   |
@@ -518,7 +544,7 @@ def build_multi_agent_graph(
     graph.add_node("triage", triage_node(llm, observability, model_router=model_router))
     graph.add_node("tool_caller", tool_caller_node(observability, llm_for_compaction=llm))
     graph.add_node("reasoner", reasoner_node(llm, observability, model_router=model_router))
-    graph.add_node("generator", generator_node(llm, observability, model_router=model_router, vector_store=vector_store))
+    graph.add_node("generator", generator_node(llm, observability, model_router=model_router, vector_store=vector_store, verify_grounding=verify_grounding))
     graph.add_node(
         "vector_retrieve",
         vector_retrieve_node(
@@ -528,7 +554,7 @@ def build_multi_agent_graph(
         ),
     )
     if reranker:
-        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity))
+        graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity, content_dedup=rerank_content_dedup, content_dedup_threshold=rerank_content_dedup_threshold))
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
     # Light-graph 1-hop entity augmentation on the retrieval branch -- was wired
     # ONLY into build_full_graph, so in multi_agent mode (config-local default)
@@ -715,14 +741,12 @@ async def _swr_revalidate(
     """Fire-and-forget background re-run of the agent for a stale cache
     hit. Calls `query_with_session` with SWR disabled (to avoid serving
     stale to itself) and lets its normal write-back path replace the
-    cached entry. Errors are swallowed -- best-effort refresh."""
-    import os
-    prev = os.environ.get("OPSRAG_QA_CACHE_SWR")
+    cached entry. Errors are swallowed -- best-effort refresh.
+
+    SWR is disabled via the per-call `serve_stale=False` argument rather
+    than by mutating the process-global OPSRAG_QA_CACHE_SWR env var, which
+    would race across concurrent requests."""
     try:
-        # Temporarily disable SWR for the recursive call so the freshly
-        # spawned task can't loop on its own stale hit. Per-task scope:
-        # we restore in the finally block.
-        os.environ["OPSRAG_QA_CACHE_SWR"] = "0"
         await query_with_session(
             compiled_graph,
             query=query,
@@ -735,15 +759,11 @@ async def _swr_revalidate(
             investigation_cache=investigation_cache,
             source_url_bases=source_url_bases,
             semantic_router=semantic_router,
+            serve_stale=False,
         )
         _swr_log.info("revalidation completed for query=%r", query[:80])
     except Exception as exc:
         _swr_log.warning("revalidation failed for query=%r: %s", query[:80], exc)
-    finally:
-        if prev is None:
-            os.environ.pop("OPSRAG_QA_CACHE_SWR", None)
-        else:
-            os.environ["OPSRAG_QA_CACHE_SWR"] = prev
 
 
 async def query_with_session(
@@ -762,6 +782,7 @@ async def query_with_session(
     user_name: str | None = None,
     images: list[ImagePart] | None = None,
     vision_llm=None,
+    serve_stale: bool | None = None,
 ) -> dict:
     if thread_id is None:
         thread_id = f"{user_id}_{uuid4().hex[:8]}"
@@ -834,8 +855,7 @@ async def query_with_session(
             try:
                 # SWR: serve a recently-expired entry tagged stale so the user
                 # gets an instant response; a background task revalidates.
-                import os
-                swr_enabled = os.environ.get("OPSRAG_QA_CACHE_SWR", "1").lower() in ("1", "true", "yes", "on")
+                swr_enabled = _swr_env_default() if serve_stale is None else serve_stale
                 hit = await qa_cache.lookup(
                     cached_embedding, current_query=query,
                     user_id=user_id,
@@ -905,14 +925,23 @@ async def query_with_session(
     # reads them from config at run time only. (Footgun: never put an image as a
     # base64 STRING here; a scalar WOULD be persisted.) The persisted query
     # (in `initial`) records only a text marker noting an image was attached.
-    config = {"configurable": {
-        "thread_id": thread_id,
-        "user_id": user_id,
-        "user_email": user_email,
-        "user_name": user_name,
-        "turn_images": images or [],
-        "vision_llm": vision_llm,
-    }}
+    config = {
+        # Explicit super-step cap for the multi-agent reasoner<->tool_caller
+        # loop. Without this, LangGraph applies its silent default of 25, which
+        # the unknown-tool path can exhaust before MAX_TOOL_CALLS is hit. The
+        # constant lives in multi_agent.py (its comment claims graph.py forwards
+        # it here -- now true). Harmless on the other modes (their step counts
+        # stay well under the cap).
+        "recursion_limit": MULTI_AGENT_RECURSION_LIMIT,
+        "configurable": {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "user_email": user_email,
+            "user_name": user_name,
+            "turn_images": images or [],
+            "vision_llm": vision_llm,
+        },
+    }
     # History/checkpoint must record THAT an image was attached (so follow-up
     # turns + the session transcript make sense) but NEVER the bytes.
     query_for_state = query
@@ -1002,7 +1031,9 @@ async def query_with_session(
     # on the cache_embedding already computed above; no extra embed call.
     if investigation_cache is not None and cached_embedding is not None:
         try:
-            past = await investigation_cache.search(cached_embedding, top_k=3)
+            past = await investigation_cache.search(
+                cached_embedding, top_k=3, user_id=user_id,
+            )
             initial["past_investigations"] = [
                 {
                     "question": h.question,
@@ -1125,6 +1156,14 @@ async def query_with_session(
         and cached_embedding is not None
     ):
         try:
+            # F13 carve-out (mirrors the qa_cache store above): scope the
+            # investigation to THIS user only when the answer wove in per-user
+            # Mem0 memories -- otherwise a recalled personal fact could leak to
+            # another user via a near-cosine investigation-cache hit. Computed
+            # here independently of the qa_cache branch (that branch is mutually
+            # exclusive with the tool-path branch, so its `_user_scope` is never
+            # in scope here -- leaving store() unscoped and the carve-out dead).
+            _inv_scope = user_id if result.get("user_memories") else None
             investigation_id = await investigation_cache.store(
                 question=query,
                 embedding=cached_embedding,
@@ -1133,6 +1172,7 @@ async def query_with_session(
                 model_route_decision=result.get("model_route_decision") or {},
                 thread_id=thread_id,
                 user_id=user_id,
+                user_scope=_inv_scope,
             )
         except Exception:
             pass
@@ -1175,6 +1215,7 @@ async def query_with_session_events(
     user_name: str | None = None,
     images: list[ImagePart] | None = None,
     vision_llm=None,
+    serve_stale: bool | None = None,
 ) -> AsyncIterator[dict]:
     """Yields progress events as the agent runs.
 
@@ -1242,8 +1283,7 @@ async def query_with_session_events(
         hit = None
         if not _skip_cache:
             try:
-                import os
-                swr_enabled = os.environ.get("OPSRAG_QA_CACHE_SWR", "1").lower() in ("1", "true", "yes", "on")
+                swr_enabled = _swr_env_default() if serve_stale is None else serve_stale
                 hit = await qa_cache.lookup(
                     cached_embedding, current_query=query,
                     user_id=user_id,
@@ -1311,14 +1351,21 @@ async def query_with_session_events(
     # checkpoint metadata and never writes them to the graph `state` below --
     # nothing durable holds the bytes. (Footgun: never pass an image as a
     # base64 STRING via configurable; a scalar WOULD be persisted.)
-    config = {"configurable": {
-        "thread_id": thread_id,
-        "user_id": user_id,
-        "user_email": user_email,
-        "user_name": user_name,
-        "turn_images": images or [],
-        "vision_llm": vision_llm,
-    }}
+    config = {
+        # Explicit super-step cap for the multi-agent reasoner<->tool_caller
+        # loop (see query_with_session for the rationale). Forwards the
+        # constant declared in multi_agent.py instead of relying on LangGraph's
+        # silent default of 25.
+        "recursion_limit": MULTI_AGENT_RECURSION_LIMIT,
+        "configurable": {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "user_email": user_email,
+            "user_name": user_name,
+            "turn_images": images or [],
+            "vision_llm": vision_llm,
+        },
+    }
     # History/checkpoint records THAT an image was attached, never the bytes.
     query_for_state = query
     if images:
@@ -1537,6 +1584,13 @@ async def query_with_session_events(
         and cached_embedding is not None
     ):
         try:
+            # F13 carve-out (mirrors the qa_cache store above): scope the
+            # investigation to THIS user only when the answer wove in per-user
+            # Mem0 memories. Computed here independently of the qa_cache branch
+            # (mutually exclusive with the tool-path branch, so its `_user_scope`
+            # is never in scope here) -- without this, store() runs unscoped and
+            # the cross-user carve-out never activates.
+            _inv_scope = user_id if result.get("user_memories") else None
             investigation_id = await investigation_cache.store(
                 question=query,
                 embedding=cached_embedding,
@@ -1545,6 +1599,7 @@ async def query_with_session_events(
                 model_route_decision=result.get("model_route_decision") or {},
                 thread_id=thread_id,
                 user_id=user_id,
+                user_scope=_inv_scope,
             )
         except Exception:
             pass

@@ -8,83 +8,42 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-# Cost per 1M tokens (input/output) -- approximate public pricing
-_PRICING: dict[str, tuple[float, float]] = {
-    # Anthropic
-    "claude-sonnet-4-20250514": (3.0, 15.0),
-    "claude-opus-4-20250514": (15.0, 75.0),
-    "claude-haiku-4-20250514": (0.8, 4.0),
-    # Vertex AI (same Claude models via Vertex)
-    "claude-sonnet-4@20250514": (3.0, 15.0),
-    # Gemini
-    "gemini-2.0-flash": (0.075, 0.3),
-    "gemini-2.5-flash": (0.15, 0.6),
-    "gemini-2.5-pro": (1.25, 10.0),
-    "gemini-2.5-flash-lite": (0.075, 0.3),
-    # OpenAI
-    "gpt-4o": (2.5, 10.0),
-    "gpt-4o-mini": (0.15, 0.6),
-    # Bedrock (Claude pricing is the same)
-    "anthropic.claude-sonnet-4-20250514-v1:0": (3.0, 15.0),
-    # Current Claude generation (Bedrock ids; region-prefixed inference
-    # profiles like "us.anthropic.*" normalize to these -- see _pricing_for).
-    "anthropic.claude-opus-4-8": (15.0, 75.0),
-    "anthropic.claude-sonnet-4-6": (3.0, 15.0),   # Sonnet 4.6 (reason/pro model)
-    "anthropic.claude-haiku-4-5-20251001-v1:0": (1.0, 5.0),
-    # Embeddings -- per 1M tokens
-    "text-embedding-3-large": (0.13, 0.0),
-    "text-embedding-3-small": (0.02, 0.0),
-    "text-embedding-005": (0.025, 0.0),
-    "amazon.titan-embed-text-v2:0": (0.02, 0.0),
-    # Cohere Embed v4 (Bedrock): $0.12 / 1M input tokens, no output.
-    # Telemetry sees "us.cohere.embed-v4:0"; _pricing_for strips the
-    # "us." region prefix to this base id. Both forms listed for safety.
-    "cohere.embed-v4:0": (0.12, 0.0),
-    "us.cohere.embed-v4:0": (0.12, 0.0),
-}
+from opsrag.llms.pricing import _RATES, per_call_cost_micros
 
-# Per-call pricing for models charged per request rather than per token
-# (Vertex Discovery Engine ranker, Bedrock Rerank API). USD per call.
-_PRICING_PER_CALL: dict[str, float] = {
-    # Vertex semantic ranker -- public pricing is ~$1 per 1K rank requests
-    # (each request can rerank up to 200 records). Approximate; refine
-    # when actual GCP bill numbers come in.
-    "semantic-ranker-default-004": 0.001,
-    "semantic-ranker-default-003": 0.001,
-    # Bedrock Rerank API -- ~$1 per 1K rerank queries (per request, any model).
-    "cohere.rerank-v3-5:0": 0.001,
-    "amazon.rerank-v1:0": 0.001,
-}
+# Pricing lives in ONE place: opsrag/llms/pricing.py. That module's
+# `_RATES` table (micro-cents per 1M tokens) is the single source of
+# truth, fed by the persisted/DB cost path (cost_usd_micros). The
+# in-memory `/usage` summary below DERIVES its USD-per-1M-token rates
+# from the same table so the two can never diverge.
+#
+#   micro-cents/1M  ->  USD/1M    is    value / 1e8
+#       (1 USD == 100_000_000 micro-cents; see pricing.py)
 
-# Cross-region inference-profile prefixes (e.g. "us.anthropic.claude-...").
-# Stripped before a pricing lookup so the profile id maps to the base model.
-_REGION_PREFIXES = ("us.", "eu.", "apac.")
-
-
-def _normalize_model(model: str) -> str:
-    for p in _REGION_PREFIXES:
-        if model.startswith(p):
-            return model[len(p):]
-    return model
+# micro-cents -> USD divisor (1 USD == 100_000_000 micro-cents).
+_MICROS_PER_USD = 100_000_000
 
 
 def _pricing_for(model: str) -> tuple[float, float]:
-    """(input, output) USD per 1M tokens. Tries exact, the region-stripped
-    id, then a suffix match (defensive). (0, 0) when unknown."""
-    for cand in (model, _normalize_model(model)):
-        if cand in _PRICING:
-            return _PRICING[cand]
-    for key, val in _PRICING.items():
-        if model.endswith(key):
-            return val
-    return (0.0, 0.0)
+    """(input, output) USD per 1M tokens, derived from pricing.py's
+    `_RATES` (micro-cents per 1M). Tries exact then a suffix match for
+    region-prefixed inference profiles. (0, 0) when unknown -- same
+    contract pricing.cost_usd_micros uses, so the two stay in lockstep."""
+    rates = _RATES.get(model)
+    if rates is None:
+        for key, val in _RATES.items():
+            if model.endswith(key):
+                rates = val
+                break
+    if rates is None:
+        return (0.0, 0.0)
+    in_rate, out_rate = rates
+    return (in_rate / _MICROS_PER_USD, out_rate / _MICROS_PER_USD)
 
 
 def _per_call_for(model: str) -> float:
-    for cand in (model, _normalize_model(model)):
-        if cand in _PRICING_PER_CALL:
-            return _PRICING_PER_CALL[cand]
-    return 0.0
+    """Per-call cost in USD, derived from pricing.per_call_cost_micros
+    (micro-cents per call). 0.0 for token-priced models."""
+    return per_call_cost_micros(model) / _MICROS_PER_USD
 
 
 # Purpose tags split usage into the cost categories the UI surfaces.
