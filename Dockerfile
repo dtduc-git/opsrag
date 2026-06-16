@@ -18,7 +18,7 @@
 # =============================================================================
 
 # ------------------------------- Stage 1: build ------------------------------
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 # uv reads these to build a relocatable, self-contained virtualenv that we can
 # copy wholesale into the runtime stage.
@@ -94,7 +94,7 @@ COPY opsrag ./opsrag
 RUN uv pip install --python "$VIRTUAL_ENV/bin/python" --no-deps -e .
 
 # ------------------------------ Stage 2: runtime -----------------------------
-FROM python:3.11-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 # Runtime needs git: SCM indexing in clone_mode shells out to `git clone`
 # (curl is used by the compose healthcheck). ca-certificates for HTTPS clones.
