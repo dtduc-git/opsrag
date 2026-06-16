@@ -54,6 +54,7 @@ account, and no external identity provider required.
 | 🔐 **Auth built in** | `open` / `oidc` / first-party `login` modes, SSO (Google · GitHub · Microsoft), per-session ownership, optional Redis rate limiting. |
 | 🧩 **Pluggable everything** | Vector store, knowledge graph, and LLM / embedding / reranker providers are all swappable from config — no rebuild. |
 | 📊 **Observability** | Per-request token + cost telemetry, Phoenix / OTLP traces, and an evaluation harness wired into CI gates. |
+| 📏 **Runnable eval** | A two-tier golden eval over the shipped `samples/` corpus — an offline retrieval gate (`pytest tests/integration/test_eval_samples_retrieval.py`, no secrets) plus a full answer-quality judge (`python -m opsrag.eval run`). |
 
 ## 🏗️ Architecture
 
@@ -183,6 +184,7 @@ Full docs are in **[`docs/`](docs/README.md)**. Start here:
 | [Configuration](docs/configuration.md) | The config model, `env > YAML > bundle` precedence, secrets, and every config block. |
 | [Architecture](docs/architecture.md) | Component map, the `/query` request flow, and the provider seams. |
 | [RAG pipeline](docs/rag-pipeline.md) | Ingestion, chunking, hybrid retrieval, reranking, CRAG/Self-RAG, and the answer cache. |
+| [Evaluation](docs/evaluation.md) | The two-tier golden eval over `samples/`: the offline retrieval gate (no secrets) and the answer-quality judge. |
 | [Investigations](docs/investigations.md) | The event-driven incident-investigation engine. |
 | [MCP integrations](docs/mcp-integrations.md) | The 20 read-only integrations, their env vars, and the safety model. |
 | [Multi-environment](docs/multi-environment.md) | One instance, many environments' Kubernetes / Prometheus / Elasticsearch. |

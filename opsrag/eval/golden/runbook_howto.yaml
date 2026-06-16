@@ -1,122 +1,70 @@
-# runbook_howto -- procedural how-to questions. Should retrieve a runbook
-# or platform doc and surface concrete steps/commands.
-#
-# These leverage the SRE knowledge base content shipped on 2026-05-02
-# (49 platform runbooks + 8 service-scoped + cleaned alerts: frontmatter).
-
+# Procedure how-to goldens over the shipped `samples/` corpus.
+# expected_sources are paths RELATIVE TO samples/.
 - id: howto_001
   category: runbook_howto
-  query: "How do I enable a new GitLab CI pipeline using the templates?"
+  query: "How do I scale the acme-notes API manually?"
   expected_sources:
-    - devops/gitops-pipeline-templates/README.md
+    - runbooks/003-acme-notes-scaling.md
   must_contain:
-    - ".gitlab-ci.yml"
-    - "include"
+    - "scale"
+    - "replicas"
   must_not_contain:
-    - "I don't have access"
-  notes: "Setup procedure from README -- already strong baseline answer."
+    - "I don't know"
+  notes: "Manual scale via `kubectl ... scale deploy/acme-notes-api --replicas=8`."
 
 - id: howto_002
   category: runbook_howto
-  query: "When the Celery worker is offline alert fires for acme-notes-be, what should I check first?"
+  query: "What are the first triage steps for an acme-notes incident?"
   expected_sources:
-    - devops/sre/sre-knowledge-base/docs/runbooks/celery/the-celery-worker-is-offline.md
+    - runbooks/004-acme-notes-incident-response.md
   must_contain:
-    - "celery"
+    - "golden signals"
   must_not_contain:
-    - "context does not contain"
-    - "I cannot determine"
-  notes: "Tests alert->runbook routing for an alert with populated alerts: frontmatter."
+    - "I don't know"
+  notes: "First-responder triage checklist."
 
 - id: howto_003
   category: runbook_howto
-  query: "How do I diagnose Elasticsearch unassigned shards?"
+  query: "How do I deploy a new acme-notes-api image version?"
   expected_sources:
-    - devops/sre/sre-knowledge-base/docs/runbooks/elasticsearch/elasticsearch-has-unassigned-shards.md
+    - runbooks/001-acme-notes-deploy.md
   must_contain:
-    - "kubectl"
-    - "shard"
+    - "set image"
+    - "rollout status"
   must_not_contain:
-    - "no procedure"
-  notes: "Procedural runbook with concrete commands -- Pass 1 cleanup populated this one."
+    - "I don't know"
+  notes: "Deploy procedure: `set image` then watch `rollout status`."
 
 - id: howto_004
   category: runbook_howto
-  query: "What is the procedure when ArgoCD UI is down?"
+  query: "How do I roll back a bad acme-notes database migration?"
   expected_sources:
-    - devops/sre/sre-knowledge-base/docs/runbooks/argocd/argocd-ui-is-down.md
+    - runbooks/002-acme-notes-db-failover.md
   must_contain:
-    - "argocd"
+    - "snapshot"
   must_not_contain:
-    - "context does not contain"
-  notes: "ArgoCD runbook hit -- alerts: was empty pre-Pass-A."
+    - "I don't know"
+  notes: "Migration rollback restores the pre-migration snapshot."
 
 - id: howto_005
   category: runbook_howto
-  query: "When a Kafka topic has consumer lag, what diagnosis steps should I take?"
+  query: "How do I selectively flush only stale acme-notes cache keys?"
   expected_sources:
-    - devops/sre/sre-knowledge-base/docs/services/acme-notes-be/runbooks/kafka-consumer-lag-large.md
-    - devops/sre/sre-knowledge-base/docs/runbooks/kafka/kafka-topic-has-consumer-lag.md
+    - runbooks/005-acme-notes-cache-flush.md
   must_contain:
-    - "consumer"
-    - "lag"
+    - "selective"
+    - "key prefix"
   must_not_contain:
-    - "no information"
-  notes: "Cross-doc -- should pull both acme-notes-be-scoped runbook AND platform-wide kafka runbook."
+    - "I don't know"
+  notes: "Selective flush (preferred): delete only the affected key prefix."
 
 - id: howto_006
   category: runbook_howto
-  query: "How do I respond to an application pod stuck in CrashLoopBackOff?"
+  query: "How do I verify the acme-notes database failover succeeded?"
   expected_sources:
-    - devops/sre/sre-knowledge-base/docs/runbooks/kubernetes/application-pod-is-under-crashloopbackoff.md
+    - runbooks/002-acme-notes-db-failover.md
   must_contain:
-    - "kubectl"
+    - "pg_isready"
   must_not_contain:
-    - "context does not contain"
-  notes: "Smoke-tested as a known weak retrieval -- captures pre-Step-1 baseline so we can measure parent-substitution improvement."
-
-# -- Tuning regression suite (Tasks 10-13, 2026-05-05) --
-# Locks the fixes for the failure modes from sessions
-# 558b9c78 / 7a2ec313 / 756c0aa5 + the gateway-lens scenario.
-
-- id: howto_007
-  category: runbook_howto
-  query: "I want to add new environment variable API_MAPPING_NAME = \"testingblablabla\" to acme-notes-be in PROD environment. And I want to add new secret as environment variable API_MAPPING_KEY = acme-notes-be-mapping-key to acme-notes-be in PROD environment. Pls guide me"
-  expected_sources:
-    - devops/gitops/values/saas/acme-notes-be/prod.yaml
-    - devops/sre/sre-knowledge-base/docs/runbooks/deployments/onboarding-new-saas-app.md
-  must_contain:
-    - "values/saas/acme-notes-be/prod.yaml"
-    - "externalSecretStore"
-    - "API_MAPPING_KEY"
-    - "remoteRef"
-  must_not_contain:
-    - "context does not contain"
-    - "Missing Information"
-    - "I cannot determine"
-  notes: |
-    Regression for session 558b9c78: pre-fix answer said "context does not
-    contain specific instructions" and listed what was missing. After
-    Tasks 10+11+12 fixes (repo-detect demote + path-pattern fan-out + gen
-    prompt rewrite), retrieval surfaces gitops-monorepo's
-    values/saas/acme-notes-be/prod.yaml and the LLM produces concrete YAML
-    edits (environment: + externalSecretStore: blocks).
-
-- id: howto_008
-  category: runbook_howto
-  query: "qa-runner has new service name 'gateway-lens', pls guide me how to onboard it"
-  expected_sources:
-    - devops/sre/sre-knowledge-base/docs/runbooks/deployments/onboarding-new-saas-app.md
-  must_contain:
-    - "values/saas/gateway-lens"
-    - "gateway-lens"
-  must_not_contain:
-    - "context does not contain"
-    - "Missing Information"
-  notes: |
-    Regression for the 2026-05-02 gateway-lens scenario. Pre-fix answer
-    advised editing values/saas/acme-notes-be/preprod.yaml's existing paths block
-    (because retrieval pulled acme-notes-be/preprod.yaml as top source). Post-fix,
-    the onboarding runbook surfaces with concrete worked examples
-    (gateway-lens, acme-qc-be, mobile-slack) and the answer
-    correctly says to create a NEW folder under values/saas/gateway-lens/.
+    - "I don't know"
+  notes: "Verification step uses `pg_isready` + the API /readyz endpoint."
