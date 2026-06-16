@@ -43,15 +43,18 @@ degrades a missing image to text-only -- spec FR-014). Pass
 ``raise_on_error=True`` to get a sanitized :class:`ImageFetchError` instead
 (useful in tests / when a caller wants to log it itself).
 
-TOCTOU note: there is a small time-of-check-to-time-of-use window between
-resolving the host's IPs here and ``httpx`` re-resolving + connecting. A
-determined attacker controlling DNS could in theory return a public IP to our
-``getaddrinfo`` check and a private IP to httpx's connect (DNS rebinding). Fully
-closing that would require pinning the validated IP into the connection (a
-custom transport / resolver), which is heavier than warranted for the
-synthetic-bot v1 threat model; the scheme + IP + size guards block the
-overwhelming majority of real SSRF payloads (static metadata URLs, literal
-private hosts, oversized bodies). A future hardening could pin the resolved IP.
+DNS-rebinding / TOCTOU fix: between our ``getaddrinfo`` validation and httpx's
+own DNS resolution + connect there used to be a time-of-check-to-time-of-use
+window. An attacker controlling DNS could return a PUBLIC IP to our check and a
+PRIVATE IP to httpx's connect (DNS rebinding) -> SSRF to an internal service.
+We close that window with :class:`_PinnedIPTransport`: we resolve + validate the
+host ONCE, pick a validated IP, and make httpx connect to THAT EXACT IP -- httpx
+never does a second, independent resolution. Crucially the TLS handshake still
+uses the ORIGINAL hostname for SNI and for certificate-name verification (via
+httpcore's ``sni_hostname`` request extension, which becomes ``server_hostname``
+on the default, hostname-verifying SSL context), and the ``Host`` header stays
+the original hostname so the origin server still routes correctly. We pin the
+connect target, not the trust anchor -- cert verification is NOT weakened.
 
 A Teams ``contentUrl`` host allowlist (e.g. ``*.teams.microsoft.com`` /
 ``*.sharepoint.com``) would be a nice-to-have additional layer, but the IP
@@ -112,27 +115,79 @@ def _is_blocked_ip(ip_str: str) -> bool:
     )
 
 
-def _resolve_and_check_host(host: str) -> bool:
-    """Resolve ``host`` and return True iff EVERY address is safe to connect to.
+def _resolve_and_check_host(host: str) -> str | None:
+    """Resolve ``host``, validate EVERY address, and return one validated IP.
 
     Uses ``socket.getaddrinfo`` so an IP-literal host resolves to itself and a
-    DNS name resolves to its real addresses. If resolution fails, or ANY
-    resolved address is in a blocked range, returns False (fail closed).
+    DNS name resolves to its real addresses. Returns ``None`` (fail closed) if
+    resolution fails, returns no addresses, or ANY resolved address is in a
+    blocked range. Otherwise returns the FIRST resolved IP (already validated)
+    so the caller can pin the connection to that exact address -- closing the
+    DNS-rebinding TOCTOU window (we never let httpx re-resolve).
+
+    We validate all addresses but return the first because httpx connects to a
+    single host; pinning any one validated IP is sufficient and httpx's own
+    retry/connect logic only needs one target.
     """
     if not host:
-        return False
+        return None
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, OSError):
-        return False
+        return None
     if not infos:
-        return False
+        return None
+    first_ip: str | None = None
     for info in infos:
         sockaddr = info[4]
         ip_str = sockaddr[0]
         if _is_blocked_ip(ip_str):
-            return False
-    return True
+            return None  # ANY blocked address => refuse the whole host
+        if first_ip is None:
+            first_ip = ip_str
+    return first_ip
+
+
+class _PinnedIPTransport(httpx.AsyncHTTPTransport):
+    """An ``httpx`` transport that connects to a pre-validated IP, not the DNS.
+
+    The whole point: we already resolved + validated the host's IP(s) with
+    ``socket.getaddrinfo``; if we let httpx resolve the hostname again at connect
+    time, a DNS-rebinding attacker could swap in a private IP between our check
+    and httpx's connect (TOCTOU). So we rewrite the outgoing request's URL host
+    to the validated IP -- httpcore then opens the TCP socket to THAT IP and
+    performs NO further name resolution.
+
+    TLS is NOT weakened: we set the ``sni_hostname`` request extension to the
+    original hostname, which httpcore passes as ``server_hostname`` to the TLS
+    handshake on its default SSL context (``check_hostname=True``,
+    ``CERT_REQUIRED``). So SNI and certificate-name verification both target the
+    real hostname -- exactly as a normal request would -- while the socket goes
+    to the IP we vetted. We also keep the ``Host`` header set to the original
+    hostname so the origin server routes the request correctly.
+    """
+
+    def __init__(self, *, pinned_ip: str, original_host: str, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._pinned_ip = pinned_ip
+        self._original_host = original_host
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        # Preserve the original hostname for routing + TLS, then point the
+        # connection at the validated IP.
+        # 1. Host header -> original hostname (origin-server routing). httpx
+        #    derives the default Host header from the URL host, which we are
+        #    about to overwrite, so set it explicitly here.
+        request.headers["Host"] = self._original_host
+        # 2. SNI + certificate verification -> original hostname. Without this,
+        #    httpcore would verify the cert against the IP and break TLS for
+        #    every real CDN. With it, verification stays against the hostname.
+        request.extensions = {**request.extensions, "sni_hostname": self._original_host}
+        # 3. Connect target -> the validated IP. Rewriting the URL host makes
+        #    httpcore's origin (and thus its TCP connect) use the IP with NO
+        #    second DNS lookup -- this is what closes the rebinding window.
+        request.url = request.url.copy_with(host=self._pinned_ip)
+        return await super().handle_async_request(request)
 
 
 def _safe_host(url: str) -> str:
@@ -184,15 +239,25 @@ async def fetch_image_bytes(
         _fail(f"scheme={parts.scheme or 'none'}")
         return None
 
-    # --- 2. SSRF IP block --------------------------------------------------
-    if not _resolve_and_check_host(parts.hostname or ""):
+    # --- 2. SSRF IP block (and capture the validated IP to pin) ------------
+    validated_ip = _resolve_and_check_host(parts.hostname or "")
+    if validated_ip is None:
         _fail("host-resolves-to-blocked-or-unresolvable-ip")
         return None
 
     # --- 3 + 4. Stream the body with a size ceiling; scrub any error -------
+    # Pin the connection to the IP we just validated so httpx cannot re-resolve
+    # the hostname (DNS-rebinding TOCTOU defence). TLS SNI + cert verification
+    # still target the original hostname -- see _PinnedIPTransport.
     try:
         timeout = httpx.Timeout(_TIMEOUT_S)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        transport = _PinnedIPTransport(
+            pinned_ip=validated_ip,
+            original_host=parts.hostname or "",
+        )
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=False, transport=transport,
+        ) as client:
             async with client.stream("GET", url, headers=headers) as resp:
                 resp.raise_for_status()
 
