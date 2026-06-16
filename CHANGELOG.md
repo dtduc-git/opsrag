@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-16
+
+Security + dependency patch release. The published `v0.3.0` images were built
+before these fixes; `v0.3.1` is the first image set that contains them.
+
+### Security
+
+- **No raw exception text to query clients.** The streaming SSE error event and
+  the non-streaming 500 returned `str(exc)` to the caller (CodeQL
+  `py/stack-trace-exposure`); both now log server-side and return a generic
+  message.
+- **URL-substring sanitization (routing extractor).** The Contour/Ambassador
+  `apiVersion` checks now exact-match the parsed group (`api.split("/")[0] == …`)
+  instead of `startswith`, clearing the `py/incomplete-url-substring-sanitization`
+  finding without changing behavior.
+- **DNS-rebinding hardening for channel image fetch.** The inbound-image fetcher
+  pins the validated IP into the connection (TLS still verified against the
+  hostname), closing the resolve-then-reconnect TOCTOU window on top of the
+  existing HTTPS-only + private-IP block + streaming size cap + token scrubbing.
+- **Dependency CVE bumps:** cryptography 49, starlette 1.3.1, uvicorn 0.49,
+  aiohttp 3.14.1 (clears the CI `pip-audit` gate); base-image **system**
+  pip/setuptools/wheel patched in the Dockerfile (wheel/pip/jaraco.context CVEs);
+  UI **dompurify 3.4.10** + **vite 8 / @vitejs/plugin-react 6** (npm audit: 0
+  vulnerabilities).
+- **Dependabot alerts + automated security fixes enabled**; merged the pending
+  GitHub Actions + base-image (node) bumps.
+
+### Changed
+
+- `master` is now a protected branch (require PR + green required status checks;
+  force-push/deletion blocked; admin bypass for emergencies).
+
 ## [0.3.0] - 2026-06-16
 
 ### Added
