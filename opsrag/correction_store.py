@@ -75,7 +75,10 @@ def _deterministic_chunk_id(question: str, user_id: str) -> str:
     correction (e.g. user fixes a typo in their answer) overwrites the
     prior version -- no orphan duplicates."""
     key = f"{(question or '').strip().lower()}|{(user_id or '').strip().lower()}"
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    # Non-security dedup id: this digest only de-duplicates re-submitted
+    # corrections, it never protects secrets. usedforsecurity=False documents
+    # that intent (and clears CodeQL's weak-sensitive-data-hashing finding).
+    digest = hashlib.sha256(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     return f"correction-{digest}"
 
 
