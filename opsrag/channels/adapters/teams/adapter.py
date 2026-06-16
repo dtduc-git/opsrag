@@ -247,14 +247,21 @@ class TeamsAdapter(ChannelAdapter):
         token accessor), so we fetch anonymously. Teams-hosted content that
         requires a bearer token (rare for the synthetic-bot v1) would 401 here
         and yield ``None``; acquiring an AAD bot token is a future enhancement.
+
+        SECURITY (FIX 3): the Teams ``contentUrl`` is attacker-influenceable
+        (it arrives in an inbound Activity), so this is the adapter where SSRF
+        matters most. The download is routed through the shared hardened
+        :func:`fetch_image_bytes`, whose SSRF IP block refuses any URL whose
+        host resolves to a private / loopback / link-local (e.g.
+        169.254.169.254 cloud metadata) / reserved / multicast / unspecified
+        address -- plus https-only and an absolute size ceiling. A Teams host
+        allowlist (``*.teams.microsoft.com`` / ``*.sharepoint.com``) would be a
+        nice-to-have additional layer; the IP block is the required protection.
         """
         if not ref.url:
             return None
-        import httpx
-        async with httpx.AsyncClient(timeout=30) as cx:
-            resp = await cx.get(ref.url)
-            resp.raise_for_status()
-            return resp.content
+        from opsrag.channels.image_fetch import fetch_image_bytes
+        return await fetch_image_bytes(ref.url)
 
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser:
         """Synthetic anonymous identity ``teams-bot:<tenant>:<user>``.
