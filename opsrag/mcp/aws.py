@@ -15,11 +15,17 @@ read from ``AWS_REGION`` / ``AWS_DEFAULT_REGION`` (or per-call ``region``);
 ## Read-only enforcement
 
 Every handler issues a Describe / List / Get-style call (plus the read-only
-CloudWatch Logs Insights start/get-query and Cost Explorer query). The generic
-``aws_read`` escape hatch ENFORCES read-only by rejecting any operation whose
-name does not start with an allow-listed read verb.
+Cost Explorer query). The generic ``aws_read`` escape hatch ENFORCES
+read-only by rejecting any operation whose name does not start with an
+allow-listed read verb.
 
-## Tool list (11 read-only)
+## CloudWatch / Logs moved out
+
+CloudWatch metrics + alarms and CloudWatch Logs now live in the dedicated
+``opsrag.mcp.cloudwatch`` connector (``cloudwatch_*`` tools). The generic
+``aws_read`` escape hatch can still reach those services if needed.
+
+## Tool list (7 read-only)
 
 | Tool                              | boto3 call(s)                              |
 |-----------------------------------|--------------------------------------------|
@@ -27,10 +33,6 @@ name does not start with an allow-listed read verb.
 | `aws_list_eks_clusters`           | eks.list_clusters                          |
 | `aws_describe_eks_cluster`        | eks.describe_cluster                       |
 | `aws_list_ecs_services`           | ecs.list_services + describe_services      |
-| `aws_cloudwatch_get_metric_data`  | cloudwatch.get_metric_data                 |
-| `aws_cloudwatch_describe_alarms`  | cloudwatch.describe_alarms                 |
-| `aws_logs_filter_events`          | logs.filter_log_events                     |
-| `aws_logs_insights_query`         | logs.start_query + get_query_results       |
 | `aws_s3_list_buckets`             | s3.list_buckets                            |
 | `aws_cost_and_usage`              | ce.get_cost_and_usage                      |
 | `aws_read` (generic escape hatch) | <service>.<read-only op>                   |
@@ -50,8 +52,6 @@ _log = logging.getLogger("opsrag.mcp.aws")
 _DEFAULT_LIMIT = 25
 _MAX_LIMIT = 100
 _RESULT_TRUNCATE_CHARS = 8000
-_INSIGHTS_POLL_TRIES = 5
-_INSIGHTS_POLL_SLEEP_S = 1.0
 
 # Read-only verb allow-list for the generic `aws_read` escape hatch. Any
 # operation whose PascalCase name does not begin with one of these is rejected.
@@ -274,126 +274,6 @@ async def _h_list_ecs_services(_unused, args: dict) -> Any:
     return {"cluster": cluster, "count": len(out), "services": out}
 
 
-async def _h_cloudwatch_get_metric_data(_unused, args: dict) -> Any:
-    """cloudwatch.get_metric_data(MetricDataQueries=, StartTime=, EndTime=)."""
-    queries = args["metric_data_queries"]
-    params: dict[str, Any] = {
-        "MetricDataQueries": queries,
-        "StartTime": args["start_time"],
-        "EndTime": args["end_time"],
-    }
-    if args.get("scan_by"):
-        params["ScanBy"] = args["scan_by"]
-    resp = await _call("cloudwatch", "get_metric_data", region=_region(args), **params)
-    out = []
-    for r in resp.get("MetricDataResults") or []:
-        out.append({
-            "id": r.get("Id"),
-            "label": r.get("Label"),
-            "status": r.get("StatusCode"),
-            "timestamps": [str(t) for t in (r.get("Timestamps") or [])],
-            "values": r.get("Values") or [],
-        })
-    return {"count": len(out), "results": out}
-
-
-async def _h_cloudwatch_describe_alarms(_unused, args: dict) -> Any:
-    """cloudwatch.describe_alarms(StateValue=)."""
-    params: dict[str, Any] = {"MaxRecords": _clamp(args.get("limit"), default=50, max=100)}
-    if args.get("state_value"):
-        params["StateValue"] = args["state_value"]
-    if args.get("alarm_names"):
-        params["AlarmNames"] = list(args["alarm_names"])
-    if args.get("alarm_name_prefix"):
-        params["AlarmNamePrefix"] = args["alarm_name_prefix"]
-    resp = await _call("cloudwatch", "describe_alarms", region=_region(args), **params)
-    out = []
-    for a in resp.get("MetricAlarms") or []:
-        out.append({
-            "name": a.get("AlarmName"),
-            "state": a.get("StateValue"),
-            "reason": _truncate(a.get("StateReason"), 500),
-            "metric": a.get("MetricName"),
-            "namespace": a.get("Namespace"),
-            "comparison": a.get("ComparisonOperator"),
-            "threshold": a.get("Threshold"),
-        })
-    return {"count": len(out), "alarms": out}
-
-
-async def _h_logs_filter_events(_unused, args: dict) -> Any:
-    """logs.filter_log_events(logGroupName=, filterPattern=, startTime=, limit=)."""
-    params: dict[str, Any] = {
-        "logGroupName": args["log_group_name"],
-        "limit": _clamp(args.get("limit"), default=25, max=100),
-    }
-    if args.get("filter_pattern"):
-        params["filterPattern"] = args["filter_pattern"]
-    if args.get("start_time") is not None:
-        params["startTime"] = int(args["start_time"])
-    if args.get("end_time") is not None:
-        params["endTime"] = int(args["end_time"])
-    if args.get("log_stream_names"):
-        params["logStreamNames"] = list(args["log_stream_names"])
-    resp = await _call("logs", "filter_log_events", region=_region(args), **params)
-    out = []
-    for e in resp.get("events") or []:
-        out.append({
-            "timestamp": e.get("timestamp"),
-            "ingestion_time": e.get("ingestionTime"),
-            "stream": e.get("logStreamName"),
-            "message": _truncate(e.get("message"), 2000),
-        })
-    return {
-        "log_group": args["log_group_name"],
-        "count": len(out),
-        "events": out,
-    }
-
-
-async def _h_logs_insights_query(_unused, args: dict) -> Any:
-    """logs.start_query(...) then poll logs.get_query_results(queryId=)."""
-    region = _region(args)
-    start_params: dict[str, Any] = {
-        "queryString": args["query_string"],
-        "startTime": int(args["start_time"]),
-        "endTime": int(args["end_time"]),
-        "limit": _clamp(args.get("limit"), default=50, max=1000),
-    }
-    groups = args.get("log_group_names")
-    if groups:
-        start_params["logGroupNames"] = list(groups)
-    elif args.get("log_group_name"):
-        start_params["logGroupName"] = args["log_group_name"]
-    started = await _call("logs", "start_query", region=region, **start_params)
-    query_id = started.get("queryId")
-
-    results: dict[str, Any] = {}
-    status = "Scheduled"
-    for _ in range(_INSIGHTS_POLL_TRIES):
-        results = await _call("logs", "get_query_results", region=region, queryId=query_id)
-        status = results.get("status") or "Unknown"
-        if status in ("Complete", "Failed", "Cancelled", "Timeout"):
-            break
-        await asyncio.sleep(_INSIGHTS_POLL_SLEEP_S)
-
-    rows = []
-    for row in results.get("results") or []:
-        rows.append({c.get("field"): _truncate(c.get("value"), 2000) for c in row})
-    stats = results.get("statistics") or {}
-    return {
-        "query_id": query_id,
-        "status": status,
-        "count": len(rows),
-        "rows": rows,
-        "statistics": {
-            "records_matched": stats.get("recordsMatched"),
-            "records_scanned": stats.get("recordsScanned"),
-            "bytes_scanned": stats.get("bytesScanned"),
-        },
-    }
-
-
 async def _h_s3_list_buckets(_unused, args: dict) -> Any:
     """s3.list_buckets."""
     resp = await _call("s3", "list_buckets", region=_region(args))
@@ -538,89 +418,6 @@ AWS_TOOLS: list[MCPTool] = [
         handler=_h_list_ecs_services,
     ),
     MCPTool(
-        name="aws_cloudwatch_get_metric_data",
-        description=(
-            "Fetch CloudWatch metric data via get_metric_data. Pass "
-            "`metric_data_queries` (the MetricDataQueries list), `start_time` "
-            "and `end_time` (datetimes). Returns per-query timestamps + values."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "metric_data_queries": {"type": "array", "items": {"type": "object"}},
-                "start_time": {"description": "Start datetime"},
-                "end_time": {"description": "End datetime"},
-                "scan_by": {"type": "string", "enum": ["TimestampDescending", "TimestampAscending"]},
-                "region": {"type": "string"},
-            },
-            "required": ["metric_data_queries", "start_time", "end_time"],
-        },
-        handler=_h_cloudwatch_get_metric_data,
-    ),
-    MCPTool(
-        name="aws_cloudwatch_describe_alarms",
-        description=(
-            "List CloudWatch metric alarms. Filter by `state_value` "
-            "(OK/ALARM/INSUFFICIENT_DATA), `alarm_names`, or `alarm_name_prefix`."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "state_value": {"type": "string", "enum": ["OK", "ALARM", "INSUFFICIENT_DATA"]},
-                "alarm_names": {"type": "array", "items": {"type": "string"}},
-                "alarm_name_prefix": {"type": "string"},
-                "region": {"type": "string"},
-                "limit": {"type": "number"},
-            },
-        },
-        handler=_h_cloudwatch_describe_alarms,
-    ),
-    MCPTool(
-        name="aws_logs_filter_events",
-        description=(
-            "filter_log_events on a CloudWatch Logs group. Pass "
-            "`log_group_name` (required), optional `filter_pattern`, "
-            "`start_time`/`end_time` (unix ms), `log_stream_names`."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "log_group_name": {"type": "string"},
-                "filter_pattern": {"type": "string"},
-                "start_time": {"type": "number", "description": "unix ms"},
-                "end_time": {"type": "number", "description": "unix ms"},
-                "log_stream_names": {"type": "array", "items": {"type": "string"}},
-                "region": {"type": "string"},
-                "limit": {"type": "number"},
-            },
-            "required": ["log_group_name"],
-        },
-        handler=_h_logs_filter_events,
-    ),
-    MCPTool(
-        name="aws_logs_insights_query",
-        description=(
-            "Run a CloudWatch Logs Insights query: start_query then poll "
-            "get_query_results until complete. Pass `query_string`, "
-            "`start_time`/`end_time` (unix seconds), and either "
-            "`log_group_names` (list) or `log_group_name`."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "query_string": {"type": "string"},
-                "start_time": {"type": "number", "description": "unix seconds"},
-                "end_time": {"type": "number", "description": "unix seconds"},
-                "log_group_names": {"type": "array", "items": {"type": "string"}},
-                "log_group_name": {"type": "string"},
-                "region": {"type": "string"},
-                "limit": {"type": "number"},
-            },
-            "required": ["query_string", "start_time", "end_time"],
-        },
-        handler=_h_logs_insights_query,
-    ),
-    MCPTool(
         name="aws_s3_list_buckets",
         description="List all S3 buckets (name + creation date) for the account.",
         input_schema={
@@ -755,60 +552,6 @@ async def _fake_call(service: str, op_name: str, *, region: str | None = None, *
                     "taskDefinition": "arn:aws:ecs:us-east-1:123456789012:task-definition/api:12",
                 }
             ]
-        }
-    if key == ("cloudwatch", "get_metric_data"):
-        return {
-            "MetricDataResults": [
-                {
-                    "Id": "m1",
-                    "Label": "CPUUtilization",
-                    "StatusCode": "Complete",
-                    "Timestamps": ["2026-05-20T00:00:00Z", "2026-05-20T00:05:00Z"],
-                    "Values": [42.0, 47.5],
-                }
-            ]
-        }
-    if key == ("cloudwatch", "describe_alarms"):
-        return {
-            "MetricAlarms": [
-                {
-                    "AlarmName": "api-5xx-high",
-                    "StateValue": "ALARM",
-                    "StateReason": "Threshold crossed: 5 datapoints > 10.0",
-                    "MetricName": "HTTPCode_Target_5XX_Count",
-                    "Namespace": "AWS/ApplicationELB",
-                    "ComparisonOperator": "GreaterThanThreshold",
-                    "Threshold": 10.0,
-                }
-            ]
-        }
-    if key == ("logs", "filter_log_events"):
-        return {
-            "events": [
-                {
-                    "timestamp": 1716000000000,
-                    "ingestionTime": 1716000001000,
-                    "logStreamName": "api/abc",
-                    "message": "ERROR something broke",
-                }
-            ]
-        }
-    if key == ("logs", "start_query"):
-        return {"queryId": "q-12345"}
-    if key == ("logs", "get_query_results"):
-        return {
-            "status": "Complete",
-            "results": [
-                [
-                    {"field": "@timestamp", "value": "2026-05-20 00:00:00.000"},
-                    {"field": "@message", "value": "ERROR boom"},
-                ]
-            ],
-            "statistics": {
-                "recordsMatched": 1.0,
-                "recordsScanned": 1000.0,
-                "bytesScanned": 204800.0,
-            },
         }
     if key == ("s3", "list_buckets"):
         return {

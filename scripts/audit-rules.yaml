@@ -202,6 +202,7 @@ hardcoded_hosts_allowlist:
   - api.datadoghq.com                # datadog MCP (also *.datadoghq.com region sites)
   - "*.datadoghq.com"
   - api.rootly.com                   # rootly MCP
+  - api.pagerduty.com                # pagerduty MCP
   - "*.honeycomb.io"                 # (future) honeycomb MCP
   - api.telegram.org                 # telegram channel bot -- public Bot API base
   - adaptivecards.io                 # teams channel bot -- Adaptive Card $schema URL (a spec constant, not a network host)
@@ -279,6 +280,9 @@ hardcoded_hosts_allowlist:
   - rootly.com
   - "*.rootly.com"
   - api.rootly.com
+  - pagerduty.com
+  - "*.pagerduty.com"
+  - api.pagerduty.com
 
   # Communication SaaS
   - "*.slack.com"

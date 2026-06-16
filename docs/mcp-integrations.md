@@ -55,16 +55,13 @@ For each integration below: its config name (`mcp.<name>`), display name, requir
 - Required config: none
 - Health probe: no
 - Read-only enforcement: per-handler `Describe`/`List`/`Get` calls; the generic `aws_read` escape hatch rejects any operation not starting with an allow-listed read verb.
+- Note: CloudWatch metrics/alarms and CloudWatch Logs moved to the dedicated [`cloudwatch`](#cloudwatch) integration.
 - Tools:
-  - `aws_cloudwatch_describe_alarms`
-  - `aws_cloudwatch_get_metric_data`
   - `aws_cost_and_usage`
   - `aws_describe_ec2_instances`
   - `aws_describe_eks_cluster`
   - `aws_list_ecs_services`
   - `aws_list_eks_clusters`
-  - `aws_logs_filter_events`
-  - `aws_logs_insights_query`
   - `aws_read` (generic read-only escape hatch)
   - `aws_s3_list_buckets`
 
@@ -96,6 +93,21 @@ For each integration below: its config name (`mcp.<name>`), display name, requir
   - `cloudflare_list_firewall_rules`
   - `cloudflare_list_page_rules`
   - `cloudflare_list_zones`
+
+### cloudwatch
+
+- Config name: `mcp.cloudwatch`
+- Display name: Amazon CloudWatch (metrics/alarms/logs)
+- Required env: none — uses the boto3 credential chain (`AWS_PROFILE` / `AWS_REGION` / IRSA / instance role), same as the `aws` integration
+- Required config: none
+- Health probe: no
+- Read-only enforcement: every handler issues a `Get`/`Describe`/`List`/`Filter` call only; there is no escape hatch and no mutating operation.
+- Tools:
+  - `cloudwatch_describe_alarms`
+  - `cloudwatch_get_metric_data`
+  - `cloudwatch_list_metrics`
+  - `cloudwatch_logs_describe_groups`
+  - `cloudwatch_logs_filter`
 
 ### code
 

@@ -124,6 +124,7 @@ mcp:
   aws:           { enabled: false }
   azure:         { enabled: false }
   cloudflare:    { enabled: false }
+  cloudwatch:    { enabled: false }
   code:          { enabled: false }
   datadog:       { enabled: false }
   elasticsearch: { enabled: false }
@@ -134,10 +135,12 @@ mcp:
   knowledge:     { enabled: false }
   kubernetes:    { enabled: false }
   loki:          { enabled: false }
+  pagerduty:     { enabled: false }
   prometheus:    { enabled: false }
   rootly:        { enabled: false }
   runbooks:      { enabled: false }
   sentry:        { enabled: false }
   slack:         { enabled: false }
   splunk:        { enabled: false }
+  stackdriver:   { enabled: false }
   tool_cache:    { enabled: false }

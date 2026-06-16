@@ -552,6 +552,7 @@ async def integrations(request: Request) -> dict:
         items.append({
             "name": integ.name,
             "display_name": integ.display_name,
+            "category": integ.category,
             "enabled": name in enabled_names,
             "tool_count": len(integ.tool_names),
             "tool_names": list(integ.tool_names),

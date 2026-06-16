@@ -307,6 +307,7 @@ mcp:
   aws:           { enabled: false, secretRef: "" }
   azure:         { enabled: false, secretRef: "" }
   cloudflare:    { enabled: false, secretRef: "" }
+  cloudwatch:    { enabled: false, secretRef: "" }
   code:          { enabled: false, secretRef: "" }
   datadog:       { enabled: false, secretRef: "" }
   elasticsearch: { enabled: false, secretRef: "" }
@@ -317,12 +318,14 @@ mcp:
   knowledge:     { enabled: false, secretRef: "" }
   kubernetes:    { enabled: false, secretRef: "" }
   loki:          { enabled: false, secretRef: "" }
+  pagerduty:     { enabled: false, secretRef: "" }
   prometheus:    { enabled: false, secretRef: "" }
   rootly:        { enabled: false, secretRef: "" }
   runbooks:      { enabled: false, secretRef: "" }
   sentry:        { enabled: false, secretRef: "" }
   slack:         { enabled: false, secretRef: "" }
   splunk:        { enabled: false, secretRef: "" }
+  stackdriver:   { enabled: false, secretRef: "" }
   tool_cache:    { enabled: false, secretRef: "" }
 
 # --- Opt-in Secret (operator can instead use envFromSecret) ------------------
