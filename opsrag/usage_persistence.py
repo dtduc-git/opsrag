@@ -273,7 +273,7 @@ class UsagePersistence:
             return []
         # Local import -- pricing imports may pull SDK code in future,
         # and we want this module to stay import-safe.
-        from opsrag.llms.pricing import cost_usd_micros
+        from opsrag.llms.pricing import cost_usd_micros, per_call_cost_micros
 
         where_parts: list[str] = ["e.user_oid IS NOT NULL"]
         params: list[Any] = []
@@ -325,12 +325,17 @@ class UsagePersistence:
                 "cost_usd_micros": 0,
                 "last_active_at": None,
             })
-            slot["query_count"] += int(qcount or 0)
+            qc = int(qcount or 0)
+            slot["query_count"] += qc
             slot["prompt_tokens"] += int(ptok or 0)
             slot["completion_tokens"] += int(ctok or 0)
+            # Token cost + per-call cost. Rerankers record zero tokens, so
+            # cost_usd_micros is 0 for them and the per-call term is the only
+            # charge; token-priced models have per_call_cost_micros == 0, so
+            # no double-counting either way.
             slot["cost_usd_micros"] += cost_usd_micros(
                 model, int(ptok or 0), int(ctok or 0),
-            )
+            ) + per_call_cost_micros(model) * qc
             if last_ts is not None:
                 last_iso = last_ts.isoformat() if hasattr(last_ts, "isoformat") else str(last_ts)
                 if slot["last_active_at"] is None or last_iso > slot["last_active_at"]:
@@ -363,7 +368,7 @@ class UsagePersistence:
                 "cost_usd_micros": 0,
                 "last_active_at": None,
             }
-        from opsrag.llms.pricing import cost_usd_micros
+        from opsrag.llms.pricing import cost_usd_micros, per_call_cost_micros
 
         where_parts = ["e.user_oid = %s"]
         params: list[Any] = [user_oid]
@@ -403,12 +408,16 @@ class UsagePersistence:
             "last_active_at": None,
         }
         for model, qcount, ptok, ctok, last_ts, email, name in rows:
-            result["query_count"] += int(qcount or 0)
+            qc = int(qcount or 0)
+            result["query_count"] += qc
             result["prompt_tokens"] += int(ptok or 0)
             result["completion_tokens"] += int(ctok or 0)
+            # Token cost + per-call (reranker) cost; see aggregate_by_user
+            # note -- the two terms are mutually exclusive per model, no
+            # double-counting.
             result["cost_usd_micros"] += cost_usd_micros(
                 model, int(ptok or 0), int(ctok or 0),
-            )
+            ) + per_call_cost_micros(model) * qc
             if email and not result["email"]:
                 result["email"] = email
             if name and not result["display_name"]:
@@ -437,7 +446,7 @@ class UsagePersistence:
             return None
         from datetime import datetime, timedelta
 
-        from opsrag.llms.pricing import cost_usd_micros
+        from opsrag.llms.pricing import cost_usd_micros, per_call_cost_micros
 
         # Anchor on this week's Monday (UTC) so buckets line up with
         # Postgres' ISO-week date_trunc.
@@ -483,14 +492,20 @@ class UsagePersistence:
             if slot is None:
                 continue
             it, ot = int(in_t or 0), int(out_t or 0)
+            nc = int(n or 0)
             slot["input_tokens"] += it
             slot["output_tokens"] += ot
             slot["tokens"] += it + ot
-            slot["call_count"] += int(n or 0)
+            slot["call_count"] += nc
             # cost_usd_micros returns MICRO-CENTS (1 USD == 100_000_000 of them;
             # see pricing.py). Divide by 1e8, not 1e6 (the /1e6 bug inflated the
-            # weekly cost ~100x, e.g. $2399 vs the real ~$24).
-            slot["cost_usd"] += cost_usd_micros(model, it, ot) / 100_000_000.0
+            # weekly cost ~100x, e.g. $2399 vs the real ~$24). Add per-call
+            # (reranker) cost: token-priced models contribute 0 here, rerankers
+            # contribute 0 token cost, so no double-counting.
+            slot["cost_usd"] += (
+                cost_usd_micros(model, it, ot)
+                + per_call_cost_micros(model) * nc
+            ) / 100_000_000.0
 
         return [slots[k] for k in order]
 

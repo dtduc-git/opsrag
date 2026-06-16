@@ -167,7 +167,8 @@ class QdrantVectorStore:
             return
         existing = await self._client.get_collections()
         names = {c.name for c in existing.collections}
-        if self._collection in names:
+        collection_present = self._collection in names
+        if collection_present:
             # Existing collection: fail closed if its dense vector size differs
             # from the embedder's dimension (parity with pgvector's
             # _assert_dimension_compatible). The API server already runs this
@@ -176,6 +177,11 @@ class QdrantVectorStore:
             # swap (e.g. 3072 -> 768) would otherwise surface as a cryptic
             # upsert error here instead of a clear fail-closed message. Reuse
             # the defensively-typed guard so there's a single source of truth.
+            #
+            # When allow_dimension_change=true AND the dim differs, the guard
+            # now DROPS the mismatched collection (truthful opt-in to reindex),
+            # so re-check existence afterward -- if it's gone, fall through to
+            # the create path below to rebuild it at the correct dimension.
             from opsrag.vectorstore_guard import assert_dimension_compatible
             await assert_dimension_compatible(
                 self._client,
@@ -183,8 +189,13 @@ class QdrantVectorStore:
                 self._dimension,
                 self._allow_dimension_change,
             )
-        else:
-            # New collection: named dense + named sparse with IDF modifier.
+            refreshed = await self._client.get_collections()
+            collection_present = self._collection in {
+                c.name for c in refreshed.collections
+            }
+        if not collection_present:
+            # New (or just-dropped) collection: named dense + named sparse with
+            # IDF modifier.
             await self._client.create_collection(
                 collection_name=self._collection,
                 vectors_config={

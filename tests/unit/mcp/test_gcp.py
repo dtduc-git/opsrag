@@ -3,6 +3,10 @@
 Exercises every tool through build_fake() with NO network, NO google libs,
 and NO GCP credentials, asserting the parsed shape from the canned data.
 asyncio_mode = "auto" (see pyproject.toml) so no decorator is needed.
+
+Cloud Monitoring + Logging moved to the dedicated `stackdriver` connector
+(see tests/unit/mcp/test_stackdriver.py); they are no longer part of this
+tool set.
 """
 from __future__ import annotations
 
@@ -11,9 +15,6 @@ import pytest
 from opsrag.mcp.gcp import GCP_TOOLS, build_fake, get_tool
 
 EXPECTED_TOOLS = {
-    "gcp_logging_list_entries",
-    "gcp_monitoring_list_timeseries",
-    "gcp_monitoring_list_alert_policies",
     "gcp_gke_list_clusters",
     "gcp_run_list_services",
     "gcp_asset_search",
@@ -26,7 +27,7 @@ def fake():
     try:
         yield f
     finally:
-        f.close()  # restore real module-level _get / _post
+        f.close()  # restore real module-level _get
 
 
 def test_tool_set_matches_exactly():
@@ -40,47 +41,6 @@ def fake_tool_names():
         return set(f.tool_names())
     finally:
         f.close()
-
-
-async def test_logging_list_entries(fake):
-    res = await fake.call(
-        "gcp_logging_list_entries",
-        {"project": "demo", "filter": "severity>=ERROR"},
-    )
-    assert res["project"] == "demo"
-    assert res["filter"] == "severity>=ERROR"
-    assert res["count"] == 1
-    assert res["next_page_token"] == "next-1"
-    entry = res["entries"][0]
-    assert entry["insert_id"] == "abc123"
-    assert entry["severity"] == "ERROR"
-    assert entry["resource_type"] == "cloud_run_revision"
-    assert "boom" in entry["payload"]
-
-
-async def test_monitoring_list_timeseries(fake):
-    res = await fake.call(
-        "gcp_monitoring_list_timeseries",
-        {"project": "demo", "filter": 'metric.type="x"'},
-    )
-    assert res["project"] == "demo"
-    assert res["count"] == 1
-    ts = res["time_series"][0]
-    assert ts["metric"]["type"].endswith("cpu/utilization")
-    assert ts["value_type"] == "DOUBLE"
-    assert ts["point_count"] == 1
-    assert ts["points"][0]["value"] == {"doubleValue": 0.42}
-
-
-async def test_monitoring_list_alert_policies(fake):
-    res = await fake.call("gcp_monitoring_list_alert_policies", {"project": "demo"})
-    assert res["count"] == 1
-    pol = res["alert_policies"][0]
-    assert pol["display_name"] == "High CPU"
-    assert pol["enabled"] is True
-    assert pol["combiner"] == "OR"
-    assert pol["conditions"][0]["display_name"] == "CPU > 80%"
-    assert pol["notification_channels"] == ["projects/demo/notificationChannels/9"]
 
 
 async def test_gke_list_clusters(fake):
@@ -126,7 +86,7 @@ async def test_handler_direct_invocation_pattern():
     # Exercise the get_tool + tool.handler(client, args) path explicitly.
     fake = build_fake()
     try:
-        tool = get_tool("gcp_logging_list_entries")
+        tool = get_tool("gcp_gke_list_clusters")
         res = await tool.handler(fake.client, {"project": "demo"})
         assert res["count"] == 1
     finally:

@@ -8,9 +8,9 @@ Runs AFTER the generator produces an answer. Asks Flash to:
 
 If any claim is unverifiable, we prepend a single-line hedge to the
 answer (we do NOT silently strip lines -- the engineer should see what
-the agent doubted). On any error (LLM failure, malformed JSON) we
-pass the answer through unchanged so the verifier never blocks an
-otherwise valid answer.
+the agent doubted). On any error (LLM failure, malformed JSON) we FAIL
+CLOSED: we append a caution to the answer rather than presenting an
+unverified answer as clean (we never silently pass it through).
 
 Why Flash and not Pro: this is a constrained extract+match task, low
 ambiguity, and we already pay Pro for the generator + hallucination
@@ -89,6 +89,16 @@ def _parse_verdict(raw: str) -> dict[str, list[str]] | None:
         "verified": [str(x) for x in verified if x is not None],
         "unverifiable": [str(x) for x in unverifiable if x is not None],
     }
+
+
+# Fail-closed caution appended when the verifier itself could not run (LLM
+# error or malformed verdict). We can't confirm the concrete claims, so we tell
+# the engineer rather than silently presenting an unverified answer as clean.
+_CAUTION = (
+    "\n\n_Note: I could not verify the concrete file paths / keys / resource "
+    "names in this answer against the corpus (verification step failed). "
+    "Double-check anything load-bearing before acting on it._"
+)
 
 
 def _format_hedge(unverifiable: list[str]) -> str:
@@ -187,17 +197,21 @@ def verify_answer_node(
                 max_tokens=1024,
             )
             verdict = _parse_verdict(response.content)
-        except Exception as exc:  # network / LLM failure -> fail open
+        except Exception as exc:  # network / LLM failure -> fail closed (verdict None)
             _log.warning("answer_verifier llm failed: %s", exc)
             verdict = None
 
         if verdict is None:
-            # Fail-open: pass the answer through unchanged.
+            # Fail-CLOSED: we could not verify the answer's concrete claims, so
+            # append a caution rather than presenting an unverified answer as
+            # clean. (Previously this passed the answer through unchanged.)
             return {
                 "verification_result": {
                     "skipped": True,
                     "reason": "malformed_or_error",
+                    "fail_closed": True,
                 },
+                "generation": answer + _CAUTION,
                 "current_step": "verified",
             }
 

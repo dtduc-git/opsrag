@@ -17,10 +17,10 @@ from opsrag.mcp.registry import REGISTRY
 # The known MCP integrations (general open-source catalog). Kept in lockstep
 # with KNOWN_MCP_NAMES / MCP_CONFIG_TYPES / the registry.
 EXPECTED_MCP_NAMES = {
-    "aws", "azure", "cloudflare", "code", "datadog", "elasticsearch",
-    "gcp", "github", "gitlab", "grafana", "knowledge", "kubernetes",
-    "loki", "prometheus", "rootly", "runbooks", "sentry", "slack",
-    "splunk", "tool_cache",
+    "aws", "azure", "cloudflare", "cloudwatch", "code", "datadog",
+    "elasticsearch", "gcp", "github", "gitlab", "grafana", "knowledge",
+    "kubernetes", "loki", "pagerduty", "prometheus", "rootly", "runbooks",
+    "sentry", "slack", "splunk", "stackdriver", "tool_cache",
 }
 
 

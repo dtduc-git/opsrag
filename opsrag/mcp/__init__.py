@@ -19,6 +19,7 @@ from opsrag.mcp.cloudflare import (
 from opsrag.mcp.cloudflare import (
     bind as bind_cloudflare,
 )
+from opsrag.mcp.cloudwatch import CLOUDWATCH_TOOLS, CloudWatchMCPError
 from opsrag.mcp.code import CODE_TOOLS
 from opsrag.mcp.code import bind_scm as bind_code_scm
 from opsrag.mcp.datadog import DATADOG_TOOLS
@@ -42,12 +43,14 @@ from opsrag.mcp.knowledge import KNOWLEDGE_TOOLS
 from opsrag.mcp.knowledge import bind as bind_knowledge
 from opsrag.mcp.kubernetes import KUBERNETES_TOOLS
 from opsrag.mcp.loki import LOKI_TOOLS, LokiMCPError
+from opsrag.mcp.pagerduty import PAGERDUTY_TOOLS, PagerDutyMCPError
 from opsrag.mcp.prometheus import PROMETHEUS_TOOLS
 from opsrag.mcp.rootly import ROOTLY_TOOLS
 from opsrag.mcp.runbooks import RUNBOOK_TOOLS
 from opsrag.mcp.sentry import SENTRY_TOOLS, SentryMCPError
 from opsrag.mcp.slack import SLACK_TOOLS, SlackMCPError
 from opsrag.mcp.splunk import SPLUNK_TOOLS, SplunkMCPError
+from opsrag.mcp.stackdriver import STACKDRIVER_TOOLS, StackdriverMCPError
 
 # Single registry for all MCP-style tools.
 #
@@ -63,12 +66,15 @@ ALL_MCP_TOOLS: list[MCPTool] = (
     + list(PROMETHEUS_TOOLS)
     + list(GRAFANA_TOOLS)
     + list(LOKI_TOOLS)
+    + list(PAGERDUTY_TOOLS)
     + list(ROOTLY_TOOLS)
     + list(DATADOG_TOOLS)
     + list(SENTRY_TOOLS)
     + list(SPLUNK_TOOLS)
     + list(AWS_TOOLS)
+    + list(CLOUDWATCH_TOOLS)
     + list(GCP_TOOLS)
+    + list(STACKDRIVER_TOOLS)
     + list(AZURE_TOOLS)
     + list(SLACK_TOOLS)
     + list(ES_TOOLS)
@@ -95,12 +101,18 @@ __all__ = [
     "GrafanaMCPError",
     "LOKI_TOOLS",
     "LokiMCPError",
+    "PAGERDUTY_TOOLS",
+    "PagerDutyMCPError",
     "SPLUNK_TOOLS",
     "SplunkMCPError",
     "AWS_TOOLS",
     "AWSMCPError",
+    "CLOUDWATCH_TOOLS",
+    "CloudWatchMCPError",
     "GCP_TOOLS",
     "GCPMCPError",
+    "STACKDRIVER_TOOLS",
+    "StackdriverMCPError",
     "AZURE_TOOLS",
     "AzureMCPError",
     "SLACK_TOOLS",

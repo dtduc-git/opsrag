@@ -250,12 +250,19 @@ class AgentConfig(BaseModel):
     rerank_top_k: int = 5
     max_retries: int = 3
     # Post-rerank MMR diversity penalty, the (1 - lambda) weight in [0, 1].
-    # 0.0 == DISABLED (default): the rerank output is a pure pass-through and
-    # behaviour is unchanged. >0 re-orders the kept top_k via Maximal Marginal
-    # Relevance so near-duplicate config variants don't crowd out distinct
-    # docs. ~0.3 is a gentle nudge; 1.0 is pure diversity. See
-    # opsrag/rerankers/mmr.py.
-    rerank_diversity: float = 0.0
+    # enabled by default (MMR diversity); set 0.0 to disable. >0 re-orders the
+    # kept top_k via Maximal Marginal Relevance so near-duplicate config
+    # variants don't crowd out distinct docs. ~0.3 is a gentle nudge; 1.0 is
+    # pure diversity. See opsrag/rerankers/mmr.py.
+    rerank_diversity: float = 0.3
+    # Content dedup BEFORE the rerank call -- a cheap pre-filter distinct from
+    # the post-rerank MMR diversity above.
+    rerank_content_dedup: bool = True   # drop exact-duplicate-content chunks BEFORE the rerank call (cost win, safe)
+    rerank_content_dedup_threshold: float = 0.0   # near-duplicate Jaccard merge before rerank; 0.0 = off (can drop distinct env-specific configs)
+    # Run the shared, fail-closed groundedness gate on the default multi_agent
+    # path (the hybrid/minimal/full paths already gate; this extends it to the
+    # default).
+    verify_grounding_default: bool = True   # run the shared, fail-closed groundedness gate on the default multi_agent path (adds ~1 LLM call/turn; set false to trade safety for latency/cost)
     # Phase 03 Pillar 3 -- Flash/Pro hybrid routing.
     # When set (e.g. "gemini-2.5-pro"), complex queries (root-cause /
     # cross-source / multi-step) escalate to Pro for synthesis;
@@ -495,7 +502,9 @@ class K8sClusterCoords(BaseModel):
 
 
 class K8sConfig(BaseModel):
-    """K8s MCP cluster registry (OPTIONAL GKE Workload-Identity provider).
+    """DEPRECATED: prefer environments.targets.
+
+    K8s MCP cluster registry (OPTIONAL GKE Workload-Identity provider).
 
     When non-empty, the K8s MCP uses ADC (Workload Identity in-pod, gcloud
     locally) + the GCP Container API to fetch cluster credentials for each
@@ -510,7 +519,9 @@ class K8sConfig(BaseModel):
 
 
 class ElasticsearchConfig(BaseModel):
-    """Elasticsearch / OpenSearch MCP -- direct read-only search.
+    """DEPRECATED: prefer environments.targets.
+
+    Elasticsearch / OpenSearch MCP -- direct read-only search.
 
     Reaches a single Elasticsearch (or OpenSearch) endpoint directly over
     HTTPS with an API key or basic auth. No K8s / port-forward coupling.
@@ -734,12 +745,13 @@ class AuthConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Auth mode. `open` = no enforcement (same as `auth is None`); `oidc` =
-    # verify incoming Bearer JWTs against `issuer`/`audience` (today's
-    # behavior, requires both); `login` = first-party login (password + SSO,
-    # built in the auth feature track). Default `oidc` preserves prior
-    # behavior whenever an `auth` block is present.
-    mode: Literal["open", "oidc", "login"] = "oidc"
+    # Auth mode. Authentication is ALWAYS enforced -- there is no anonymous /
+    # "open" mode. `login` (default) = first-party login: a built-in admin
+    # account plus optional SSO providers, with signed cookie sessions. `oidc`
+    # = verify incoming Bearer JWTs against an external IdP's `issuer`/
+    # `audience` (requires both). Non-allowlisted requests without a valid
+    # identity are rejected (401) in either mode.
+    mode: Literal["oidc", "login"] = "login"
     issuer: str | None = Field(
         default=None,
         description="OIDC discovery base URL; no trailing slash. Required when mode='oidc'.",
@@ -794,7 +806,10 @@ class Settings(BaseModel):
     # deployment context. Every value that varies between deployments
     # belongs under ``deployment`` per Constitution Principle VI.
     # ------------------------------------------------------------------
-    auth: AuthConfig | None = None
+    # Auth is ALWAYS present -- the product never serves anonymous traffic.
+    # When no `auth` block is supplied (e.g. the compose demo), it defaults
+    # to first-party `login` mode (built-in admin + optional SSO).
+    auth: AuthConfig = Field(default_factory=lambda: AuthConfig(mode="login"))
     mcp: dict[str, MCPConfigBlock] = Field(default_factory=_default_mcp_map)
     deployment: DeploymentContext = Field(default_factory=DeploymentContext)
 
@@ -875,6 +890,15 @@ class Settings(BaseModel):
     api: APIConfig = Field(default_factory=APIConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     brand: BrandConfig = Field(default_factory=BrandConfig)
+    # --- Three overlapping config layers (F10(c) clarity) -------------------
+    # These blocks look similar but serve DIFFERENT roles -- do not conflate:
+    #   * slack / rootly (above) = INGESTION sources for the RAG corpus
+    #     (crawl content, chunk + embed it into the vector store).
+    #   * k8s / elasticsearch (below) = DEPRECATED legacy live-tool connection
+    #     config, now synthesized into environments.targets (see
+    #     opsrag/environments.py). Prefer environments.targets for new configs.
+    #   * mcp.<name> (the `mcp` map above) = the per-connector enable/secret
+    #     toggle for each in-process MCP integration.
     k8s: K8sConfig = Field(default_factory=K8sConfig)
     elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
     # Unified multi-environment registry (Approach A). When `targets` is

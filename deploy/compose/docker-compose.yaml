@@ -32,10 +32,23 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
-      - .env
+      # Carries your secrets (ANTHROPIC_API_KEY, MCP creds, etc.). Optional so a
+      # fresh `git clone` + `docker compose up` boots WITHOUT a .env -- copy
+      # deploy/compose/.env from .env.example to supply real keys. Values set
+      # here win over the `${VAR:-default}` fallbacks in `environment:` below.
+      - path: .env
+        required: false
     environment:
       OPSRAG_ROLE: api
       OPSRAG_CONFIG: /app/config.yaml
+      # LOGIN mode (config.yaml runs auth.mode=login): the api seeds the built-in
+      # admin and signs session cookies from these. The `${VAR:-default}` form
+      # lets a real deploy/compose/.env override the dev defaults; with no .env a
+      # fresh clone still boots in working login mode (sign in with the defaults).
+      # CHANGE these for any real/exposed deployment.
+      OPSRAG_SESSION_SIGNING_KEY: ${OPSRAG_SESSION_SIGNING_KEY:-local-dev-session-signing-key-change-me-min-32-bytes}
+      OPSRAG_ADMIN_EMAIL: ${OPSRAG_ADMIN_EMAIL:-admin@opsrag.local}
+      OPSRAG_ADMIN_PASSWORD: ${OPSRAG_ADMIN_PASSWORD:-change-me-admin}
       # Connection strings point at the sibling compose services. These
       # `environment:` values take precedence over any same-named keys in .env.
       QDRANT_URL: http://qdrant:6333
@@ -84,7 +97,9 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
-      - .env
+      # Optional so the stack boots without a .env (copy from .env.example).
+      - path: .env
+        required: false
     environment:
       OPSRAG_ROLE: job-indexer
       OPSRAG_CONFIG: /app/config.yaml
@@ -118,7 +133,9 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
-      - .env
+      # Optional so the stack boots without a .env (copy from .env.example).
+      - path: .env
+        required: false
     environment:
       OPSRAG_ROLE: telegrambot
       OPSRAG_CONFIG: /app/config.yaml
@@ -126,6 +143,12 @@ services:
       POSTGRES_DSN: postgresql://opsrag:opsrag@postgres:5432/opsrag
       PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-opsrag-password}
+      # LOGIN-mode auth env (config.yaml runs auth.mode=login). The bot calls the
+      # agent in-process; pass the same seed/signing env as the api. Real .env
+      # values win; dev defaults keep a no-.env clone working. CHANGE for real use.
+      OPSRAG_SESSION_SIGNING_KEY: ${OPSRAG_SESSION_SIGNING_KEY:-local-dev-session-signing-key-change-me-min-32-bytes}
+      OPSRAG_ADMIN_EMAIL: ${OPSRAG_ADMIN_EMAIL:-admin@opsrag.local}
+      OPSRAG_ADMIN_PASSWORD: ${OPSRAG_ADMIN_PASSWORD:-change-me-admin}
     volumes:
       - ./config.yaml:/app/config.yaml:ro
     depends_on:
@@ -142,7 +165,9 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/dtduc-git/opsrag:latest
     env_file:
-      - .env
+      # Optional so the stack boots without a .env (copy from .env.example).
+      - path: .env
+        required: false
     environment:
       OPSRAG_ROLE: discordbot
       OPSRAG_CONFIG: /app/config.yaml
@@ -150,6 +175,12 @@ services:
       POSTGRES_DSN: postgresql://opsrag:opsrag@postgres:5432/opsrag
       PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-opsrag-password}
+      # LOGIN-mode auth env (config.yaml runs auth.mode=login). The bot calls the
+      # agent in-process; pass the same seed/signing env as the api. Real .env
+      # values win; dev defaults keep a no-.env clone working. CHANGE for real use.
+      OPSRAG_SESSION_SIGNING_KEY: ${OPSRAG_SESSION_SIGNING_KEY:-local-dev-session-signing-key-change-me-min-32-bytes}
+      OPSRAG_ADMIN_EMAIL: ${OPSRAG_ADMIN_EMAIL:-admin@opsrag.local}
+      OPSRAG_ADMIN_PASSWORD: ${OPSRAG_ADMIN_PASSWORD:-change-me-admin}
     volumes:
       - ./config.yaml:/app/config.yaml:ro
     depends_on:

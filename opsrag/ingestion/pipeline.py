@@ -31,6 +31,7 @@ import gc
 import hashlib
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -197,6 +198,12 @@ class IngestionPipeline:
         # extractor so rich Service/Config/Repository edges are captured even
         # with the graph disabled. Built on first use; reused across files.
         self._light_rule = None
+        # F8b: memoized per-run fingerprint of the active index configuration
+        # (chunker sizing + chars/token ratios + embedder model/dimension),
+        # folded into each file's dedup content_hash so a chunking/model change
+        # auto-invalidates dedup. Built once on first use; the config is fixed
+        # for the lifetime of a pipeline instance.
+        self._index_fingerprint_cache: str | None = None
 
     @property
     def _graph_enabled(self) -> bool:
@@ -417,7 +424,48 @@ class IngestionPipeline:
                         repo, path, exc,
                     )
 
+    @asynccontextmanager
+    async def _repo_lock(self, repo: str, branch: str):
+        """Wrap the tracker's per-(repo, branch) advisory lock, tolerating
+        trackers that predate it. Yields True when the run may proceed and
+        False when a concurrent run already holds the lock (caller skips).
+
+        Trackers without a ``repo_lock`` attribute (the no-op tracker until its
+        follow-up lands, plus test doubles) are treated as "always acquired" so
+        single-process / no-Postgres setups behave exactly as before.
+        """
+        lock_factory = getattr(self.indexed_files, "repo_lock", None)
+        if lock_factory is None:
+            yield True
+            return
+        async with lock_factory(repo, branch) as got:
+            yield got
+
     async def index_repo(
+        self,
+        repo: str,
+        branch: str = "main",
+        patterns: list[str] | None = None,
+    ) -> int:
+        # Non-blocking per-(repo, branch) advisory lock: if another index_repo
+        # run for the same repo/branch is already in flight, SKIP this
+        # overlapping run rather than racing it. Without this, an earlier run's
+        # end-of-pass deletion sweep can DELETE chunks a later (overlapping)
+        # run hasn't re-touched yet -- a destructive interleave on concurrent
+        # webhook + cron reindexes. The lock is a non-blocking try-lock on a
+        # dedicated pooled connection (see PostgresIndexedFilesTracker), so a
+        # skipped run returns immediately instead of parking a connection.
+        async with self._repo_lock(repo, branch) as _lock_acquired:
+            if not _lock_acquired:
+                _log.warning(
+                    "index_repo already running for %s@%s -- skipping "
+                    "overlapping run",
+                    repo, branch,
+                )
+                return 0
+            return await self._index_repo_locked(repo, branch, patterns)
+
+    async def _index_repo_locked(
         self,
         repo: str,
         branch: str = "main",
@@ -729,6 +777,84 @@ class IngestionPipeline:
             return st
         return "git"
 
+    def _index_fingerprint(self) -> str:
+        """Deterministic fingerprint of the active index configuration (F8b).
+
+        Folded into every file's dedup ``content_hash`` so a chunking or
+        embed-model change auto-invalidates the cache: the recomputed hash no
+        longer matches the recorded one, so the file is re-indexed instead of
+        skipped. Inputs:
+
+          * chunker:  class name + whatever sizing knobs it exposes
+            (``chunk_size``/``overlap`` for fixed-size; ``child_size``/
+            ``child_overlap``/``parent_max_tokens``/``code_parent_max_tokens``
+            for parent-child) -- any attr that isn't present is simply omitted.
+          * chars/token ratios: ``tokenization.RATIOS_VERSION`` (the ratios
+            drive chunk boundaries, so a ratio-table bump must invalidate too).
+          * embedder: ``model_name`` + ``dimension`` -- a model swap changes the
+            stored vectors even when boundaries are identical.
+
+        Memoized: the config is fixed for a pipeline instance's lifetime.
+        Defensive: a missing attribute degrades to a stable "?" rather than
+        raising, so an exotic chunker/embedder never breaks indexing.
+        """
+        if self._index_fingerprint_cache is not None:
+            return self._index_fingerprint_cache
+
+        def _attr(obj: Any, name: str) -> str:
+            try:
+                val = getattr(obj, name)
+            except Exception:
+                return ""
+            return "" if val is None else f"{name}={val}"
+
+        chunker = self.chunker
+        chunker_name = type(chunker).__name__ if chunker is not None else "none"
+        # Cover both the fixed-size and parent-child chunkers; absent attrs
+        # contribute nothing (empty string) so the fingerprint stays stable.
+        chunker_parts = [
+            _attr(chunker, n)
+            for n in (
+                "chunk_size",
+                "overlap",
+                "child_size",
+                "child_overlap",
+                "parent_max_tokens",
+                "code_parent_max_tokens",
+            )
+        ]
+        try:
+            ratios_version = tokenization.RATIOS_VERSION
+        except Exception:
+            ratios_version = "?"
+
+        embedder = self.embedder
+        embed_model = "?"
+        embed_dim = "?"
+        if embedder is not None:
+            try:
+                embed_model = str(embedder.model_name)
+            except Exception:
+                embed_model = "?"
+            try:
+                embed_dim = str(embedder.dimension)
+            except Exception:
+                embed_dim = "?"
+
+        raw = "|".join(
+            [
+                f"chunker={chunker_name}",
+                *[p for p in chunker_parts if p],
+                f"ratios_version={ratios_version}",
+                f"embed_model={embed_model}",
+                f"embed_dim={embed_dim}",
+            ]
+        )
+        self._index_fingerprint_cache = hashlib.sha256(
+            raw.encode("utf-8")
+        ).hexdigest()
+        return self._index_fingerprint_cache
+
     async def _process_file(self, file: RepoFile) -> int:
         parser = next(
             (p for p in self.parsers if p.supports(file.path, file.content)),
@@ -743,7 +869,21 @@ class IngestionPipeline:
         # chain -- the existing Qdrant points are still valid. We still
         # bump last_seen_at so a future deletion sweep knows the file is
         # still present in source.
-        content_hash = hashlib.sha256(file.content.encode("utf-8")).hexdigest()
+        #
+        # F8b: fold the active index configuration (chunker sizing + chars/
+        # token ratios + embedder model/dimension) into the hash. The stored
+        # chunks are only "still valid" if they'd be produced IDENTICALLY by
+        # the current config -- a chunk-size change or an embed-model swap
+        # changes boundaries / vectors, so the cached points are stale even
+        # though the file bytes are unchanged. Mixing the fingerprint in means
+        # such a config change auto-invalidates dedup (the hash no longer
+        # matches the recorded one) and forces a re-index, with no schema
+        # change to should_skip (it still just compares content_hash).
+        content_hash = hashlib.sha256(
+            file.content.encode("utf-8")
+            + b"\x00"
+            + self._index_fingerprint().encode("utf-8")
+        ).hexdigest()
         try:
             if await self.indexed_files.should_skip(
                 file.repo, file.branch, file.path, content_hash

@@ -192,6 +192,26 @@ class _FakeReranker:
         ][:n]
 
 
+class _SpyReranker:
+    """Records the candidate pool it was handed so tests can assert the
+    node deduped BEFORE calling rerank. Returns descending scores in input
+    order (like _FakeReranker) so post-rerank ordering stays deterministic."""
+
+    score_floor = 0.05
+    trust_score = 0.65
+
+    def __init__(self):
+        self.seen_pools: list[list[str]] = []
+
+    async def rerank(self, query, results, top_k=5):
+        self.seen_pools.append([r.chunk.id for r in results])
+        n = len(results)
+        return [
+            RerankResult(chunk=r.chunk, relevance_score=0.9 - i * 0.01)
+            for i, r in enumerate(results[:top_k] if top_k else results)
+        ][:n]
+
+
 class _NullObservability:
     async def log_retrieval(self, *a, **k):
         return None
@@ -232,3 +252,234 @@ async def test_node_diversity_on_promotes_distinct_doc():
     assert kept_ids[0] == "cfg-a"  # most relevant still first
     assert "runbook" in kept_ids   # diversity rescued the distinct doc
     assert len(kept_ids) == 3
+
+
+# --- pre-rerank content dedup ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_content_dedup_collapses_identical_content_before_rerank():
+    """Two chunks with byte-identical content but different ids/paths must
+    collapse to ONE before the reranker is called -- so the cross-encoder
+    isn't billed for the duplicate and it can't crowd out distinct docs.
+    First occurrence is kept (preserves RRF/merge order)."""
+    same = "replicas 3 image nginx port 8080 env prod"
+    chunks = [
+        _chunk("copy-a", same),   # first occurrence -> kept
+        _chunk("copy-b", same),   # exact dup -> dropped
+        _chunk("distinct", "oncall escalation pagerduty severity rollback"),
+    ]
+    spy = _SpyReranker()
+    # diversity off so the post-rerank order is a pure passthrough.
+    node = rerank_node(spy, _NullObservability(), top_k=5)
+    out = await node({"query": "nginx config", "retrieved_chunks": chunks})
+
+    # The reranker saw the REDUCED pool (copy-b dropped), keeping copy-a.
+    assert spy.seen_pools == [["copy-a", "distinct"]]
+    kept_ids = [c.id for c in out["merged_results"]]
+    assert kept_ids == ["copy-a", "distinct"]
+
+
+@pytest.mark.asyncio
+async def test_content_dedup_disabled_keeps_full_pool():
+    """With rerank_content_dedup False in state, identical-content chunks
+    are NOT collapsed -- the full pool reaches the reranker."""
+    same = "replicas 3 image nginx port 8080 env prod"
+    chunks = [_chunk("copy-a", same), _chunk("copy-b", same)]
+    spy = _SpyReranker()
+    node = rerank_node(spy, _NullObservability(), top_k=5)
+    await node(
+        {
+            "query": "nginx config",
+            "retrieved_chunks": chunks,
+            "rerank_content_dedup": False,
+        }
+    )
+    assert spy.seen_pools == [["copy-a", "copy-b"]]
+
+
+@pytest.mark.asyncio
+async def test_content_dedup_threshold_drops_near_duplicates():
+    """With a >0 threshold, a near-duplicate (high Jaccard) chunk is also
+    dropped before rerank, while a genuinely distinct chunk survives."""
+    chunks = [
+        _chunk("cfg-a", "replicas 3 image nginx port 8080 env prod alpha beta"),
+        # ~near-dup of cfg-a (one token differs) -> high Jaccard -> dropped.
+        _chunk("cfg-b", "replicas 3 image nginx port 8080 env prod alpha gamma"),
+        _chunk("runbook", "oncall escalation pagerduty severity rollback steps"),
+    ]
+    spy = _SpyReranker()
+    node = rerank_node(spy, _NullObservability(), top_k=5)
+    await node(
+        {
+            "query": "nginx config",
+            "retrieved_chunks": chunks,
+            "rerank_content_dedup_threshold": 0.5,
+        }
+    )
+    assert spy.seen_pools == [["cfg-a", "runbook"]]
+
+
+@pytest.mark.asyncio
+async def test_content_dedup_default_on_with_mmr_passthrough_order():
+    """Dedup is ON by default; with distinct content (no dups) and MMR off,
+    the kept order is the verbatim cross-encoder order -- dedup must be a
+    no-op when there's nothing to collapse."""
+    chunks = [
+        _chunk("cfg-a", "replicas 3 image nginx port 8080 env prod"),
+        _chunk("cfg-b", "replicas 2 image redis port 6379 env staging"),
+        _chunk("runbook", "oncall escalation pagerduty severity rollback"),
+    ]
+    spy = _SpyReranker()
+    node = rerank_node(spy, _NullObservability(), top_k=3)
+    out = await node({"query": "nginx config", "retrieved_chunks": chunks})
+    # Nothing collapsed -> full pool reached the reranker, order preserved.
+    assert spy.seen_pools == [["cfg-a", "cfg-b", "runbook"]]
+    kept_ids = [c.id for c in out["merged_results"]]
+    assert kept_ids == ["cfg-a", "cfg-b", "runbook"]
+
+
+# --- content-dedup config flows via the node CLOSURE arg (no state inject) ---
+
+
+@pytest.mark.asyncio
+async def test_content_dedup_threshold_via_closure_arg():
+    """The threshold supplied to the NODE (mirroring cfg.agent forwarding from
+    the builder) must take effect even with NO state key -- there was no
+    closure fallback before, so the cfg value was dead."""
+    chunks = [
+        _chunk("cfg-a", "replicas 3 image nginx port 8080 env prod alpha beta"),
+        _chunk("cfg-b", "replicas 3 image nginx port 8080 env prod alpha gamma"),
+        _chunk("runbook", "oncall escalation pagerduty severity rollback steps"),
+    ]
+    spy = _SpyReranker()
+    # threshold comes from the closure arg, not state.
+    node = rerank_node(spy, _NullObservability(), top_k=5, content_dedup_threshold=0.5)
+    await node({"query": "nginx config", "retrieved_chunks": chunks})
+    assert spy.seen_pools == [["cfg-a", "runbook"]]
+
+
+@pytest.mark.asyncio
+async def test_content_dedup_disabled_via_closure_arg():
+    """content_dedup=False on the node (forwarded from cfg) must disable the
+    pre-rerank collapse with no state key present."""
+    same = "replicas 3 image nginx port 8080 env prod"
+    chunks = [_chunk("copy-a", same), _chunk("copy-b", same)]
+    spy = _SpyReranker()
+    node = rerank_node(spy, _NullObservability(), top_k=5, content_dedup=False)
+    await node({"query": "nginx config", "retrieved_chunks": chunks})
+    assert spy.seen_pools == [["copy-a", "copy-b"]]
+
+
+@pytest.mark.asyncio
+async def test_state_overrides_closure_threshold():
+    """An explicit state value still wins over the closure arg (state.get with
+    the closure as the fallback default) -- so per-request/eval overrides work."""
+    chunks = [
+        _chunk("cfg-a", "replicas 3 image nginx port 8080 env prod alpha beta"),
+        _chunk("cfg-b", "replicas 3 image nginx port 8080 env prod alpha gamma"),
+    ]
+    spy = _SpyReranker()
+    # Closure default would dedup (0.5); state forces it OFF (0.0).
+    node = rerank_node(spy, _NullObservability(), top_k=5, content_dedup_threshold=0.5)
+    await node(
+        {
+            "query": "nginx config",
+            "retrieved_chunks": chunks,
+            "rerank_content_dedup_threshold": 0.0,
+        }
+    )
+    assert spy.seen_pools == [["cfg-a", "cfg-b"]]
+
+
+# --- Fix #6: synthesis intent skips the near-dup (Jaccard) pass --------------
+
+
+@pytest.mark.asyncio
+async def test_synthesis_intent_keeps_near_duplicate_docs():
+    """A synthesis query ("compare A vs B") deliberately widens top_k to keep
+    BOTH anchor docs. The near-dup (Jaccard) pass would drop one of two
+    distinct-but-similar docs the path wants -- so it must be skipped when
+    synthesis_intent is set. Exact-dup collapse may still run, but two
+    DISTINCT near-dups must both survive."""
+    chunks = [
+        _chunk("doc-a", "replicas 3 image nginx port 8080 env prod alpha beta"),
+        # Near-dup of doc-a (one token differs) -- distinct doc, high Jaccard.
+        _chunk("doc-b", "replicas 3 image nginx port 8080 env prod alpha gamma"),
+    ]
+    spy = _SpyReranker()
+    node = rerank_node(spy, _NullObservability(), top_k=5)
+    await node(
+        {
+            "query": "compare doc-a vs doc-b",
+            "retrieved_chunks": chunks,
+            "synthesis_intent": True,
+            # A high threshold that WOULD drop doc-b on a non-synthesis path.
+            "rerank_content_dedup_threshold": 0.5,
+        }
+    )
+    # Both near-dups reached the reranker -- the Jaccard pass was skipped.
+    assert spy.seen_pools == [["doc-a", "doc-b"]]
+
+
+@pytest.mark.asyncio
+async def test_synthesis_intent_still_collapses_exact_duplicates():
+    """Synthesis skips only the near-dup Jaccard pass -- byte-identical copies
+    are still collapsed (an exact copy is never the doc synthesis needs)."""
+    same = "replicas 3 image nginx port 8080 env prod"
+    chunks = [
+        _chunk("copy-a", same),
+        _chunk("copy-b", same),   # exact dup -> still dropped
+        _chunk("distinct", "oncall escalation pagerduty severity rollback"),
+    ]
+    spy = _SpyReranker()
+    node = rerank_node(spy, _NullObservability(), top_k=5)
+    await node(
+        {
+            "query": "compare configs",
+            "retrieved_chunks": chunks,
+            "synthesis_intent": True,
+            "rerank_content_dedup_threshold": 0.5,
+        }
+    )
+    assert spy.seen_pools == [["copy-a", "distinct"]]
+
+
+# --- Fix #5: exact-dedup keys on the content STRING, not hash(content) -------
+
+
+class _CollidingStr(str):
+    """A str whose hash collides with any other instance but compares by
+    value. Models the hash-collision the old `hash(content)` keying silently
+    mishandled -- two DISTINCT contents with the same hash."""
+
+    def __hash__(self):
+        return 0
+
+
+def _chunk_obj_content(cid: str, content) -> Chunk:  # noqa: ANN001
+    return Chunk(
+        id=cid,
+        content=content,
+        doc_type=DocType.GENERIC_MARKDOWN,
+        source_path=f"repo/{cid}.yaml",
+        repo="acme/configs",
+    )
+
+
+@pytest.mark.asyncio
+async def test_exact_dedup_survives_hash_collision():
+    """Two chunks with DISTINCT content that happen to share a hash must BOTH
+    be kept. Keying on `hash(content)` (old behavior) would have dropped the
+    second; keying on the string itself (set membership uses __eq__ after the
+    hash) keeps both."""
+    chunks = [
+        _chunk_obj_content("a", _CollidingStr("alpha distinct content one")),
+        _chunk_obj_content("b", _CollidingStr("beta distinct content two")),
+    ]
+    spy = _SpyReranker()
+    # Exact-dedup path only (threshold 0 -> no Jaccard).
+    node = rerank_node(spy, _NullObservability(), top_k=5)
+    await node({"query": "q", "retrieved_chunks": chunks})
+    # Both distinct chunks survived despite the hash collision.
+    assert spy.seen_pools == [["a", "b"]]

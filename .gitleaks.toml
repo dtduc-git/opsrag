@@ -15,4 +15,7 @@ regexes = [
   '''opsrag_xxx''',
   # Generic bearer-token placeholders used in docs/examples.
   '''Bearer\s+(opsrag_xxx|<[^>]+>|YOUR[_-]?TOKEN|xxx+)''',
+  # Fabricated AWS key embedded ONLY in the connector redaction tests (they
+  # assert the MCP scrubs leaked keys from error messages) -- not a credential.
+  '''AKIAABCDEFGHIJKLMNOP''',
 ]

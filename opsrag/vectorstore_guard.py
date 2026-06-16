@@ -131,11 +131,33 @@ async def assert_dimension_compatible(
     )
     if not allow_change:
         raise DimensionMismatchError(msg)
+    # allow_change=True is a TRUTHFUL opt-in to a reindex: actually DROP the
+    # mismatched collection so the caller's create path rebuilds it at the
+    # correct dimension. Previously this only warned and continued, leaving
+    # the wrong-dim collection in place -- every subsequent upsert then failed
+    # with a cryptic Qdrant size error, so "allow_dimension_change" silently
+    # did nothing. Drop it loudly here. Strictly behind allow_change=True.
     _log.warning(
-        "dimension guard: %s -- allow_dimension_change=true, continuing "
-        "(operator opted into a reindex).",
-        msg,
+        "dimension guard: %s -- allow_dimension_change=true: DROPPING "
+        "collection %r so it is recreated at dim=%d (operator opted into a "
+        "reindex; existing vectors in this collection are discarded).",
+        msg, collection, expected_dim,
     )
+    try:
+        await client.delete_collection(collection)
+        _log.warning(
+            "dimension guard: dropped collection %r (was dim=%d, expected "
+            "dim=%d) -- it will be recreated empty on next ensure.",
+            collection, actual, expected_dim,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # If the drop fails we must NOT silently continue -- the create path
+        # would see the collection still present and skip creation, leaving
+        # the mismatch in place. Surface it as the same fail-closed error.
+        raise DimensionMismatchError(
+            f"{msg} (allow_dimension_change=true, but DROP of collection "
+            f"{collection!r} failed: {exc})"
+        ) from exc
 
 
 async def _collection_exists(client: Any, collection: str) -> bool | None:

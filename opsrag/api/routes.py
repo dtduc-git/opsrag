@@ -552,6 +552,7 @@ async def integrations(request: Request) -> dict:
         items.append({
             "name": integ.name,
             "display_name": integ.display_name,
+            "category": integ.category,
             "enabled": name in enabled_names,
             "tool_count": len(integ.tool_names),
             "tool_names": list(integ.tool_names),
@@ -1120,7 +1121,15 @@ async def index_repo(
     store = getattr(request.app.state, "index_store", None)
     if store is not None:
         try:
-            await store.flush(indexing_tracker.get_summary(), indexing_tracker.get_jobs())
+            # Guard the flush when a Job launcher is active: backfill restored
+            # every Qdrant repo as 'done' in the in-memory tracker, so an
+            # unguarded flush would stomp a live ephemeral Job's 'indexing' row
+            # back to 'done'. The WHERE guard skips rows a live Job owns.
+            guarded = getattr(request.app.state, "job_launcher", None) is not None
+            await store.flush(
+                indexing_tracker.get_summary(), indexing_tracker.get_jobs(),
+                guarded=guarded,
+            )
         except Exception:
             pass
 
@@ -1181,7 +1190,14 @@ async def index_source(req: IndexSourceRequest, request: Request) -> IndexSource
     store = getattr(request.app.state, "index_store", None)
     if store is not None:
         try:
-            await store.flush(indexing_tracker.get_summary(), indexing_tracker.get_jobs())
+            # Guard the flush when a Job launcher is active (see /index/repo):
+            # an unguarded flush would revert a live Job's 'indexing' row to the
+            # tracker's backfill-restored 'done'. The WHERE guard skips it.
+            guarded = getattr(request.app.state, "job_launcher", None) is not None
+            await store.flush(
+                indexing_tracker.get_summary(), indexing_tracker.get_jobs(),
+                guarded=guarded,
+            )
         except Exception:
             pass
 

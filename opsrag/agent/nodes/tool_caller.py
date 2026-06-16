@@ -526,7 +526,14 @@ def tool_synthesize_node(llm, observability: ObservabilityProvider, model_router
                 sources_searched.append(tool_tag)
         out: dict = {
             "generation": resp.content,
-            "generation_grounded": True,
+            # No groundedness check runs on the tool_synthesize path, so do NOT
+            # claim the answer is grounded. Leaving this False (with no
+            # `grounding_checked` flag) reflects "unverified", not "failed" --
+            # the QA-cache write gate keys on (grounded is False AND
+            # grounding_checked is True), so an unverified tool answer is not
+            # mislabelled as a grounding failure, and the prior hardcoded
+            # `True` no longer lets ungrounded tool answers pass the gate.
+            "generation_grounded": False,
             "final_chunks": retrieved_chunks,
             "sources_searched": sources_searched,
             "current_step": "tool_synthesize",

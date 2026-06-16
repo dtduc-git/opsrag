@@ -713,11 +713,10 @@ export interface MeResponse {
   scopes: Scope[];
 }
 
-// In OPEN mode the anonymous identity still has every scope so the demo
-// runs unrestricted (nav gate is transparent). The backend is the source of
-// truth; this is only the network-failure fallback.
-const ALL_SCOPES: Scope[] = ["chat", "investigate", "mcp", "admin"];
-
+// Anonymous = NOT signed in. Auth is ALWAYS required (login or oidc) -- there
+// is no open/anonymous mode -- so an anonymous identity has NO scopes and
+// AuthGate walls it off behind the login page. This object is only the
+// not-yet-authenticated / network-failure shape.
 const ANONYMOUS_ME: MeResponse = {
   oid: null,
   email: null,
@@ -728,7 +727,7 @@ const ANONYMOUS_ME: MeResponse = {
   tracking_enabled: false,
   is_admin: false,
   roles: [],
-  scopes: ALL_SCOPES,
+  scopes: [],
 };
 
 // Coerce an arbitrary list into the known Scope vocabulary.
@@ -1321,6 +1320,7 @@ export interface Integration {
   name: string;
   display_name: string;
   enabled: boolean;
+  category: string;
   tool_count: number;
   tool_names: string[];
   has_health_probe: boolean;

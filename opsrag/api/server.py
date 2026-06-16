@@ -204,9 +204,9 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 await check_apoc()
 
         # mode='login': build first-party login runtime state. Lazy imports
-        # keep the `login` extra out of open/oidc deployments. Best-effort:
+        # keep the `login` extra out of oidc deployments. Best-effort:
         # a setup failure logs + disables login rather than crashing boot.
-        if cfg.auth is not None and cfg.auth.mode == "login":
+        if cfg.auth.mode == "login":
             try:
                 import os as _os
 
@@ -813,11 +813,14 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 model_router=model_router,
                 code_embedder=providers.code_embedder,
                 code_store=providers.code_vector_store,
                 light_graph=providers.light_graph,
+                verify_grounding=cfg.agent.verify_grounding_default,
             )
         elif cfg.agent.mode == "tool_calling":
             agent_graph = build_tool_calling_graph(
@@ -830,6 +833,8 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 model_router=model_router,
                 code_embedder=providers.code_embedder,
@@ -847,6 +852,8 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 code_embedder=providers.code_embedder,
                 code_store=providers.code_vector_store,
@@ -866,6 +873,8 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 top_k=cfg.agent.top_k,
                 rerank_top_k=cfg.agent.rerank_top_k,
                 rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
                 known_repos=known_repos,
                 light_graph=providers.light_graph,
                 # Pro/answer model (Sonnet 4.6) for the final generation; cheap
@@ -1199,20 +1208,13 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         # `_is_indexer` (== role in {"", "indexer"}) wrongly excluded the
         # common compose/dev case -- gate on "not backend" instead.
         _is_index_writer = _role != "backend"
-        app.state._index_flush_task = None
-        app.state._index_flush_stop = None
-        if _is_index_writer and app.state.index_store is not None:
-            from opsrag.indexing.pg_store import flush_loop
-            stop_event = asyncio.Event()
-            app.state._index_flush_stop = stop_event
-            app.state._index_flush_task = asyncio.create_task(
-                flush_loop(app.state.index_store, indexing_tracker, stop_event=stop_event)
-            )
-            _log.info("indexing job-state flush loop started (writer role)")
 
         # Indexing trigger: in production POST /index/repo creates an ephemeral
         # k8s Job (the API stays pure-serving). In dev / no-cluster the launcher
         # is None and the routes run indexing in-process (legacy behaviour).
+        # Initialised BEFORE the flush loop so we know whether a separate Job
+        # writer can exist -- that decides whether the serving pod's flush must
+        # be guarded (see below).
         try:
             from opsrag.job.launcher import JobLauncher
             app.state.job_launcher = JobLauncher.from_env()
@@ -1223,6 +1225,28 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             _log.warning("job launcher init failed (%s); using in-process indexing", exc)
             app.state.job_launcher = None
+
+        app.state._index_flush_task = None
+        app.state._index_flush_stop = None
+        if _is_index_writer and app.state.index_store is not None:
+            from opsrag.indexing.pg_store import flush_loop
+            # When a Job launcher is active, indexing runs in a separate
+            # ephemeral Job that owns the live `listing`/`indexing` PROGRESS
+            # rows. The serving pod must NOT flush those rows back to `done`
+            # with its own stale (restored-from-Qdrant) counts -> guard it.
+            # Dev/in-process (no launcher) runs indexing here, so it stays
+            # unguarded and can advance its own `indexing` -> `done`.
+            _flush_guarded = app.state.job_launcher is not None
+            stop_event = asyncio.Event()
+            app.state._index_flush_stop = stop_event
+            app.state._index_flush_task = asyncio.create_task(
+                flush_loop(app.state.index_store, indexing_tracker,
+                           stop_event=stop_event, guarded=_flush_guarded)
+            )
+            _log.info(
+                "indexing job-state flush loop started (writer role, guarded=%s)",
+                _flush_guarded,
+            )
 
         if _is_indexer and cfg.scm.auto_index and repo_pairs:
             pipeline = app.state.ingestion_pipeline
@@ -1500,30 +1524,26 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
     # Stable error envelope on every non-2xx response (contracts/http-api.md).
     register_error_handlers(app)
 
-    # Auth (FR-016): OIDC Bearer enforcement. Build one verifier from the
-    # `auth` block and attach it to app.state; the global middleware rejects
-    # unauthenticated requests on every route except the health/metadata
-    # allowlist. Construction is cheap -- JWKS discovery is lazy on first
-    # verify -- so this is safe at create_app time. When no `auth` block is
-    # configured, the verifier is absent and the middleware runs in open
-    # (local-dev) mode. The legacy X-API-Key gate is removed.
-    _auth_mode = cfg.auth.mode if cfg.auth is not None else "open"
-    if cfg.auth is not None and _auth_mode == "oidc":
+    # Auth (FR-016): authentication is ALWAYS enforced -- there is no
+    # anonymous / "open" mode. The global middleware rejects unauthenticated
+    # requests on every route except the public allowlist (health/metadata,
+    # /auth/*, SCM webhooks, MCP wire endpoints). `oidc` builds a Bearer
+    # verifier from the `auth` block (construction is cheap -- JWKS discovery
+    # is lazy on first verify); `login` (default) enforces the first-party
+    # session cookie. The legacy X-API-Key gate is removed.
+    _auth_mode = cfg.auth.mode
+    if _auth_mode == "oidc":
         app.state.oidc_verifier = build_verifier_from_settings(cfg.auth)
         _log.info("auth: OIDC enforcement enabled (issuer=%s)", cfg.auth.issuer)
     else:
         app.state.oidc_verifier = None
-        if _auth_mode == "login":
-            _log.info("auth: login mode (password + SSO); first-party sessions")
-        else:
-            _log.info("auth: open mode; all routes open (local-dev)")
+        _log.info("auth: login mode (password + SSO); first-party sessions")
     # RBAC: expose auth mode + role->scope mappings so opsrag.auth.scopes can
-    # resolve each request's roles/scopes. Absent `auth` block -> open mode
-    # (everyone gets all scopes), preserving today's behavior.
+    # resolve each request's roles/scopes.
     app.state.auth_config = cfg.auth
-    app.state.role_mappings = cfg.auth.role_mappings if cfg.auth else {}
+    app.state.role_mappings = cfg.auth.role_mappings
     # mode='login': register the first-party login/SSO router. Imported
-    # lazily so open/oidc deployments don't need the `login` extra (authlib,
+    # lazily so oidc deployments don't need the `login` extra (authlib,
     # pwdlib, ...). The login-mode runtime state (SessionManager, user store,
     # SSO registry, rate limiter) is built in the lifespan (needs async open).
     if _auth_mode == "login":

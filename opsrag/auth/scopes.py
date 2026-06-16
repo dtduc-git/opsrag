@@ -19,13 +19,16 @@ Concepts
 
 Modes
 -----
-* **open** (``auth is None`` or ``auth.mode == "open"``) -- no
-  enforcement. Every user (anonymous) carries ALL scopes; ``require_scope``
-  always allows. Preserves today's zero-config behavior.
-* **oidc / login** -- ``resolve_roles`` + ``scopes_for_roles`` compute
-  the user's real scopes from groups; ``require_scope`` 403s on a missing
-  scope (authenticated-but-unscoped), distinct from the 401 the auth
-  layer raises for unauthenticated requests.
+Authentication is ALWAYS enforced -- there is no anonymous / "open" mode.
+In both modes ``resolve_roles`` + ``scopes_for_roles`` compute the user's
+real scopes from their roles/claims; ``require_scope`` 403s on a missing
+scope (authenticated-but-unscoped), distinct from the 401 the auth layer
+raises for unauthenticated requests.
+* **login** (default) -- identity comes from the signed first-party
+  session cookie (built-in admin + optional SSO); roles are baked into the
+  session at login.
+* **oidc** -- identity comes from a verified Bearer JWT; roles are resolved
+  from the IdP ``groups`` claim via ``auth.role_mappings``.
 """
 from __future__ import annotations
 
@@ -51,7 +54,7 @@ class Scope:
     ADMIN = "admin"
 
 
-# Every defined scope. Open-mode users get this whole set.
+# Every defined scope. The ``admin`` role bundles this whole set.
 ALL_SCOPES: frozenset[str] = frozenset(
     {Scope.CHAT, Scope.INVESTIGATE, Scope.MCP, Scope.ADMIN}
 )
@@ -133,9 +136,10 @@ def scopes_for_roles(roles: Iterable[str]) -> set[str]:
 def has_scope(user: CurrentUser | None, scope: str) -> bool:
     """True iff ``user`` carries ``scope``.
 
-    Anonymous open-mode users carry ALL scopes (see
-    ``CurrentUser.anonymous``), so this returns True for them. A
-    ``None`` user (defensive) has no scopes."""
+    A user's scopes come solely from their resolved roles/claims. Anonymous
+    users (the scopeless ``CurrentUser.anonymous`` returned on public
+    allowlist routes) and a ``None`` user (defensive) carry no scopes, so
+    this returns False for them."""
     if user is None:
         return False
     return scope in (user.scopes or frozenset())
@@ -144,22 +148,6 @@ def has_scope(user: CurrentUser | None, scope: str) -> bool:
 # ---------------------------------------------------------------------------
 # app.state wiring helpers (read by the auth dependency + server.py).
 # ---------------------------------------------------------------------------
-def _is_open_mode(request: Request) -> bool:
-    """True when no enforcement applies: no verifier wired, or the
-    configured ``auth.mode`` is ``open`` (or no auth block at all).
-
-    Distinguishes open from misconfigured: open mode is intentional
-    zero-config, not a missing verifier on an auth-required route."""
-    auth_cfg = getattr(request.app.state, "auth_config", None)
-    if auth_cfg is not None:
-        mode = getattr(auth_cfg, "mode", None)
-        if mode is not None:
-            return mode == "open"
-    # No auth_config on state -> fall back to verifier presence. No
-    # verifier == today's open/local-dev mode.
-    return getattr(request.app.state, "oidc_verifier", None) is None
-
-
 def _role_mappings(request: Request) -> dict[str, list[str]]:
     """Read ``auth.role_mappings`` off app.state (wired by server.py).
 
@@ -178,16 +166,16 @@ def attach_authz(
     user: CurrentUser,
     *,
     role_mappings: dict[str, list[str]] | None,
-    open_mode: bool,
     is_admin: bool = False,
 ) -> CurrentUser:
     """Resolve roles+scopes for ``user`` and return the enriched copy.
 
-    Open mode: short-circuit to ALL scopes (no roles needed; matches
-    ``CurrentUser.anonymous``). Otherwise resolve from groups +
-    ``role_mappings`` + the ``is_admin`` signal."""
-    if open_mode or user.is_anonymous:
-        return user.with_authz(roles=frozenset(), scopes=frozenset(ALL_SCOPES))
+    Scopes come solely from the user's roles, resolved from their IdP
+    ``groups`` claim + ``role_mappings`` + the ``is_admin`` signal. An
+    anonymous user (only reachable on a public allowlist route) carries no
+    roles and therefore no scopes."""
+    if user.is_anonymous:
+        return user.with_authz(roles=frozenset(), scopes=frozenset())
     roles = resolve_roles(user.groups, role_mappings, is_admin=is_admin)
     scopes = scopes_for_roles(roles)
     return user.with_authz(roles=frozenset(roles), scopes=frozenset(scopes))
@@ -218,11 +206,15 @@ def _user_from_session(request: Request) -> CurrentUser | None:
 async def current_user_with_authz(request: Request) -> CurrentUser:
     """The converged auth dependency, RBAC-aware.
 
-    - login mode: identity comes from the signed session COOKIE; an
-      unauthenticated request is anonymous with NO scopes (the global
-      middleware 401s it before it reaches a protected handler).
-    - open/oidc mode: delegate to the OIDC ``get_current_user_dep`` and
-      enrich with roles/scopes (open mode -> all scopes)."""
+    Authentication is ALWAYS enforced -- there is no anonymous / "open"
+    mode. A request that reaches a protected handler has already been
+    authenticated by the global middleware; reaching here without a valid
+    identity means the route is on the public allowlist, for which we
+    return a scopeless anonymous user (passes no ``require_scope`` guard).
+
+    - login mode: identity comes from the signed session COOKIE.
+    - oidc mode: delegate to the OIDC ``get_current_user_dep`` and enrich
+      with roles/scopes resolved from groups + ``role_mappings``."""
     auth_cfg = getattr(request.app.state, "auth_config", None)
     mode = getattr(auth_cfg, "mode", None) if auth_cfg is not None else None
     if mode == "login":
@@ -235,11 +227,9 @@ async def current_user_with_authz(request: Request) -> CurrentUser:
         )
 
     user = await get_current_user_dep(request)
-    open_mode = _is_open_mode(request)
     user = attach_authz(
         user,
         role_mappings=_role_mappings(request),
-        open_mode=open_mode,
     )
     # Surface for downstream usage attribution without re-parsing.
     if not user.is_anonymous:
@@ -273,9 +263,10 @@ def require_scope(scope: str) -> Callable[..., Any]:
     """FastAPI dependency factory enforcing ``scope`` on a route.
 
     Returns a dependency that resolves the current user (with authz) and
-    403s via the repo error envelope when the user lacks ``scope``. In
-    open mode the user carries ALL scopes, so this always allows --
-    preserving today's open behavior.
+    403s via the repo error envelope when the user lacks ``scope``. The
+    global middleware has already 401'd unauthenticated requests, so this
+    distinguishes authenticated-but-unscoped (403) from unauthenticated
+    (401).
 
     Usage::
 

@@ -183,6 +183,10 @@ jobs:
     name: eval-offline (retrieval, no secrets)
     runs-on: ubuntu-24.04
     needs: [lint, typecheck]
+    # contents:write so the metrics-driven Shields endpoint badge
+    # (docs/eval-badge.json) can be committed back on pushes to master.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -194,6 +198,93 @@ jobs:
       - run: uv sync --extra dev --extra eval --extra fastembed
       - name: pytest offline retrieval eval over samples/
         run: uv run pytest tests/integration/test_eval_samples_retrieval.py -v
+      # Recompute the aggregate metrics (the pytest gate above already proved
+      # they pass) so we can (a) surface them in the run summary and (b) emit a
+      # live Shields ENDPOINT badge. Same offline recipe, no secrets.
+      - name: Compute metrics + write summary + badge
+        id: metrics
+        run: |
+          uv run python - <<'PY'
+          import asyncio, json, os
+          from pathlib import Path
+          from opsrag.eval.loaders import load_golden
+          from opsrag.eval.retrieval_offline import (
+              build_offline_index,
+              retrieval_scores,
+          )
+
+          samples = Path("samples")
+
+          async def main():
+              goldens = load_golden()
+              embedder, store = await build_offline_index(samples)
+              return await retrieval_scores(embedder, store, goldens, k=5)
+
+          agg = asyncio.run(main())
+          recall = agg["mean_recall_at_k"]
+          mrr = agg["mean_mrr"]
+          precision = agg["mean_precision_at_k"]
+          ndcg = agg["mean_ndcg_at_k"]
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## Offline retrieval eval (samples/)\n\n")
+                  fh.write(
+                      f"scored={agg['num_scored']} "
+                      f"skipped={agg['num_skipped']} k={agg['k']}\n\n"
+                  )
+                  fh.write("| metric | value |\n| --- | --- |\n")
+                  fh.write(f"| Recall@5 | {recall:.4f} |\n")
+                  fh.write(f"| MRR | {mrr:.4f} |\n")
+                  fh.write(f"| Precision@5 | {precision:.4f} |\n")
+                  fh.write(f"| NDCG@5 | {ndcg:.4f} |\n")
+
+          # Colour reflects the value, not a hardcoded green: a regression that
+          # still clears the gate threshold but drops recall shows yellow/red.
+          if recall >= 0.9:
+              color = "brightgreen"
+          elif recall >= 0.75:
+              color = "yellow"
+          else:
+              color = "red"
+          badge = {
+              "schemaVersion": 1,
+              # Label names the synthetic-corpus scope so the badge isn't read
+              # as a production retrieval-quality claim.
+              "label": "eval recall@5 (samples)",
+              "message": f"{recall:.2f}",
+              "color": color,
+          }
+          Path("docs/eval-badge.json").write_text(
+              json.dumps(badge, indent=2) + "\n", encoding="utf-8"
+          )
+          print(
+              f"Recall@5={recall:.4f} MRR={mrr:.4f} "
+              f"Precision@5={precision:.4f} NDCG@5={ndcg:.4f}"
+          )
+          PY
+      # On pushes to master only, commit the refreshed badge so the README
+      # Shields endpoint reflects the latest run. No-ops when unchanged.
+      - name: Commit eval badge (master pushes only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        # Best-effort: a push failure (branch protection, missing perms, or a
+        # race with another commit) must NEVER red-flag a passing eval gate --
+        # the badge is cosmetic. The next master push refreshes it.
+        continue-on-error: true
+        run: |
+          if git diff --quiet -- docs/eval-badge.json; then
+            echo "eval badge unchanged -- nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/eval-badge.json
+          git commit -m "ci(eval): refresh offline retrieval badge [skip ci]"
+          # Rebase onto any commits that landed since checkout so the push isn't
+          # rejected by a non-fast-forward race.
+          git pull --rebase origin master
+          git push
 
   # ---------------------------------------------------------------------------
   # Helm chart checks.

@@ -7,11 +7,13 @@ issuer's JWKS.
 
 Design:
 
-- The app factory attaches an ``OIDCVerifier`` to
-  ``app.state.oidc_verifier`` (built from ``settings.auth``). If no auth
-  block is configured the verifier is absent and this middleware passes
-  everything through - local-dev "no auth" mode. With auth configured,
-  the middleware enforces it.
+- Authentication is ALWAYS enforced -- there is no anonymous / "open"
+  mode. The app factory attaches an ``OIDCVerifier`` to
+  ``app.state.oidc_verifier`` (built from ``settings.auth``) in ``oidc``
+  mode, or wires a ``SessionManager`` in ``login`` mode. Either way every
+  non-allowlisted request must carry a valid identity; a request that
+  reaches this middleware with neither a wired verifier nor a login
+  session manager is a misconfiguration and is rejected (fail closed).
 - On rejection it returns the stable error envelope directly
   (contracts/http-api.md), with a 401 ``error: unauthenticated`` and a
   ``reason`` from the closed set
@@ -115,8 +117,9 @@ class OIDCAuthMiddleware(BaseHTTPMiddleware):
 
         verifier = getattr(request.app.state, "oidc_verifier", None)
         if verifier is None:
-            # No auth configured -> local-dev open mode.
-            return await call_next(request)
+            # No verifier wired and not in login mode -> auth is
+            # misconfigured. Fail closed: there is no anonymous/open mode.
+            return self._reject(rid, "auth_misconfigured")
 
         token = _extract_bearer(request)
         if not token:

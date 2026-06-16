@@ -18,15 +18,22 @@
 # available knob with inline documentation.
 # =============================================================================
 
-# --- Authentication (OIDC) ---------------------------------------------------
-# Points at the bundled Dex issuer. In a real deployment, set issuer/audience
-# to your own IdP. The backend validates tokens against the issuer's JWKS.
+# --- Authentication ----------------------------------------------------------
+# Authentication is ALWAYS enforced -- there is no anonymous / "open" mode.
+# mode: oidc  -> validate Bearer JWTs against an external IdP (issuer/audience).
+# mode: login -> first-party login (built-in admin + optional SSO), the default
+#                when no `auth` block is supplied.
+#
+# This demo uses oidc, pointed at the bundled Dex issuer. In a real deployment,
+# set issuer/audience to your own IdP. The backend validates tokens against the
+# issuer's JWKS.
 #
 # NOTE (local compose): Dex advertises its issuer as http://localhost:5556/dex
 # (the URL your browser uses). Inside the compose network the API reaches Dex
 # at http://dex:5556/dex. If you hit issuer-mismatch errors during the
 # walkthrough, align both sides on the same host - see docs/auth.md.
 auth:
+  mode: oidc
   issuer: http://dex:5556/dex
   audience: opsrag-local
   jwks_cache_seconds: 300
@@ -124,6 +131,7 @@ mcp:
   aws:           { enabled: false }
   azure:         { enabled: false }
   cloudflare:    { enabled: false }
+  cloudwatch:    { enabled: false }
   code:          { enabled: false }
   datadog:       { enabled: false }
   elasticsearch: { enabled: false }
@@ -134,10 +142,12 @@ mcp:
   knowledge:     { enabled: false }
   kubernetes:    { enabled: false }
   loki:          { enabled: false }
+  pagerduty:     { enabled: false }
   prometheus:    { enabled: false }
   rootly:        { enabled: false }
   runbooks:      { enabled: false }
   sentry:        { enabled: false }
   slack:         { enabled: false }
   splunk:        { enabled: false }
+  stackdriver:   { enabled: false }
   tool_cache:    { enabled: false }

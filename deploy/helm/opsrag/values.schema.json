@@ -135,6 +135,7 @@
         "aws",
         "azure",
         "cloudflare",
+        "cloudwatch",
         "code",
         "datadog",
         "elasticsearch",
@@ -145,12 +146,14 @@
         "knowledge",
         "kubernetes",
         "loki",
+        "pagerduty",
         "prometheus",
         "rootly",
         "runbooks",
         "sentry",
         "slack",
         "splunk",
+        "stackdriver",
         "tool_cache"
       ],
       "properties": {
@@ -289,6 +292,21 @@
             }
           }
         },
+        "cloudwatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretRef": {
+              "type": "string"
+            }
+          }
+        },
         "code": {
           "type": "object",
           "additionalProperties": false,
@@ -379,6 +397,21 @@
             }
           }
         },
+        "pagerduty": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretRef": {
+              "type": "string"
+            }
+          }
+        },
         "prometheus": {
           "type": "object",
           "additionalProperties": false,
@@ -425,6 +458,21 @@
           }
         },
         "slack": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretRef": {
+              "type": "string"
+            }
+          }
+        },
+        "stackdriver": {
           "type": "object",
           "additionalProperties": false,
           "required": [

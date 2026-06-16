@@ -38,6 +38,7 @@ class _FakeQdrant:
         self._exists = exists
         self._dim = dim
         self._named = named
+        self.deleted: list[str] = []
 
     async def collection_exists(self, collection):
         return self._exists
@@ -47,6 +48,9 @@ class _FakeQdrant:
         vp = _VP(self._dim)
         vectors = {"dense": vp} if self._named else vp
         return _CollectionInfo(vectors)
+
+    async def delete_collection(self, collection):
+        self.deleted.append(collection)
 
 
 @pytest.mark.asyncio
@@ -79,12 +83,29 @@ async def test_noop_on_missing_collection():
 
 
 @pytest.mark.asyncio
-async def test_allow_change_true_does_not_raise_on_mismatch():
+async def test_allow_change_true_drops_collection_on_mismatch():
     client = _FakeQdrant(exists=True, dim=768)
-    # Operator opted into a reindex -> warn + continue, no raise.
+    # Operator opted into a reindex -> TRUTHFUL: drop the mismatched collection
+    # (no raise) so the caller's create path rebuilds it at expected_dim.
     await assert_dimension_compatible(
         client, "opsrag", expected_dim=1024, allow_change=True,
     )
+    assert client.deleted == ["opsrag"]
+
+
+@pytest.mark.asyncio
+async def test_allow_change_true_drop_failure_raises():
+    class _DropFails(_FakeQdrant):
+        async def delete_collection(self, collection):
+            raise RuntimeError("qdrant down")
+
+    client = _DropFails(exists=True, dim=768)
+    # A failed drop must NOT silently continue (the create path would skip and
+    # leave the mismatch in place) -- surface it as the fail-closed error.
+    with pytest.raises(DimensionMismatchError):
+        await assert_dimension_compatible(
+            client, "opsrag", expected_dim=1024, allow_change=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -139,26 +160,41 @@ class _Cols:
 class _StoreFakeQdrant:
     """Mock AsyncQdrantClient covering both ensure_collection() paths:
     get_collections() (name listing) and get_collection() (named-vector
-    size for the guard). Records whether create_collection was called."""
+    size for the guard). Tracks live collections so a drop is reflected by
+    the post-guard existence re-check, and records create/delete calls."""
 
     def __init__(self, *, existing_name: str, existing_dim: int):
         self._existing_name = existing_name
         self._existing_dim = existing_dim
+        self._live = {existing_name}
         self.create_called = False
+        self.created_dim: int | None = None
+        self.deleted: list[str] = []
 
     async def get_collections(self):
-        return _Cols([self._existing_name])
+        return _Cols(sorted(self._live))
 
     async def collection_exists(self, collection):
-        return collection == self._existing_name
+        return collection in self._live
 
     async def get_collection(self, collection):
         return _CollectionInfo({"dense": _VP(self._existing_dim)})
 
+    async def delete_collection(self, collection):
+        self.deleted.append(collection)
+        self._live.discard(collection)
+
     async def create_collection(self, **kwargs):
         self.create_called = True
+        # Record the requested dense vector size so a test can assert the
+        # collection was recreated at the NEW embedder dimension (not the old).
+        vectors_config = kwargs.get("vectors_config") or {}
+        dense = vectors_config.get("dense")
+        if dense is not None:
+            self.created_dim = dense.size
+        self._live.add(self._existing_name)
 
-    async def create_payload_index(self, **kwargs):  # pragma: no cover - unused on existing path
+    async def create_payload_index(self, **kwargs):
         pass
 
 
@@ -180,7 +216,7 @@ async def test_ensure_collection_raises_on_dim_mismatch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ensure_collection_allow_change_bypasses(monkeypatch):
+async def test_ensure_collection_allow_change_drops_and_recreates(monkeypatch):
     from opsrag.vectorstores import qdrant as qdrant_mod
 
     fake = _StoreFakeQdrant(existing_name="opsrag", existing_dim=3072)
@@ -190,10 +226,13 @@ async def test_ensure_collection_allow_change_bypasses(monkeypatch):
     store = qdrant_mod.QdrantVectorStore(
         collection_name="opsrag", dimension=768, allow_dimension_change=True,
     )
-    # Operator opted into a reindex -> warn + continue, no raise.
+    # Operator opted into a reindex -> TRUTHFUL: the guard drops the mismatched
+    # collection and ensure_collection's create path rebuilds it at the new dim.
     await store.ensure_collection()
     assert store._ensured is True
-    assert fake.create_called is False
+    assert fake.deleted == ["opsrag"]   # mismatched collection was dropped
+    assert fake.create_called is True   # ...and recreated at dim=768
+    assert fake.created_dim == 768      # recreated at the NEW dim, not 3072
 
 
 # --- New-collection payload-index coverage ----------------------------------

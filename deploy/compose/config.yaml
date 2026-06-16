@@ -2,17 +2,36 @@
 # opsrag - LOCAL DEMO config for the docker-compose stack
 # =============================================================================
 # Mounted into the api container at /app/config.yaml (see docker-compose.yaml),
-# overriding the image's shipped default. This is the SSO-skipped demo profile:
+# overriding the image's shipped default. This demo runs in first-party LOGIN
+# mode (the only modes are `login` and `oidc` -- there is NO anonymous/open
+# mode). On a fresh `docker compose up`, sign in as the seeded admin:
 #
-#   NO `auth:` block  ->  the OIDC Bearer middleware runs in OPEN mode, so the
-#   bundled React UI (which does not implement an OIDC/PKCE client yet) can call
-#   the API without a token. DO NOT use this profile on a network-exposed
-#   deployment - add an `auth:` block (see config-example.yaml) for any real use.
+#   - Browse the UI at http://localhost:5173 -> you'll get the login page.
+#   - Credentials are the seeded admin from OPSRAG_ADMIN_EMAIL /
+#     OPSRAG_ADMIN_PASSWORD in deploy/compose/.env (defaults in .env.example:
+#     admin@opsrag.local / change-me-admin -- CHANGE for any real use).
+#   - Login requires OPSRAG_SESSION_SIGNING_KEY (also from .env) to sign the
+#     session cookie.
 #
-# Secrets (ANTHROPIC_API_KEY, POSTGRES_DSN override, MCP creds) come from
-# deploy/compose/.env (git-ignored). Connection strings to the sibling compose
-# services are injected via `environment:` in docker-compose.yaml.
+# The `auth:` block below uses cookie_secure:false because this demo serves
+# plain http://localhost (no TLS). Behind HTTPS you MUST set cookie_secure:true
+# (and enable SSO via an `sso:` block) -- see config-example.yaml.
+#
+# Secrets (ANTHROPIC_API_KEY, POSTGRES_DSN override, MCP creds, the auth env
+# above) come from deploy/compose/.env (git-ignored; copy from .env.example).
+# Connection strings to the sibling compose services are injected via
+# `environment:` in docker-compose.yaml.
 # =============================================================================
+
+# First-party LOGIN mode: built-in admin (seeded from env) + signed cookie
+# sessions. Authentication is ALWAYS enforced -- unauthenticated requests get
+# 401 (except the public allowlist: /healthz, /readyz, /auth/*, /ui-config...).
+auth:
+  mode: login
+  login:
+    password_enabled: true
+    cookie_secure: false            # local http demo (no TLS); MUST be true behind HTTPS
+    sso_callback_base: "http://localhost:5173/api"
 
 llm:
   provider: anthropic            # ANTHROPIC_API_KEY supplied via .env

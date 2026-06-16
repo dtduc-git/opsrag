@@ -20,7 +20,7 @@ from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.reranker import Reranker
 from opsrag.interfaces.vectorstore import SearchResult
-from opsrag.rerankers.mmr import mmr_reorder
+from opsrag.rerankers.mmr import _tokens, mmr_reorder
 
 _log = logging.getLogger("opsrag.agent.reranker")
 
@@ -44,6 +44,8 @@ def rerank_node(
     observability: ObservabilityProvider,
     top_k: int = 5,
     diversity: float = 0.0,
+    content_dedup: bool = True,
+    content_dedup_threshold: float = 0.0,
 ):
     async def _rerank(state: dict) -> dict:
         query = state["query"]
@@ -102,6 +104,63 @@ def rerank_node(
         effective_top_k = top_k
         if state.get("synthesis_intent"):
             effective_top_k = max(top_k, 10)
+
+        # Content dedup BEFORE the rerank call -- duplicate-content chunks
+        # (e.g. the same values.yaml copied across repos) are otherwise all
+        # billed by the cross-encoder and can crowd out distinct docs. The
+        # existing id / (repo, source_path) dedup upstream never keys on
+        # CONTENT, so identical bytes from two different paths slip through.
+        # Keep the FIRST occurrence to preserve the RRF/merge order, drop
+        # later identical-content chunks. With a >0 threshold, additionally
+        # drop a near-duplicate whose max token-set Jaccard vs an
+        # already-kept chunk exceeds the threshold. Reads the flag from state
+        # (mirrors rerank_diversity), falling back to the node closure args
+        # forwarded from cfg.agent.* -- so config-only settings actually take
+        # effect (without a closure fallback the cfg values were dead).
+        if state.get("rerank_content_dedup", content_dedup):
+            dedup_threshold = float(
+                state.get("rerank_content_dedup_threshold", content_dedup_threshold) or 0.0
+            )
+            # Synthesis intent ("compare A vs B") deliberately widened top_k to
+            # keep both anchor docs; the near-dup (Jaccard) pass could drop one
+            # of two DISTINCT-but-similar synthesis docs the path wants to keep,
+            # so skip it for synthesis. Exact-content dedup still runs (an
+            # identical byte-for-byte copy is never the doc synthesis needs).
+            synthesis = bool(state.get("synthesis_intent"))
+            apply_near_dup = dedup_threshold > 0.0 and not synthesis
+            # Key exact-dedup on the content STRING itself, not hash(content):
+            # hashing risks a silent drop of a DISTINCT chunk on a hash
+            # collision. Membership on the string is exact.
+            seen: set[str] = set()
+            kept_token_sets: list[frozenset[str]] = []
+            deduped_chunks: list[Chunk] = []
+            for c in chunks:
+                content = c.content or ""
+                if content in seen:
+                    continue
+                if apply_near_dup:
+                    toks = _tokens(content)
+                    # Jaccard against already-kept chunks; reuse the cached
+                    # token sets so each candidate is tokenized once.
+                    is_near_dup = any(
+                        (
+                            1.0 if (not toks and not kt)
+                            else 0.0 if (not toks or not kt)
+                            else len(toks & kt) / len(toks | kt)
+                        ) > dedup_threshold
+                        for kt in kept_token_sets
+                    )
+                    if is_near_dup:
+                        continue
+                    kept_token_sets.append(toks)
+                seen.add(content)
+                deduped_chunks.append(c)
+            if len(deduped_chunks) < len(chunks):
+                _log.info(
+                    "rerank: content-dedup collapsed pool %d -> %d (threshold=%.2f)",
+                    len(chunks), len(deduped_chunks), dedup_threshold,
+                )
+            chunks = deduped_chunks
 
         results = [SearchResult(chunk=c, score=0.0) for c in chunks]
         # Score the FULL candidate pool so the anchor boost can rescue an
