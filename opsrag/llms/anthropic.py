@@ -9,6 +9,7 @@ from anthropic import AsyncAnthropic
 from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
+from opsrag.llms.content import to_anthropic_content
 
 
 class AnthropicLLM:
@@ -48,9 +49,13 @@ class AnthropicLLM:
         # appends a schema instruction to the system prompt.
         _ = response_schema
         start = time.perf_counter()
+        converted = [
+            {"role": m["role"], "content": to_anthropic_content(m.get("content", ""))}
+            for m in messages
+        ]
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": messages,
+            "messages": converted,
             "max_tokens": max_tokens or self._default_max_tokens,
             "temperature": temperature,
         }

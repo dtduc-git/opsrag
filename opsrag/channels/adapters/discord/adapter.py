@@ -52,6 +52,7 @@ from opsrag.channels.base import ChannelAdapter, CoreSink
 from opsrag.channels.types import (
     AgentResult,
     FeedbackEvent,
+    ImageRef,
     InboundMessage,
     MessageHandle,
     ReactionKind,
@@ -295,6 +296,17 @@ class DiscordAdapter(ChannelAdapter):
         out.reverse()
         return out
 
+    async def fetch_image(self, ref: ImageRef) -> bytes | None:
+        """Download a Discord attachment from its CDN ``url`` (no auth needed).
+
+        Routed through the shared hardened :func:`fetch_image_bytes` (FIX 3):
+        https-only + SSRF IP block + absolute size ceiling.
+        """
+        if not ref.url:
+            return None
+        from opsrag.channels.image_fetch import fetch_image_bytes
+        return await fetch_image_bytes(ref.url)
+
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser:
         """Synthetic, traceable-but-anonymous identity.
 
@@ -508,6 +520,12 @@ def _message_to_inbound(message: Any, bot_user: Any) -> InboundMessage | None:
 
     _retain_message(message_id, message)
 
+    image_refs = tuple(
+        ImageRef(url=att.url, mime_type=att.content_type, size=getattr(att, "size", None))
+        for att in (getattr(message, "attachments", None) or [])
+        if str(getattr(att, "content_type", "") or "").startswith("image/")
+    )
+
     return InboundMessage(
         channel_id=channel_id,
         user_id=user_id,
@@ -516,6 +534,7 @@ def _message_to_inbound(message: Any, bot_user: Any) -> InboundMessage | None:
         thread_id=thread_id,
         is_dm=is_dm,
         workspace=workspace,
+        images=image_refs,
     )
 
 

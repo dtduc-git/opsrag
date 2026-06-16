@@ -35,6 +35,7 @@ from opsrag.channels.types import (
     InboundMessage,
     ThreadMessage,
 )
+from opsrag.config import VisionConfig
 
 _log = logging.getLogger("opsrag.channels.dispatcher")
 
@@ -125,6 +126,7 @@ class ChannelDispatcher:
         investigation_cache: Any = None,
         semantic_router: Any = None,
         feedback_store: Any = None,
+        vision: VisionConfig | None = None,
     ) -> None:
         self._adapter = adapter
         self._graph = agent_graph
@@ -137,6 +139,7 @@ class ChannelDispatcher:
         self._investigation_cache = investigation_cache
         self._semantic_router = semantic_router
         self._feedback_store = feedback_store
+        self._vision = vision or VisionConfig()
 
     @property
     def channel_name(self) -> str:
@@ -170,9 +173,11 @@ class ChannelDispatcher:
 
         # ---- 2. Extract the user query (already mention-stripped) --------
         user_query = (msg.text or "").strip()
-        if not user_query:
+        if not user_query and not msg.images:
             # Nothing to answer -- politely no-op rather than calling the
-            # agent with an empty string.
+            # agent with an empty string. A bare image (no caption) is still
+            # answerable (FR-006), so only no-op when there is NEITHER text
+            # NOR images.
             _log.info("empty query channel=%s", channel)
             return
 
@@ -223,6 +228,62 @@ class ChannelDispatcher:
             f"{thread_context}\n\n{user_query}" if thread_context else user_query
         )
 
+        # ---- 4b. Resolve inbound images (only now, post-permission) ------
+        # FR-007: bytes are fetched ONLY after the permission gate passes.
+        # FR-009: enforce enabled + mime + count + size from VisionConfig --
+        # the SAME policy the web path applies in api.images.decode_images, so
+        # the kill-switch and mime allow-list behave identically on every surface.
+        # FR-014: a failed fetch degrades to text-only -- never crashes.
+        turn_images: list[Any] = []
+        if msg.images and self._vision.enabled:
+            from opsrag.llms.content import ImagePart
+
+            max_images = int(self._vision.max_images)
+            max_bytes = int(self._vision.max_bytes)
+            allowed_mime = set(self._vision.allowed_mime)
+            # Drop disallowed mime types BEFORE fetching (parity with the web
+            # path), then clamp the count so we never download past the cap.
+            refs = [r for r in msg.images if r.mime_type in allowed_mime]
+            if len(refs) < len(msg.images):
+                _log.info(
+                    "dropped %d channel image(s) with disallowed mime channel=%s",
+                    len(msg.images) - len(refs), channel,
+                )
+            if len(refs) > max_images:
+                _log.info(
+                    "clamped channel images %d -> %d channel=%s",
+                    len(refs), max_images, channel,
+                )
+                refs = refs[:max_images]
+            for ref in refs:
+                try:
+                    raw = await self._adapter.fetch_image(ref)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("image fetch failed channel=%s err=%s", channel, exc)
+                    raw = None
+                if not raw:
+                    continue
+                if len(raw) > max_bytes:
+                    _log.info(
+                        "skipping oversize channel image %d > %d channel=%s",
+                        len(raw), max_bytes, channel,
+                    )
+                    continue
+                turn_images.append(
+                    ImagePart(
+                        data=raw,
+                        mime_type=ref.mime_type,
+                        name=ref.file_id or "image",
+                    )
+                )
+
+        # A bare image (no caption) still gets analyzed (spec FR-006).
+        if turn_images and not user_query:
+            user_query = "Please analyze this image."
+            combined_query = (
+                f"{thread_context}\n\n{user_query}" if thread_context else user_query
+            )
+
         # ---- 5. Resolve identity ----------------------------------------
         try:
             current_user = await self._adapter.resolve_identity(msg)
@@ -253,6 +314,8 @@ class ChannelDispatcher:
                 semantic_router=self._semantic_router,
                 user_email=getattr(current_user, "email", None),
                 user_name=getattr(current_user, "name", None),
+                images=turn_images,
+                vision_llm=getattr(self._providers, "vision_llm", None),
             ):
                 if ev.get("type") == "final":
                     final = ev

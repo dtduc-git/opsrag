@@ -40,6 +40,11 @@ export interface Message {
   // for diagnostic value (when was this asked?) and as a hint that
   // older replayed answers may reference state that's since changed.
   ts?: string | null;
+  // User-attached image thumbnails (vision). Client-only: the server is
+  // ephemeral and never persists image bytes, so these survive only for the
+  // current session (they won't reappear on reload / replay). `dataUrl` is a
+  // base64 data: URL captured at send time in ChatInput.
+  images?: { mime: string; dataUrl: string }[];
 }
 
 // Registry of types the assistant message can render inline.
@@ -542,6 +547,19 @@ export default function ChatMessage({ msg, ctx }: { msg: Message; ctx?: ChatMess
             </ReactMarkdown>
           )}
         </div>
+
+        {isUser && msg.images && msg.images.length > 0 && (
+          <div className="msg-images">
+            {msg.images.map((img, i) => (
+              <img
+                key={i}
+                className="msg-image"
+                src={img.dataUrl}
+                alt={`attached image ${i + 1}`}
+              />
+            ))}
+          </div>
+        )}
 
         {!isUser && msg.richComponents && msg.richComponents.length > 0 && (
           <div className="rich-components">

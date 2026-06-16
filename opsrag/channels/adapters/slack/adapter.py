@@ -49,6 +49,7 @@ from opsrag.channels.base import ChannelAdapter, CoreSink
 from opsrag.channels.types import (
     AgentResult,
     FeedbackEvent,
+    ImageRef,
     InboundMessage,
     MessageHandle,
     ReactionKind,
@@ -231,6 +232,29 @@ class SlackAdapter(ChannelAdapter):
             )
         return out
 
+    async def fetch_image(self, ref: ImageRef) -> bytes | None:
+        """Download a Slack ``url_private`` -- requires the bot token as bearer.
+
+        Slack file URLs are NOT public: the request must carry
+        ``Authorization: Bearer <bot token>`` (the same token the
+        ``SlackBotClient`` uses for Web API calls), else Slack returns an HTML
+        sign-in page instead of the bytes. Returns ``None`` when the client or
+        url is missing.
+        """
+        if not ref.url:
+            return None
+        client = self._client
+        bot_token = getattr(client, "_bot_token", None) if client is not None else None
+        if not bot_token:
+            return None
+        # Routed through the shared hardened helper (FIX 3/4): https-only + SSRF
+        # IP block + size ceiling, and the bearer token in the header is never
+        # echoed into any error/log line.
+        from opsrag.channels.image_fetch import fetch_image_bytes
+        return await fetch_image_bytes(
+            ref.url, headers={"Authorization": f"Bearer {bot_token}"},
+        )
+
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser:
         # Rebuild the minimal Slack event shape the identity helper expects.
         event = {"user": msg.user_id, "team": msg.workspace}
@@ -323,6 +347,15 @@ def _event_to_inbound(event: dict[str, Any], *, is_dm: bool) -> InboundMessage:
     """
     raw_text = (event or {}).get("text", "") or ""
     text = _MENTION_RE.sub("", raw_text).strip()
+    image_refs = tuple(
+        ImageRef(
+            url=f.get("url_private"),
+            mime_type=f.get("mimetype", "image/png"),
+            size=f.get("size"),
+        )
+        for f in ((event or {}).get("files") or [])
+        if str(f.get("mimetype", "") or "").startswith("image/") and f.get("url_private")
+    )
     return InboundMessage(
         channel_id=(event or {}).get("channel", "") or "",
         user_id=(event or {}).get("user", "") or "",
@@ -331,6 +364,7 @@ def _event_to_inbound(event: dict[str, Any], *, is_dm: bool) -> InboundMessage:
         thread_id=(event or {}).get("thread_ts") or None,
         is_dm=is_dm,
         workspace=(event or {}).get("team") or None,
+        images=image_refs,
         raw=dict(event or {}),
     )
 

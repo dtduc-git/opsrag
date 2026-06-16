@@ -26,6 +26,7 @@ from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.vectorstore import VectorStore
+from opsrag.llms.content import build_user_content, is_vision_capable
 
 
 async def _substitute_parents(
@@ -112,7 +113,7 @@ def generate_node(
     # nodes (route/HyDE/grade) stay on the base llm. Falls back to base llm.
     gen_llm = answer_llm or llm
 
-    async def _generate(state: dict) -> dict:
+    async def _generate(state: dict, config: dict | None = None) -> dict:
         query = state["query"]
         chunks = (
             state.get("graded_chunks")
@@ -193,12 +194,41 @@ def generate_node(
             if isinstance(m, dict) and m.get("content")
         ]
 
-        messages = history_msgs + [
-            {
-                "role": "user",
-                "content": f"Context:\n{context_block}{graph_ctx}{tree_block}{anchor_hint}\n\nQuestion: {query}",
-            }
-        ]
+        user_text = (
+            f"Context:\n{context_block}{graph_ctx}{tree_block}{anchor_hint}"
+            f"\n\nQuestion: {query}"
+        )
+
+        # ---- Vision: ephemeral images arrive via the runnable config --------
+        # The entry points (query_with_session*) stash the turn's image bytes in
+        # `config["configurable"]["turn_images"]` (never in graph state) plus a
+        # pre-built vision-fallback LLM. We attach the images to the user message
+        # only when a model that can actually see them is available; if the
+        # active model is blind and there's no vision fallback, we drop the bytes
+        # and tell the user we answered from text alone (spec FR-004/05/06).
+        configurable = (config or {}).get("configurable", {})
+        turn_images = configurable.get("turn_images") or []
+        vision_llm = configurable.get("vision_llm")
+        active_llm = gen_llm
+        vision_note = ""
+        user_content = user_text
+
+        if turn_images:
+            # Match on the model id alone -- the vision markers are
+            # provider-agnostic, so is_vision_capable ignores the provider arg.
+            active_can_see = is_vision_capable("", active_llm.model_name)
+            if active_can_see:
+                user_content = build_user_content(user_text, turn_images)
+            elif vision_llm is not None:
+                active_llm = vision_llm
+                user_content = build_user_content(user_text, turn_images)
+            else:
+                vision_note = (
+                    "\n\n_Note: I can't read images with the current model, "
+                    "so I answered from the text only._"
+                )
+
+        messages = history_msgs + [{"role": "user", "content": user_content}]
 
         # Personalization: inject durable per-user memories (Mem0) into the
         # system prompt so answers reflect what we know about this user.
@@ -221,7 +251,7 @@ def generate_node(
                 "context. Answer again using ONLY facts present in the context "
                 "above; omit anything you cannot cite."
             )
-        response = await gen_llm.generate(
+        response = await active_llm.generate(
             purpose="generation",
             messages=messages,
             system_prompt=system_prompt,
@@ -236,7 +266,7 @@ def generate_node(
         )
 
         return {
-            "generation": response.content,
+            "generation": response.content + vision_note,
             "current_step": "generated",
             # Surface what the LLM actually saw -- graph.py prefers this over
             # graded_chunks when emitting sources_content for the API response.

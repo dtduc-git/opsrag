@@ -2414,6 +2414,76 @@ svg:not([width]):not([height]) {
   color: var(--fg-dim);
 }
 
+/* Attach (📎) button — matches the send-btn footprint but ghosted. */
+.attach-btn {
+  width: 32px; height: 32px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+.attach-btn:hover:not(:disabled) { background: var(--bg-3); color: var(--fg); }
+.attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Drag-over affordance on the composer shell. */
+.input-shell.dragging {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* Pending-attachment thumbnail chips (above the composer). */
+.input-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 4px 8px;
+}
+.input-thumb {
+  position: relative;
+  width: 56px; height: 56px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+}
+.input-thumb img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.input-thumb-remove {
+  position: absolute;
+  top: 2px; right: 2px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.input-thumb-remove svg { width: 11px; height: 11px; }
+.input-thumb-remove:hover { background: rgba(0, 0, 0, 0.8); }
+
+/* User-message attached image thumbnails (in the transcript). */
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.msg-image {
+  max-height: 120px;
+  max-width: 220px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  object-fit: cover;
+}
+
 /* ============================================================
    CHAT MESSAGE (ChatMessage.tsx) — minimum viable styling
    The premium rewrite redefined .message/.msg-meta but the

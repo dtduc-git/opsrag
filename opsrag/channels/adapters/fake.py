@@ -19,6 +19,7 @@ from opsrag.channels.base import ChannelAdapter, CoreSink
 from opsrag.channels.types import (
     AgentResult,
     FeedbackEvent,
+    ImageRef,
     InboundMessage,
     MessageHandle,
     ReactionKind,
@@ -107,6 +108,10 @@ class FakeAdapter(ChannelAdapter):
     ) -> list[ThreadMessage]:
         self.fetched_threads.append((channel_id, thread_id, cap))
         return list(self.thread_messages)
+
+    async def fetch_image(self, ref: ImageRef) -> bytes | None:
+        """No-op by default; subclasses script real bytes (see dispatcher tests)."""
+        return None
 
     async def resolve_identity(self, msg: InboundMessage) -> CurrentUser:
         self.resolved.append(msg)

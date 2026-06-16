@@ -1365,6 +1365,7 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 app.include_router(
                     build_teams_router(
                         agent_graph, providers, caches, cfg.channels.teams,
+                        getattr(cfg, "vision", None),
                     )
                 )
                 _log.info("teams webhook router mounted on api role (/api/channels/teams)")

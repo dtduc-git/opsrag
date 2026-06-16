@@ -45,6 +45,7 @@ The env overrides fall into two groups (see `_ENV_OVERRIDES` and
 | `OPSRAG_PRO_MODEL`             | `agent.pro_model`                  |
 | `OPSRAG_EMBEDDING_PROVIDER` / `_MODEL` / `_DIMENSION` | `embedding.*` |
 | `OPSRAG_RERANKER_PROVIDER` / `_MODEL` | `reranker.*`                |
+| `OPSRAG_VISION_ENABLED` / `_PROVIDER` / `_MODEL` | `vision.*`        |
 | `OPSRAG_SCM_BASE_URL`          | `scm.base_url`                     |
 | `OPSRAG_CONFLUENCE_BASE_URL`, `OPSRAG_SLACK_WORKSPACE_URL`, `OPSRAG_ROOTLY_WEB_URL` | source-link base URLs |
 | `OPSRAG_BRAND_*`               | `brand.*` (white-label, surfaced to the UI) |
@@ -119,6 +120,35 @@ llm:
   api_key_env: ANTHROPIC_API_KEY
   max_tokens: 4096
 ```
+
+### `vision` — image understanding
+
+Lets a user attach images to a chat turn (web UI **and** every channel bot —
+Slack/Telegram/Discord/Teams). The image rides along with the question to a
+vision-capable model for that turn only; the bytes are **ephemeral** — never
+written to the LangGraph checkpoint, the session store, or any durable store
+(history keeps just a `[attached image: <name>]` marker).
+
+`model`/`provider` are an auto-route **fallback**, used only when the active
+`llm.model` can't see. Left `null`, a provider-aware default is resolved at
+startup: **Bedrock/Anthropic → `claude-sonnet-4-6`**, **Vertex →
+`gemini-3-flash-preview`**. An explicit `vision.model` always wins. If no
+vision model is available the image is dropped and the answer says so. Limits
+(`max_images`, `max_bytes`, `allowed_mime`) are enforced on both the web and
+channel paths.
+
+```yaml
+vision:
+  enabled: true
+  model: null            # null -> provider-aware default; or pin an id
+  provider: null         # null -> llm.provider
+  max_images: 4
+  max_bytes: 5242880     # 5 MB per image
+  allowed_mime: ["image/png", "image/jpeg", "image/gif", "image/webp"]
+```
+
+Override at deploy time without a rebuild via `OPSRAG_VISION_ENABLED`,
+`OPSRAG_VISION_PROVIDER`, `OPSRAG_VISION_MODEL`.
 
 ### `embedding` — index embedder
 
