@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-16
+
 ### Added
 
 - **Image understanding (vision) across web + channels.** Users can now attach
@@ -36,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   URL-substring query); the two real `routing.py` matches use `startswith` (an
   exact group-prefix match, not a substring). Added a Dependabot config (pip /
   npm / Actions / Docker).
+- **Hardened inbound image fetch (channels).** The bytes for a channel image are
+  downloaded through a single guarded helper: HTTPS-only, the resolved host is
+  rejected if it maps to a private/loopback/link-local/reserved address (blocks
+  SSRF to cloud-metadata and internal services), the connection is pinned to the
+  validated IP to defeat DNS-rebinding (TLS is still verified against the
+  hostname), the body is size-capped during streaming, and fetch errors are
+  scrubbed to scheme+host so bot tokens never reach the logs.
 
 ## [0.2.0] - 2026-06-15
 
