@@ -808,6 +808,10 @@ async def query_with_session(
         _skip_cache = (
             should_skip_cache(query)
             or _qa_cache_globally_disabled()
+            # Image turns bypass the cache: it is keyed on the text embedding
+            # only (image-blind), so a matching prior text-only Q must not be
+            # served here. The store below is guarded the same way.
+            or bool(images)
             or (
                 _classification is not None
                 and policy_for(_classification.category)["skip_cache"]
@@ -1069,6 +1073,11 @@ async def query_with_session(
         and answer
         and not grounded_explicitly_failed
         and not tool_path_answer
+        # Image turns are NOT cached: the answer may depend on the attached
+        # image, but the cache is keyed on the text embedding only -- so a
+        # later text-only turn with matching text could be served an
+        # image-dependent answer. Mirrors the lookup skip above.
+        and not images
     ):
         try:
             # TTL per category -- forensic 90d, procedural 30d, mixed 5min,
@@ -1209,6 +1218,10 @@ async def query_with_session_events(
         _skip_cache = (
             should_skip_cache(query)
             or _qa_cache_globally_disabled()
+            # Image turns bypass the cache: it is keyed on the text embedding
+            # only (image-blind), so a matching prior text-only Q must not be
+            # served here. The store below is guarded the same way.
+            or bool(images)
             or (
                 _classification is not None
                 and policy_for(_classification.category)["skip_cache"]
@@ -1467,6 +1480,11 @@ async def query_with_session_events(
         and answer
         and not grounded_explicitly_failed
         and not tool_path_answer
+        # Image turns are NOT cached: the answer may depend on the attached
+        # image, but the cache is keyed on the text embedding only -- so a
+        # later text-only turn with matching text could be served an
+        # image-dependent answer. Mirrors the lookup skip above.
+        and not images
     ):
         try:
             # TTL per category -- forensic 90d, procedural 30d, mixed 5min,
