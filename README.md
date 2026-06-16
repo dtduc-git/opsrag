@@ -32,8 +32,9 @@ postmortems into **cited, trustworthy answers** — and let an agent run
 OpsRAG is an open-source, vendor-neutral retrieval system built for SRE and
 platform teams. It bundles a LangGraph agent, a pluggable retrieval pipeline
 (vector + optional knowledge graph + 20 opt-in MCP integrations), a FastAPI
-surface with OIDC/SSO auth, a React UI, a Slack bot, an evaluation harness, a
-first-class Helm chart, and a one-command local stack.
+surface with OIDC/SSO auth, a React UI, chat bots for Slack/Telegram/Discord/Teams
+(with image understanding), an evaluation harness, a first-class Helm chart, and a
+one-command local stack.
 
 Every answer is **grounded and cited**. A new evaluator goes from `git clone`
 to a cited answer in **under fifteen minutes** — no Kubernetes, no cloud
@@ -46,6 +47,8 @@ account, and no external identity provider required.
 | 🔎 **Hybrid retrieval** | Dense + BM25 + a code-aware lane, fused with Reciprocal Rank Fusion and diversified with MMR. |
 | 🧠 **Agentic RAG** | LangGraph agent with CRAG / Self-RAG, anti-hallucination grounding gates, and a semantic answer cache. |
 | 🕵️ **Incident investigations** | An event-driven engine that forms hypotheses and verifies them against live telemetry, with resumable SSE and a hard budget. |
+| 💬 **Chat bots** | Talk to OpsRAG from Slack, Telegram, Discord, and Teams — same agent, allowlist/scoped, with a read-only web view of shared-channel conversations. |
+| 🖼️ **Image understanding** | Attach a screenshot or diagram on the web UI or any channel bot — ephemeral, vision pass-through with provider-aware auto-routing to a vision model when the active one can't see (bytes are never persisted). |
 | 🔌 **20 MCP integrations** | Read-only, opt-in connectors — Datadog, Prometheus, Kubernetes, Elasticsearch, GitHub, GitLab, Sentry, Grafana, Loki, Splunk, Rootly, Slack, and more. |
 | 🌍 **Multi-environment** | One instance targeting many environments' Kubernetes / Prometheus / Elasticsearch via a single `environments:` registry. |
 | 🔐 **Auth built in** | `open` / `oidc` / first-party `login` modes, SSO (Google · GitHub · Microsoft), per-session ownership, optional Redis rate limiting. |

@@ -244,6 +244,20 @@ config:
     # provider: bedrock
     # model: cohere.rerank-v3-5:0
     # awsRegion: us-east-1
+  # Image understanding (web UI + channel bots), ephemeral pass-through to a
+  # vision-capable model. `model`/`provider` are an auto-route fallback used only
+  # when the active llm.model can't see; left empty, a provider-aware default is
+  # resolved at startup (Bedrock/Anthropic -> claude-sonnet-4-6; Vertex ->
+  # gemini-3-flash-preview). Override at deploy time with OPSRAG_VISION_MODEL /
+  # OPSRAG_VISION_PROVIDER / OPSRAG_VISION_ENABLED (no rebuild). See
+  # values-aws.yaml / values-gcp.yaml for the cloud overlays.
+  vision:
+    enabled: true
+    model: ""              # e.g. "anthropic.claude-sonnet-4-6-v1:0" to force a model
+    provider: ""           # defaults to config.llm.provider
+    maxImages: 4
+    maxBytes: 5242880      # 5 MB per image
+    allowedMime: ["image/png", "image/jpeg", "image/gif", "image/webp"]
   vectorStore:
     provider: qdrant
     url: http://qdrant:6333

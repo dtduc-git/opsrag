@@ -1008,6 +1008,18 @@ _ENV_OVERRIDES: list[tuple[str, str, str]] = [
 
 _log = logging.getLogger("opsrag.config")
 
+
+def _as_bool(raw: str) -> bool:
+    """Parse a boolean env value. Raises ValueError on anything ambiguous so the
+    override is skipped with a warning (rather than silently truthy)."""
+    v = raw.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(raw)
+
+
 # Model / provider selection via env. Lets the SAME image switch cloud provider
 # (cost vs quality) and bump model ids -- e.g. when a version is deprecated --
 # WITHOUT editing YAML or rebuilding. Applied BEFORE resolve_cloud_bundle so an
@@ -1024,6 +1036,10 @@ _MODEL_ENV_OVERRIDES: list[tuple[str, str | None, str, Any]] = [
     ("OPSRAG_EMBEDDING_DIMENSION","embedding", "dimension",      int),
     ("OPSRAG_RERANKER_PROVIDER",  "reranker",  "provider",       str),
     ("OPSRAG_RERANKER_MODEL",     "reranker",  "model",          str),
+    # Vision auto-route fallback (only used when the active model can't see).
+    ("OPSRAG_VISION_ENABLED",     "vision",    "enabled",        _as_bool),
+    ("OPSRAG_VISION_PROVIDER",    "vision",    "provider",       str),
+    ("OPSRAG_VISION_MODEL",       "vision",    "model",          str),
 ]
 
 # cloud_provider is a closed set -> guard so a typo doesn't silently select an

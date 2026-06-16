@@ -20,6 +20,13 @@ llm:
   api_key_env: ANTHROPIC_API_KEY
   max_tokens: 4096
 
+# Image understanding (web UI + channel bots), ephemeral. The Anthropic model
+# above already sees, so no fallback is built. Override via OPSRAG_VISION_MODEL.
+vision:
+  enabled: true
+  model: null                    # null -> provider-aware default
+  provider: null                 # null -> llm.provider
+
 embedding:
   provider: fastembed            # local, no API key
   model: BAAI/bge-small-en-v1.5
