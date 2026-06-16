@@ -108,7 +108,13 @@ RUN apt-get update \
 # libgnutls30 deb12u6 -> deb12u7, which fixes CVE-2026-33845 + CVE-2026-42010 the
 # Trivy CRITICAL gate flags). Keeps the image current without a base-image bump.
 
-# Create a non-root user/group with a fixed UID/GID of 1000.
+# Patch the base image's SYSTEM python build tools that image scanners flag:
+# pip (CVE-2026-6357 / CVE-2026-3219 / CVE-2025-8869), wheel (CVE-2026-24049),
+# and setuptools' vendored jaraco.context (CVE-2026-23949). The app runs from
+# /opt/venv, so these are never used at runtime, but patching them keeps the
+# published image CVE-clean. (The venv's own copies are patched in the builder.)
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && rm -rf /root/.cache/pip
 RUN groupadd --gid 1000 opsrag \
     && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin opsrag
 
