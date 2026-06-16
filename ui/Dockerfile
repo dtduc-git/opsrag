@@ -36,6 +36,10 @@ FROM nginxinc/nginx-unprivileged:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+# Explicit non-root user (nginx-unprivileged's default uid/nginx) so Trivy's
+# image-user check (DS-0002) can see we don't run as root.
+USER 101
+
 EXPOSE 3000
 
 CMD ["nginx", "-g", "daemon off;"]
