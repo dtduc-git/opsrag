@@ -32,14 +32,26 @@ def _qa_cache_globally_disabled() -> bool:
         "1", "true", "yes", "on",
     )
 
-# Retry meta-command: one-word user inputs that mean "re-run my previous
-# question" rather than literal investigation topics. Anchored to whole-
-# query so "retry the acme-analytics-v3 pipeline" still routes to investigation.
-_RETRY_META_RE = re.compile(
-    r"^\s*(retry|again|redo|do\s+(it|that)\s+again|once\s+more|"
-    r"try\s+again|go\s+again|repeat\s*(that|it)?|same\s+thing)\s*[?!.\s]*$",
-    re.IGNORECASE,
-)
+# Retry meta-command: short user inputs that mean "re-run my previous question"
+# rather than a literal investigation topic. Detected by normalize +
+# set-membership (NOT a regex) so it is linear and cannot ReDoS on adversarial
+# input (replaces the former _RETRY_META_RE / CodeQL py/polynomial-redos).
+# Whole-query match only, so "retry the acme-analytics-v3 pipeline" is NOT a
+# retry command and still routes to investigation normally.
+_RETRY_PHRASES = frozenset({
+    "retry", "again", "redo", "do it again", "do that again", "once more",
+    "try again", "go again", "repeat", "repeat that", "repeat it", "same thing",
+})
+
+
+def _is_retry_meta(text: str) -> bool:
+    """True if `text` is a bare retry/redo meta-command.
+
+    Normalize (lowercase, collapse internal whitespace, strip surrounding
+    whitespace + trailing punctuation) then test fixed-set membership -- linear,
+    no backtracking, so it can't be a ReDoS sink for user input."""
+    norm = re.sub(r"\s+", " ", (text or "").strip().lower()).strip(" \t?!.")
+    return norm in _RETRY_PHRASES
 
 
 def _expand_retry_meta(query: str, prior: list[dict]) -> str:
@@ -54,14 +66,14 @@ def _expand_retry_meta(query: str, prior: list[dict]) -> str:
     retry pattern. Substitution is logged so the SSE thinking-trace can
     show why the agent is investigating something the user didn't type.
     """
-    if not _RETRY_META_RE.match(query or ""):
+    if not _is_retry_meta(query):
         return query
     for m in reversed(prior or []):
         if not isinstance(m, dict): continue
         if m.get("role") != "user": continue
         content = (m.get("content") or "").strip()
         if not content: continue
-        if _RETRY_META_RE.match(content): continue  # don't recurse on prior retries
+        if _is_retry_meta(content): continue  # don't recurse on prior retries
         _log.info(
             "retry meta-command: substituting %r -> previous user query (len=%d)",
             query, len(content),

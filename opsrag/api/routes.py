@@ -269,7 +269,10 @@ async def graph_stats(request: Request) -> dict:
         try:
             schema = await store.get_schema()
         except Exception as exc:  # never 500 the status page
-            schema = {"error": str(exc)}
+            # Log the real error server-side; keep a generic marker out of the
+            # response so we never leak internals (py/stack-trace-exposure).
+            _log.warning("graph schema fetch failed: %s", exc)
+            schema = {"error": "schema unavailable"}
     else:
         # Neo4j off -> report the active lightweight entity-graph instead of a
         # bare "off", so the status header reflects what's actually running.
@@ -1021,7 +1024,11 @@ async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investiga
                     "age_seconds": ev["age_seconds"],
                 })
             elif kind == "error":
-                yield _sse("error", {"detail": ev["detail"]})
+                # The agent's raw error text can carry stack/internal detail --
+                # log it server-side and forward only a generic message to the
+                # SSE client (py/stack-trace-exposure).
+                _log.warning("agent error during stream: %s", ev.get("detail"))
+                yield _sse("error", {"detail": "the agent hit an error answering this query"})
                 return
             elif kind == "final":
                 final = ev
