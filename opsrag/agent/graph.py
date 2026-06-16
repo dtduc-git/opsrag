@@ -35,9 +35,15 @@ def _qa_cache_globally_disabled() -> bool:
 # Retry meta-command: one-word user inputs that mean "re-run my previous
 # question" rather than literal investigation topics. Anchored to whole-
 # query so "retry the acme-analytics-v3 pipeline" still routes to investigation.
+# NOTE: the trailing class is `[?!.\s]*$` (NOT `\s*[?!.\s]*$`) -- since the
+# class already contains `\s`, an adjacent `\s*` makes the two quantifiers
+# ambiguous and gives polynomial backtracking on adversarial input
+# (CodeQL py/polynomial-redos). The single class still allows trailing
+# whitespace/punctuation. Call sites also cap input length (retry commands
+# are short) as belt-and-suspenders.
 _RETRY_META_RE = re.compile(
     r"^\s*(retry|again|redo|do\s+(it|that)\s+again|once\s+more|"
-    r"try\s+again|go\s+again|repeat\s*(that|it)?|same\s+thing)\s*[?!.\s]*$",
+    r"try\s+again|go\s+again|repeat\s*(that|it)?|same\s+thing)[?!.\s]*$",
     re.IGNORECASE,
 )
 
@@ -54,14 +60,14 @@ def _expand_retry_meta(query: str, prior: list[dict]) -> str:
     retry pattern. Substitution is logged so the SSE thinking-trace can
     show why the agent is investigating something the user didn't type.
     """
-    if not _RETRY_META_RE.match(query or ""):
+    if not _RETRY_META_RE.match((query or "")[:64]):
         return query
     for m in reversed(prior or []):
         if not isinstance(m, dict): continue
         if m.get("role") != "user": continue
         content = (m.get("content") or "").strip()
         if not content: continue
-        if _RETRY_META_RE.match(content): continue  # don't recurse on prior retries
+        if _RETRY_META_RE.match(content[:64]): continue  # don't recurse on prior retries
         _log.info(
             "retry meta-command: substituting %r -> previous user query (len=%d)",
             query, len(content),
