@@ -429,25 +429,26 @@ def extract_routing(manifests: list, source_id: str) -> tuple[dict, dict]:
                 _kong_declarative(m, source_id, ents, rels)
             elif kind == "Ingress":
                 _ingress(m, source_id, ents, rels)
-            elif "istio.io" in api and kind == "VirtualService":
+            # Exact-match the apiVersion GROUP (the part before "/"): apiVersion
+            # is "group/version", so comparing the parsed group with == is both
+            # correct AND clears CodeQL's incomplete-url-substring-sanitization
+            # finding (a substring/`in` check on a domain-like string trips it).
+            # Applies to istio, gateway-api, contour and ambassador below.
+            elif api.split("/", 1)[0] == "networking.istio.io" and kind == "VirtualService":
                 _istio_virtualservice(m, source_id, ents, rels)
-            elif "istio.io" in api and kind == "Gateway":
+            elif api.split("/", 1)[0] == "networking.istio.io" and kind == "Gateway":
                 _istio_gateway(m, source_id, ents, rels)
-            elif "istio.io" in api and kind == "ServiceEntry":
+            elif api.split("/", 1)[0] == "networking.istio.io" and kind == "ServiceEntry":
                 _istio_serviceentry(m, source_id, ents, rels)
-            elif "gateway.networking.k8s.io" in api and kind in (
+            elif api.split("/", 1)[0] == "gateway.networking.k8s.io" and kind in (
                 "HTTPRoute", "GRPCRoute", "TCPRoute", "TLSRoute"
             ):
                 _gatewayapi_route(m, source_id, ents, rels)
-            elif "gateway.networking.k8s.io" in api and kind == "Gateway":
+            elif api.split("/", 1)[0] == "gateway.networking.k8s.io" and kind == "Gateway":
                 _gateway_node(f"gatewayapi:{sanitize_value((m.get('metadata') or {}).get('name',''))}",
                               "gateway-api", source_id, ents)
             elif ("traefik" in api) and kind in ("IngressRoute", "IngressRouteTCP"):
                 _traefik_ingressroute(m, source_id, ents, rels)
-            # Exact-match the apiVersion GROUP (the part before "/"): apiVersion
-            # is "group/version", so comparing the parsed group with == is both
-            # correct AND clears CodeQL's incomplete-url-substring-sanitization
-            # finding (a startswith/`in` check on a domain-like string trips it).
             elif api.split("/", 1)[0] == "projectcontour.io" and kind == "HTTPProxy":
                 _contour_httpproxy(m, source_id, ents, rels)
             elif api.split("/", 1)[0] == "getambassador.io" and kind == "Mapping":
