@@ -1437,8 +1437,13 @@ async def query_with_session_events(
             ):
                 # Heuristic: outermost graph end carries the full state.
                 result = ev["data"]["output"]
-    except Exception as exc:
-        yield {"type": "error", "detail": str(exc)}
+    except Exception:
+        # Log the real exception (with traceback) server-side; emit only a
+        # GENERIC detail so stack-trace text never enters the SSE event stream.
+        # (CodeQL py/stack-trace-exposure: the raw str(exc) tainted `ev`, which
+        # _stream_query forwards to the streaming HTTP response.)
+        _log.exception("query_with_session_events failed")
+        yield {"type": "error", "detail": "internal error while answering the query"}
         return
 
     if result is None:
