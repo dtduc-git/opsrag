@@ -1,96 +1,120 @@
-# factual_lookup -- single-doc fact extraction.
-# Each query has one (rarely two) expected source files. The answer must
-# contain literal substrings that exist in the source file content.
-
+# Factual-lookup goldens over the shipped `samples/` corpus.
+# expected_sources / acceptable_sources are paths RELATIVE TO samples/.
+# must_contain literals are verified to appear verbatim in the referenced file.
 - id: factual_001
   category: factual_lookup
-  query: "What stages does generic-pipeline.yaml define in gitops-pipeline-templates?"
-  expected_sources:
-    - devops/gitops-pipeline-templates/generic-pipeline.yaml
+  query: "What CPU utilization does the acme-notes-api HPA target, and what are its min/max replicas?"
+  expected_sources: []
+  acceptable_sources:
+    - manifests/acme-notes-api.yaml
+    - runbooks/003-acme-notes-scaling.md
   must_contain:
-    - "delivery"
-    - "cleanup"
-    - "build"
+    - "70"
+    - "3"
+    - "12"
   must_not_contain:
-    - "context does not contain"
-    - "I don't have access"
-  notes: "Direct fact extraction from a single YAML file."
+    - "I don't know"
+  notes: |
+    The HPA fact lives in BOTH the manifest (averageUtilization: 70,
+    minReplicas 3 / maxReplicas 12) and the scaling runbook ("HPA targeting
+    70% CPU, min 3 / max 12 replicas") -- either is a correct grounding,
+    hence acceptable_sources (OR-semantics).
 
 - id: factual_002
   category: factual_lookup
-  query: "What chart name and version is declared in base-charts/generic-application's Chart.yaml?"
-  # OR-semantics example: this question has multiple valid groundings.
-  # The literal Chart.yaml AND the prose doc that describes it both
-  # contain `name: genapp` / `version: v0.2.5` -- either surfacing in
-  # top-N is a correct grounding. With strict AND on expected_sources,
-  # the bot got punished for picking the more semantically-rich .md
-  # doc over the sparse .yaml; both are factually equivalent here.
-  expected_sources: []
-  acceptable_sources:
-    - devops/base-charts/generic-application/Chart.yaml
-    - devops/sre/sre-knowledge-base/docs/platform/generic-application.md
+  query: "How do I roll back an acme-notes deploy?"
+  expected_sources:
+    - runbooks/001-acme-notes-deploy.md
   must_contain:
-    - "name:"
+    - "rollout undo"
   must_not_contain:
     - "I don't know"
-    - "cannot find"
-  notes: "Helm Chart.yaml metadata extraction. Uses acceptable_sources (OR) -- the .yaml and the prose .md describing it are interchangeable groundings for this fact."
+  notes: "Rollback command `kubectl ... rollout undo deploy/acme-notes-api`."
 
 - id: factual_003
   category: factual_lookup
-  query: "What does the .gitversion_function template do in gitops-pipeline-templates?"
+  query: "How do I promote the acme-notes standby database?"
   expected_sources:
-    - devops/gitops-pipeline-templates/library/.gitversion.yaml
+    - runbooks/002-acme-notes-db-failover.md
   must_contain:
-    - "GitVersion"
+    - "pg_ctl promote"
   must_not_contain:
-    - "not provided"
-    - "not described"
-  notes: "Library template purpose extraction."
+    - "I don't know"
+  notes: "Standby promotion command from the DB failover runbook."
 
 - id: factual_004
   category: factual_lookup
-  query: "What ARGOCD_SYNC_WAIT_TIMEOUT value does the pipeline-templates README recommend?"
+  query: "How do I do a full flush of the acme-notes cache?"
   expected_sources:
-    - devops/gitops-pipeline-templates/README.md
+    - runbooks/005-acme-notes-cache-flush.md
   must_contain:
-    - "600"
+    - "flushdb"
   must_not_contain:
-    - "cannot find"
-    - "no information"
-  notes: "Numeric value extraction from README."
+    - "I don't know"
+  notes: "Full-flush (last resort) command `redis-cli flushdb`."
 
 - id: factual_005
   category: factual_lookup
-  query: "What variables does the apps_variables.tf file in projects/staging/apps/qa-runner declare?"
-  expected_sources:
-    - devops/terraform2.0/acme-tf-state/terraform/projects/staging/apps/qa-runner/apps_variables.tf
+  query: "What is the acme-notes API p95 latency SLO?"
+  expected_sources: []
+  acceptable_sources:
+    - runbooks/003-acme-notes-scaling.md
+    - postmortems/2026-02-03-acme-notes-api-latency.md
   must_contain:
-    - "variable"
+    - "300"
   must_not_contain:
-    - "does not contain"
-    - "I cannot find"
-  notes: "Terraform variable enumeration from a single .tf file."
-
-# -- Tuning regression suite (Tasks 10-13, 2026-05-05) --
+    - "I don't know"
+  notes: |
+    The 300 ms p95 SLO appears in the scaling runbook ("under the 300 ms SLO")
+    and the latency postmortem ("Latency SLO (300 ms p95)") -- either grounds
+    the answer.
 
 - id: factual_006
   category: factual_lookup
-  query: "Which repository handles ArgoCD configuration?"
-  expected_sources:
-    - devops/sre/sre-knowledge-base/docs/platform/gitops-monorepo.md
-    - devops/gitops/values/bootstrap/bootstrap/prod.yaml
+  query: "What deployment update strategy does the acme-notes-api Deployment use?"
+  expected_sources: []
+  acceptable_sources:
+    - manifests/acme-notes-api.yaml
+    - runbooks/001-acme-notes-deploy.md
   must_contain:
-    - "gitops-monorepo"
-    - "argocd"
+    - "RollingUpdate"
+    - "maxSurge"
   must_not_contain:
-    - "context does not contain"
-    - "I don't have access"
+    - "I don't know"
   notes: |
-    Regression for session 756c0aa5 Q1: pre-fix answer named ONLY
-    "argocd-automation-access" because _detect_repo lexical-matched on
-    "argocd" -> first repo containing "argocd" -> wrong repo. Post-fix
-    (Task 10), bare-slug detection on "argocd" stays in soft mode (no
-    Qdrant filter), retrieval surfaces gitops-monorepo files, and the
-    generation prompt (Task 12, source-paths-as-evidence rule) makes the
-    LLM lead with gitops-monorepo as primary handler.
+    RollingUpdate with maxSurge 1 / maxUnavailable 0 -- stated in the manifest
+    spec and described in the deploy runbook.
+
+- id: factual_007
+  category: factual_lookup
+  query: "What is the backup retention period for the acme-notes primary database?"
+  expected_sources:
+    - terraform/main.tf
+  must_contain:
+    - "retention_days"
+    - "14"
+  must_not_contain:
+    - "I don't know"
+  notes: "Terraform db backup block: retention_days = 14, point_in_time_recovery."
+
+- id: factual_008
+  category: factual_lookup
+  query: "How many days before a signing certificate expires should acme-notes alert?"
+  expected_sources:
+    - postmortems/2026-03-20-acme-notes-auth-outage.md
+  must_contain:
+    - "14 days"
+  must_not_contain:
+    - "I don't know"
+  notes: "Auth-outage action item: alert 14 days before any signing cert expires."
+
+- id: factual_009
+  category: factual_lookup
+  query: "What disk-usage alert threshold did the acme-notes DB outage recommend?"
+  expected_sources:
+    - postmortems/2026-01-15-acme-notes-db-outage.md
+  must_contain:
+    - "85%"
+  must_not_contain:
+    - "I don't know"
+  notes: "Action item: lower the disk-usage alert to 85% with a page at 92%."

@@ -146,7 +146,12 @@ class QdrantVectorStore:
         distance: str = "cosine",
         allow_dimension_change: bool = False,
     ):
-        self._client = AsyncQdrantClient(url=url, api_key=api_key)
+        # ":memory:" -> in-process Qdrant (no server, no network); used by the
+        # offline retrieval eval + unit tests. A real URL goes over the network.
+        if url == ":memory:":
+            self._client = AsyncQdrantClient(location=":memory:")
+        else:
+            self._client = AsyncQdrantClient(url=url, api_key=api_key)
         self._collection = collection_name
         self._dimension = dimension
         self._distance = {

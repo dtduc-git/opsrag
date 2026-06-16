@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Runnable offline retrieval eval over `samples/`.** A new always-on,
+  no-secrets CI gate (`eval-offline`) indexes the shipped synthetic corpus
+  into an in-process Qdrant with a local FastEmbed ONNX embedder and asserts
+  aggregate Recall@5 over the public golden set
+  (`tests/integration/test_eval_samples_retrieval.py`, threshold 0.85,
+  observed ~1.0). Reusable harness: `opsrag/eval/retrieval_offline.py`.
+- `QdrantVectorStore` now supports `url=":memory:"` (in-process Qdrant) for
+  tests and the offline eval, with a unit test
+  (`tests/unit/test_qdrant_inmemory.py`).
+
+### Changed
+
+- **Replaced the golden eval set** with goldens grounded in the shipped
+  `samples/` corpus (paths relative to `samples/`), so the eval is runnable
+  publicly. The previous goldens pointed at an unshipped private corpus.
+  Categories: `factual_lookup`, `runbook_howto`, `listing`,
+  `multi_doc_synthesis`, `negative`. Rewrote `opsrag/eval/golden/README.md`
+  and `docs/evaluation.md` to document both eval tiers.
 ## [0.3.1] - 2026-06-16
 
 Security + dependency patch release. The published `v0.3.0` images were built

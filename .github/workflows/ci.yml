@@ -172,6 +172,30 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Offline retrieval eval. Always-on, NO-SECRETS proof that opsrag retrieval
+  # works: indexes the shipped `samples/` corpus into an in-process Qdrant with
+  # a local FastEmbed ONNX embedder, scores the public golden set, and asserts
+  # aggregate Recall@5 stays above threshold. The only network it needs is the
+  # one-time FastEmbed model fetch (allowed -- CI has network). No API keys.
+  # The judge-based eval-regression job below stays the live-server tier.
+  # ---------------------------------------------------------------------------
+  eval-offline:
+    name: eval-offline (retrieval, no secrets)
+    runs-on: ubuntu-24.04
+    needs: [lint, typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      # eval (deepeval + pyyaml) + fastembed (local ONNX embedder) + qdrant-client
+      # (a core dep, in-memory mode). No cloud-provider extra needed.
+      - run: uv sync --extra dev --extra eval --extra fastembed
+      - name: pytest offline retrieval eval over samples/
+        run: uv run pytest tests/integration/test_eval_samples_retrieval.py -v
+
+  # ---------------------------------------------------------------------------
   # Helm chart checks.
   # ---------------------------------------------------------------------------
   helm-lint:
