@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from opsrag.agent.graph import query_with_session, query_with_session_events
 from opsrag.llms.content import ImagePart
 

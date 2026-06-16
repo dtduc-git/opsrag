@@ -96,16 +96,23 @@ def test_openai_builds_image_url(monkeypatch):
 
 
 def test_litellm_builds_image_url(monkeypatch):
-    import sys, types
+    import sys
+    import types
     captured = {}
 
     async def _acompletion(**kwargs):
         captured.update(kwargs)
-        class _Msg: content = "ok"
-        class _Choice: message = _Msg()
-        class _Usage: prompt_tokens = 1; completion_tokens = 1
+        class _Msg:
+            content = "ok"
+        class _Choice:
+            message = _Msg()
+        class _Usage:
+            prompt_tokens = 1
+            completion_tokens = 1
         class _Resp:
-            choices = [_Choice()]; usage = _Usage(); model = "gemini/gemini-3-flash-preview"
+            choices = [_Choice()]
+            usage = _Usage()
+            model = "gemini/gemini-3-flash-preview"
         return _Resp()
 
     fake = types.ModuleType("litellm")
@@ -127,8 +134,12 @@ def test_vertex_claude_builds_image_block(monkeypatch):
     captured = {}
 
     class _Resp:
-        class _Usage: input_tokens = 1; output_tokens = 1
-        content = []; model = "claude-sonnet-4@20250514"; usage = _Usage()
+        class _Usage:
+            input_tokens = 1
+            output_tokens = 1
+        content = []
+        model = "claude-sonnet-4@20250514"
+        usage = _Usage()
 
     def _create(**kwargs):
         captured.update(kwargs)
@@ -140,7 +151,8 @@ def test_vertex_claude_builds_image_block(monkeypatch):
     llm = VertexAILLM.__new__(VertexAILLM)
     llm._model = "claude-sonnet-4@20250514"
     llm._is_claude = True
-    llm._project = "p"; llm._location = "us-east5"
+    llm._project = "p"
+    llm._location = "us-east5"
     llm._client = type("C", (), {"messages": type("M", (), {"create": staticmethod(_create)})()})()
     monkeypatch.setattr(llm, "_get_client", lambda: llm._client)
     monkeypatch.setattr(llm, "_fire_on_usage", lambda **k: _noop())

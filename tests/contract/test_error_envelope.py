@@ -41,8 +41,10 @@ def test_404_envelope(stub_app, auth_headers) -> None:
 
 def test_422_envelope(stub_app, auth_headers) -> None:
     client = TestClient(stub_app)
-    # Authenticated but invalid body: `query` is required.
-    resp = client.post("/query", json={}, headers=auth_headers)
+    # Authenticated but schema-invalid body: `query` must be a string (an empty
+    # query is now valid for bare-image turns, so we trigger the 422 with a
+    # type error rather than an omitted field).
+    resp = client.post("/query", json={"query": ["not", "a", "string"]}, headers=auth_headers)
     assert resp.status_code == 422
     _assert_envelope(resp.json(), "bad_request")
 

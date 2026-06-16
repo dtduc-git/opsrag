@@ -1,10 +1,15 @@
 import base64
 
 from opsrag.llms.content import (
-    ImagePart, build_user_content, is_multimodal,
-    to_anthropic_content, to_bedrock_content, to_openai_content,
+    ImagePart,
+    build_user_content,
+    default_vision_model,
+    is_multimodal,
+    is_vision_capable,
+    to_anthropic_content,
+    to_bedrock_content,
+    to_openai_content,
 )
-from opsrag.llms.content import is_vision_capable, default_vision_model
 
 PNG = b"\x89PNG\r\n\x1a\nFAKEBYTES"
 

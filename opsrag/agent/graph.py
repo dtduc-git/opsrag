@@ -144,10 +144,10 @@ from opsrag.interfaces.embedder import EmbeddingProvider
 from opsrag.interfaces.graphstore import KnowledgeGraphStore
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.memory import MemoryStore
-from opsrag.llms.content import ImagePart
 from opsrag.interfaces.observability import ObservabilityProvider
 from opsrag.interfaces.reranker import Reranker
 from opsrag.interfaces.vectorstore import VectorStore
+from opsrag.llms.content import ImagePart
 
 
 def build_minimal_graph(
