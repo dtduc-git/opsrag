@@ -148,6 +148,16 @@ def _validate_prometheus(settings: Any, env: Any) -> str | None:
             "k8s.clusters / deployment.kubernetes.clusters / KUBECONFIG")
 
 
+def _validate_pagerduty(settings: Any, env: Any) -> str | None:
+    """PagerDuty accepts its token from EITHER env var (see
+    ``opsrag/mcp/pagerduty._TOKEN_ENV_KEYS``). The flat ``required_env`` check
+    would only honor one and spuriously fail-fast when the operator sets the
+    other; replace it with an explicit either-or check."""
+    if env.get("OPSRAG_PAGERDUTY_TOKEN") or env.get("PAGERDUTY_API_TOKEN"):
+        return None
+    return "OPSRAG_PAGERDUTY_TOKEN or PAGERDUTY_API_TOKEN"
+
+
 REGISTRY: dict[str, MCPIntegration] = {
     "aws": MCPIntegration(
         name="aws",
@@ -418,6 +428,9 @@ REGISTRY: dict[str, MCPIntegration] = {
         config_type=MCP_CONFIG_TYPES["pagerduty"],
         category="Incident Management",
         required_env=("PAGERDUTY_API_TOKEN",),
+        # The module also accepts OPSRAG_PAGERDUTY_TOKEN; a custom validator
+        # honors EITHER so a token under the alias doesn't trip fail-fast.
+        validate=_validate_pagerduty,
         tool_names=(
             "pagerduty_get_incident",
             "pagerduty_get_incident_log_entries",

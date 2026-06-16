@@ -1321,6 +1321,7 @@ export interface Integration {
   name: string;
   display_name: string;
   enabled: boolean;
+  category: string;
   tool_count: number;
   tool_names: string[];
   has_health_probe: boolean;

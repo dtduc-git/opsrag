@@ -1,48 +1,132 @@
 # Authentication
 
-opsrag has three authentication modes (`auth.mode`): `open` (no
-enforcement), `oidc` (verify incoming Bearer JWTs — the default and the
-focus of most of this document), and `login` (first-party cookie sessions
-with password and/or SSO). Beyond authentication, opsrag enforces
-**per-session ownership** (a thread can only be read or deleted by its
-owner) and **rate limiting** (a per-request throttle plus a login brute-
-force lockout). This document explains JWT verification, per-provider IdP
-setup, the ownership model, and rate limiting.
+This is the complete guide to authentication and authorization in OpsRAG:
+how to choose an auth mode, how to wire each one up against real identity
+providers, how scopes and roles work, how to mint MCP tokens, and how to
+harden a production deployment.
 
-## How auth works
+OpsRAG has three authentication modes, set by `auth.mode`:
 
-Every endpoint except `/healthz` and `/readyz` requires an
-`Authorization: Bearer <token>` header. (The schema/docs routes
-`/openapi.json`, `/docs`, `/redoc`, and the legacy `/health` path are also
-left open so tooling and the UI can read the spec.)
+- `open` -- no enforcement. Every request is an anonymous user that
+  carries all scopes. This is the zero-config local-dev / demo default.
+- `oidc` -- OpsRAG verifies an incoming `Authorization: Bearer <JWT>`
+  against an external identity provider (IdP). There is no user database;
+  identity lives entirely in the token.
+- `login` -- OpsRAG runs its own first-party login: email + password
+  and/or SSO (Google / Microsoft / GitHub), backed by signed cookie
+  sessions and a local user store.
 
-On startup the app builds a single OIDC verifier from the `auth` block in
-your config and attaches it to the running app. For each protected request
-the verifier:
+On top of authentication ("who is calling"), OpsRAG enforces:
+
+- **RBAC scopes** (`chat` / `investigate` / `mcp` / `admin`) -- what a
+  caller may do (see [Scopes and roles](#scopes-and-roles)).
+- **Per-session ownership** -- a conversation thread can only be read or
+  deleted by the verified identity that created it (see
+  [Per-session ownership](#per-session-ownership)).
+- **Rate limiting** -- a per-request throttle plus a login brute-force
+  lockout (see [Rate limiting](#rate-limiting)).
+
+> Conventions in this doc: all examples are copy-pasteable. Replace
+> placeholder hosts, client IDs, and secrets with your own. Secrets are
+> ALWAYS supplied via environment variables (or mounted secret files),
+> never inline in `config.yaml`.
+
+---
+
+## Which mode do I pick?
+
+```
+                       Do you have an existing IdP
+                    (Okta / Entra / Google / Keycloak)
+                      that already issues JWTs to your
+                            users or services?
+                                   |
+                  +----------------+----------------+
+                 yes                                no
+                  |                                  |
+        Callers are mostly                Do you want users to log in
+       machines/scripts/CI, or            WITH OpsRAG itself (its own
+       a gateway already injects          login screen, password + SSO,
+       a Bearer JWT per request?          first-party admin account)?
+                  |                                  |
+                 yes                       +---------+---------+
+                  |                       yes                 no
+            ->  mode: oidc                 |                   |
+                                     ->  mode: login    ->  mode: open
+                                                          (local dev /
+                                                           demo only)
+```
+
+Quick rules of thumb:
+
+- You are **evaluating OpsRAG locally** or running the compose demo
+  -> `open` (the default for the bundled compose stack).
+- You already run an **IdP and want OpsRAG to trust its tokens**, or
+  OpsRAG sits **behind a gateway** (Pomerium, oauth2-proxy, an API
+  gateway) that mints/forwards a JWT -> `oidc`.
+- You want OpsRAG to **be the login system** -- a hosted product with its
+  own login page, a real `admin` account, password and/or "Sign in with
+  Google" buttons -> `login`.
+
+### Mode comparison
+
+| Property | `open` | `oidc` | `login` |
+|---|---|---|---|
+| Identity source | none (anonymous) | external IdP JWT | OpsRAG's own users |
+| User database | no | no | yes (`opsrag_auth_user`) |
+| First-party admin account | no | no | yes (seeded from env) |
+| Credential the client sends | none | `Authorization: Bearer <JWT>` | signed session cookie |
+| Web UI shows a login screen | no | no (UI assumes a token/gateway) | yes |
+| SSO (Google / MS / GitHub) | -- | via your IdP | built in (`sso` block) |
+| Password login | -- | -- | yes (`password_enabled`) |
+| RBAC scopes enforced | no (all scopes) | yes (from token `groups`) | yes (from stored roles) |
+| Per-session ownership | no-op (anonymous) | yes | yes |
+| Required config | none | `issuer` + `audience` | `session.signing_key` + admin env |
+| Typical use | local dev, demo | API/CI, behind a gateway | hosted product |
+
+The default when **no `auth` block** is present is identical to
+`auth.mode: open` -- the verifier is absent and every request passes
+through with all scopes. Configure `auth` for any shared or production
+deployment.
+
+---
+
+## How verification works (oidc mode)
+
+In `oidc` mode every endpoint except the open paths below requires an
+`Authorization: Bearer <token>` header. The always-open paths are:
+`/healthz`, `/readyz`, the legacy `/health`, the schema/docs routes
+(`/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc`), the
+pre-auth branding endpoint `/ui-config`, the SCM webhooks
+(`/webhook/gitlab`, `/webhook/github`, which authenticate with their own
+HMAC secret), the first-party login surface (`/auth/*`), and the MCP wire
+protocol (`/mcp/sse`, `/mcp/messages`, which carry their own `opsrag_`
+bearer token).
+
+On startup the app builds a single OIDC verifier from the `auth` block
+and attaches it to the running app. For each protected request the
+verifier (`opsrag/auth/oidc.py`):
 
 1. Fetches `<issuer>/.well-known/openid-configuration` once (lazily, on
-   first use) and reads `jwks_uri` from it. The `issuer` returned by
-   discovery must match the configured `issuer`, or startup/verification
-   fails.
+   first use) and reads `jwks_uri`. The `issuer` returned by discovery
+   must match the configured `issuer`, or verification fails.
 2. Fetches the JWKS document and caches the signing keys by `kid` for
-   `jwksCacheSeconds`. Keys are refreshed on cache miss or TTL expiry, so
-   IdP key rotation is picked up automatically.
+   `jwks_cache_seconds`. Keys are refreshed on cache miss or TTL expiry,
+   so IdP key rotation is picked up automatically.
 3. Verifies the incoming JWT:
    - signature against the JWK whose `kid` matches the token header
    - `iss` claim equals the configured `issuer`
    - `aud` claim equals the configured `audience`
    - `exp` claim against the current wall clock (token not expired)
    - the token must also carry a `sub` claim
-4. Accepted RSA and ECDSA algorithms by default: RS256/384/512,
-   ES256/384/512, PS256/384/512.
+4. Accepted algorithms by default: RS256/384/512, ES256/384/512,
+   PS256/384/512 (RSA and ECDSA).
 
-On success the token's `sub` claim is propagated into request-scoped
-context for usage attribution. The `sub` is NEVER logged in cleartext and
-is never returned in responses. The Bearer token itself is never logged.
-
-If no `auth` block is configured, the verifier is absent and the API runs
-in local-dev open mode (all requests pass through). Configure `auth` for
-any shared or production deployment.
+On success the standard OIDC claims (`sub`, `email`, `name`, `picture`,
+and `groups` or `roles`) are read into a `CurrentUser`. The `sub` is
+propagated into request-scoped context for usage attribution; it is NEVER
+logged in cleartext and is never returned in responses. The Bearer token
+itself is never logged.
 
 ### Rejection envelope
 
@@ -52,71 +136,301 @@ A rejected request returns HTTP 401 with a stable JSON envelope:
 {"error": "unauthenticated", "reason": "<reason>", "request_id": "<uuid>"}
 ```
 
-`reason` is one of a closed set, mapped from the verification failure:
+`reason` is one of a closed set:
 
-| reason             | meaning                                              |
-|--------------------|------------------------------------------------------|
-| `missing_bearer`   | no `Authorization: Bearer ...` header on the request |
-| `invalid_signature`| signature/kid/malformed token (catch-all reject)     |
-| `issuer_mismatch`  | token `iss` does not match `auth.issuer`             |
-| `audience_mismatch`| token `aud` does not match `auth.audience`           |
-| `expired`          | token `exp` is in the past                            |
+| reason              | meaning                                              |
+|---------------------|------------------------------------------------------|
+| `missing_bearer`    | no `Authorization: Bearer ...` header                |
+| `invalid_signature` | signature/kid/malformed token (catch-all reject)     |
+| `issuer_mismatch`   | token `iss` does not match `auth.issuer`             |
+| `audience_mismatch` | token `aud` does not match `auth.audience`           |
+| `expired`           | token `exp` is in the past                           |
 
-The `request_id` is also stamped onto logs for the same request so a
+The `request_id` is also stamped onto logs for the same request, so a
 rejection can be correlated without logging the token.
 
-## Config block
+A 401 means "re-authenticate". A **403** with `{"error": "forbidden",
+"reason": "missing_scope", "scope": "<scope>"}` means "authenticated, but
+you lack the required scope" -- see [Scopes and roles](#scopes-and-roles).
+
+---
+
+## oidc mode setup
+
+### Config block
 
 ```yaml
 auth:
+  mode: oidc
   issuer: https://your-idp.example.com   # OIDC discovery base URL (required)
   audience: opsrag                       # expected token "aud" (required)
   jwks_cache_seconds: 300                # signing-key cache TTL (default 300)
+  # Optional RBAC: map an IdP group/role claim value -> opsrag roles.
+  role_mappings:
+    sre-admins: [admin]
+    oncall:     [member_investigate]
 ```
 
-- `issuer` - the OIDC issuer base URL. opsrag appends
+- `issuer` -- the OIDC issuer base URL. OpsRAG appends
   `/.well-known/openid-configuration` to discover the JWKS. Must exactly
-  match the `iss` claim your IdP puts in tokens (no trailing slash needed;
-  it is normalized).
-- `audience` - the value opsrag requires in the token `aud` claim. Set this
-  to the client/application/API identifier your IdP issues tokens for.
-- `jwks_cache_seconds` - how long signing keys are cached before refetch.
+  match the `iss` claim your IdP puts in tokens (trailing slash is
+  normalized).
+- `audience` -- the value OpsRAG requires in the token `aud` claim. Set
+  this to the client / application / API identifier your IdP issues
+  tokens for.
+- `jwks_cache_seconds` -- how long signing keys are cached before refetch.
+- `role_mappings` -- optional `{group: [roles]}`. Empty means every
+  authenticated user gets the default `member_investigate` role (chat +
+  investigate). See [Scopes and roles](#scopes-and-roles).
 
-The compose quickstart sets these via environment, e.g.
-`OPSRAG_OIDC_ISSUER`.
+`auth.mode: oidc` requires BOTH `issuer` and `audience` -- config load
+fails fast otherwise.
 
-## First-party login mode (`auth.mode: login`) + the admin user
+The compose quickstart sets these via environment (e.g.
+`OPSRAG_OIDC_ISSUER`).
 
-`oidc` mode has **no user database** — identity comes entirely from the IdP's
-token, so there is no "admin account" to sign in with. To run opsrag's own
-login (email + password, SSO, cookie sessions) with a real **admin user**,
-switch to `login` mode:
+### Bundled Dex demo issuer
+
+The compose quickstart ships a Dex instance as a local OIDC issuer with a
+static user (`evaluator@example.com` / `evaluator`) and a static client
+`opsrag-local`. Dex supports the resource-owner password grant, so you
+can mint a token without a browser:
+
+```sh
+TOKEN=$(curl -s http://localhost:5556/dex/token \
+  -d grant_type=password \
+  -d client_id=opsrag-local \
+  -d client_secret=local-secret \
+  -d username=evaluator@example.com \
+  -d password=evaluator \
+  -d scope="openid email profile" \
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['id_token'])")
+
+curl -s http://localhost:8080/usage -H "Authorization: Bearer $TOKEN"
+```
+
+- issuer: the Dex issuer URL (see the gotcha below).
+- audience: the Dex client id, `opsrag-local` in the bundled config. Dex
+  puts the client id into the token `aud`, so `auth.audience` must equal
+  it.
+
+This Dex config is for local eval only. Do not use the placeholder client
+secret or static password outside local development. (The compose demo
+itself runs in `open` mode, so this Dex token is accepted but not
+required -- it exists to demonstrate the `oidc` path.)
+
+#### The Dex issuer-vs-cluster-host gotcha
+
+Dex advertises a single canonical issuer in its config and in every
+token's `iss` claim. The bundled Dex sets:
+
+```yaml
+issuer: http://localhost:5556/dex
+```
+
+Inside the compose network, however, the API container reaches Dex by its
+service name at `http://dex:5556/dex`, not `localhost`. This creates a
+mismatch: tokens carry `iss = http://localhost:5556/dex`, but the API may
+be configured with `issuer: http://dex:5556/dex` for in-cluster
+discovery. Discovery and `iss` verification then fail
+(`issuer_mismatch`), because the verifier requires the
+discovered/configured issuer to match the token `iss` exactly.
+
+Align them on ONE value used everywhere -- in the Dex `issuer` field, in
+the token `iss`, and in `auth.issuer`:
+
+- Simplest: set Dex `issuer` to the host the API uses to reach it (e.g.
+  `http://dex:5556/dex`), and set `auth.issuer` to that same value. The
+  browser/UI must then also be able to resolve `dex` (e.g. via a hosts
+  entry, or run the token exchange from inside the network).
+- Alternatively, keep `issuer: http://localhost:5556/dex` and make the
+  API resolve `localhost:5556` to the Dex container (shared network
+  namespace or a host alias), then set
+  `auth.issuer: http://localhost:5556/dex`.
+
+The rule: Dex `issuer`, the token `iss`, and `auth.issuer` must be
+byte-for-byte the same string, and every party must be able to reach that
+URL.
+
+### Production IdPs
+
+For every provider the two tasks are the same: make `auth.issuer` match
+the token `iss`, and make `auth.audience` match the token `aud`. Always
+confirm against a DECODED sample token (paste it into a JWT decoder, or
+`python3 -c "import jwt,sys;print(jwt.decode(sys.argv[1],options={'verify_signature':False}))" <token>`).
+
+#### Okta
+
+```yaml
+auth:
+  mode: oidc
+  issuer: https://your-org.okta.com/oauth2/<authServerId>
+  audience: api://opsrag
+```
+
+- issuer: your authorization server issuer, e.g.
+  `https://your-org.okta.com/oauth2/<authServerId>` (or
+  `https://your-org.okta.com/oauth2/default` for the default server).
+- audience: the "Audience" configured on that Okta authorization server,
+  often an API URI like `api://opsrag`. Set `auth.audience` to that exact
+  value.
+- Use a CUSTOM authorization server so you control the `aud`. Tokens
+  minted by the bare org authorization server may not carry a usable
+  `aud`.
+- Getting a token: register an OIDC app (or API service app for
+  machine-to-machine), then use the standard Okta `/v1/token` flow (e.g.
+  client-credentials for services, authorization-code for browsers) and
+  send the resulting access token as the Bearer.
+
+#### Microsoft Entra ID (Azure AD)
+
+```yaml
+auth:
+  mode: oidc
+  issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+  audience: api://<client-id>   # or the bare <client-id>
+```
+
+- issuer: `https://login.microsoftonline.com/<tenant-id>/v2.0`. Discovery
+  is at `.../v2.0/.well-known/openid-configuration`. Use the v2.0
+  endpoint so the `iss` claim is predictable.
+- audience: the Application (client) ID of the API app registration, or
+  its Application ID URI (e.g. `api://<client-id>`). Entra access tokens
+  set `aud` to that value.
+- Gotcha: Entra tokens also carry an `azp` (authorized party) claim for
+  the calling client; OpsRAG verifies `aud`, NOT `azp`. Make sure the
+  token's `aud` equals `auth.audience`. v1.0 vs v2.0 endpoints emit
+  different `aud`/`iss` shapes -- confirm with a decoded sample.
+- Getting a token: register an app, expose an API (App ID URI), grant the
+  caller the API permission, then run the OAuth2 flow that fits the caller
+  (client-credentials for services, auth-code for browsers).
+
+#### Google
+
+```yaml
+auth:
+  mode: oidc
+  issuer: https://accounts.google.com
+  audience: <your-google-oauth-client-id>.apps.googleusercontent.com
+```
+
+- issuer: `https://accounts.google.com`. Discovery is at
+  `https://accounts.google.com/.well-known/openid-configuration`.
+- audience: the OAuth 2.0 Client ID that requested the ID token; Google
+  puts it in the `aud` claim. Set `auth.audience` to that client ID.
+- Note: OpsRAG verifies the Google **ID token** (a JWT). Google OAuth
+  *access* tokens are opaque and not verifiable here -- send the
+  `id_token`. For human users who should log in *with* Google rather than
+  present a pre-minted token, prefer `login` mode with the Google SSO
+  block below.
+
+#### Keycloak
+
+```yaml
+auth:
+  mode: oidc
+  issuer: https://your-keycloak.example.com/realms/<realm>
+  audience: opsrag
+```
+
+- issuer: `https://your-keycloak.example.com/realms/<realm>`. Per-realm
+  discovery lives at `.../realms/<realm>/.well-known/openid-configuration`.
+- audience: by default Keycloak does not put your client id in `aud`
+  unless you add an audience mapper. Either add an "Audience" protocol
+  mapper that emits the value you set in `auth.audience`, or set
+  `auth.audience` to a value Keycloak does include. Verify a sample token.
+
+#### Auth0
+
+```yaml
+auth:
+  mode: oidc
+  issuer: https://your-tenant.us.auth0.com/
+  audience: https://api.opsrag.example.com
+```
+
+- issuer: `https://your-tenant.us.auth0.com/` (Auth0 issuers include the
+  trailing slash in `iss`; the verifier normalizes it, but keep both
+  sides consistent).
+- audience: the API Identifier of the Auth0 API you created. The client
+  must REQUEST that audience when fetching the token; without a requested
+  audience Auth0 returns an opaque token, not a verifiable JWT.
+
+---
+
+## login mode setup (first-party accounts)
+
+`login` mode makes OpsRAG its own identity system: it runs a login
+screen, stores users (email + password and/or federated SSO links),
+issues signed cookie sessions, and seeds a real `admin` account. There is
+no OIDC verifier in this mode -- the global middleware enforces a valid
+session cookie on every protected route instead.
+
+### Minimal config
 
 ```yaml
 auth:
   mode: login
-  session:
+  login:
+    password_enabled: true                        # email + password login
     signing_key_env: OPSRAG_SESSION_SIGNING_KEY   # signs session cookies
-    password_enabled: true                        # enable email + password login
+    # External URL the BROWSER uses to reach the API (for SSO redirects):
+    sso_callback_base: https://opsrag.example.com/api
+    cookie_secure: true                           # require HTTPS (default true)
+    cookie_samesite: lax                          # lax | strict | none
+    session_ttl_seconds: 900                      # session cookie lifetime
+    refresh_ttl_seconds: 1209600                  # refresh token lifetime (14d)
 ```
 
-Then supply the secrets via environment — never inline in committed config:
+The user store backs onto Postgres when `session.provider: postgres` and
+a DSN is available; otherwise it falls back to an in-memory store (fine
+for a single replica / dev, but users and sessions are lost on restart
+and not shared across replicas). For a real deployment use Postgres:
+
+```yaml
+session:
+  provider: postgres
+  dsn_env: POSTGRES_DSN
+```
+
+### Secrets via environment
+
+Never put key material or passwords in committed config. Supply them as
+env vars (or mounted secret files):
 
 ```sh
-# A random key (>= 32 bytes) signs session cookies. Generate one, e.g.:
+# A random key (>= 32 bytes) signs the session cookies. Generate one:
 #   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 OPSRAG_SESSION_SIGNING_KEY=<your-32+-byte-random-key>
 
 # The bootstrap admin -- choose your OWN email + password.
 OPSRAG_ADMIN_EMAIL=admin@opsrag.local
 OPSRAG_ADMIN_PASSWORD=<choose-a-strong-password>
+
+# Postgres DSN (when session.provider: postgres).
+POSTGRES_DSN=postgresql://opsrag:...@postgres:5432/opsrag
 ```
 
-There is nothing to "retrieve": on startup opsrag **seeds** this admin user
-(role `admin`) from those two env vars if it does not already exist —
+The signing key is loaded ONLY from `signing_key_path` (a file) or
+`signing_key_env` (an env var); inline key material in config is refused
+at load time (`opsrag/auth/sessions.py: load_signing_key`). For
+production, prefer a mounted secret file:
+
+```yaml
+auth:
+  login:
+    signing_key_path: /run/secrets/opsrag-session-key
+```
+
+### The admin user
+
+There is nothing to "retrieve": on startup, when `auth.mode: login`,
+OpsRAG **seeds** an admin user (role `admin`) from `OPSRAG_ADMIN_EMAIL` +
+`OPSRAG_ADMIN_PASSWORD` if that email does not already exist. It is
 idempotent, and the password is read only from the env var (or a mounted
-secret in production), never from config (`api/server.py`). Log in to get a
-session cookie, then call the API with it:
+secret), never from config (`opsrag/api/server.py`).
+
+Log in to get a session cookie, then call the API with it:
 
 ```sh
 curl -sf -X POST http://localhost:8080/auth/login \
@@ -128,195 +442,320 @@ curl -sf -X POST http://localhost:8080/query -b cookies.txt \
   -d '{"query":"How do I roll back an Acme Notes deployment?"}' | jq
 ```
 
-The web UI presents a login screen in this mode. To add SSO (Google / GitHub /
-Microsoft-Entra) on top of password login, configure the `sso` block alongside
-the provider setup below. The admin user can list and manage **every**
-conversation; other users are scoped to their own (see
-[Per-session ownership](#per-session-ownership)).
+The web UI presents a login screen in this mode. It calls
+`GET /auth/providers` first to learn which methods are available
+(`password_enabled` plus the list of enabled SSO providers), so the login
+page renders exactly the buttons you configured.
 
-## Per-provider setup
+### Session, refresh, and CSRF cookies
 
-For all providers below, replace placeholder hosts and IDs with your own.
-The key task is making the configured `issuer` match the token `iss`, and
-the configured `audience` match the token `aud`.
+On a successful login (password or SSO) the server sets three cookies via
+`SessionManager` (`opsrag/auth/sessions.py`):
 
-### Dex (bundled local issuer)
+| Cookie | Purpose | Notes |
+|---|---|---|
+| `opsrag_session` | short-lived signed session (`session_ttl_seconds`, default 15m) | carries the user id, email, and baked-in roles |
+| `opsrag_refresh` | rotating refresh token (`refresh_ttl_seconds`, default 14d) | stored server-side as a SHA-256 hash only; rotated on each `POST /auth/refresh` |
+| `opsrag_csrf` | double-submit CSRF token | |
 
-The compose quickstart ships a Dex instance as a local OIDC issuer with a
-static user (`evaluator@example.com` / `evaluator`) and a static client
-`opsrag-local`. Dex supports the resource-owner password grant, so you can
-mint a token without a browser:
+`POST /auth/refresh` rotates the refresh token (revokes the presented
+one, issues a fresh session). `POST /auth/logout` clears the cookies and
+revokes the presented refresh session.
 
-```sh
-curl -s http://localhost:5556/dex/token \
-  -d grant_type=password \
-  -d client_id=opsrag-local \
-  -d client_secret=local-secret \
-  -d username=evaluator@example.com \
-  -d password=evaluator \
-  -d scope="openid email profile" \
-  | python3 -c "import sys, json; print(json.load(sys.stdin)['id_token'])"
-```
+### SSO providers (Google / Microsoft / GitHub)
 
-Use the returned `id_token` as the Bearer token:
-
-```sh
-TOKEN=$(curl -s http://localhost:5556/dex/token \
-  -d grant_type=password -d client_id=opsrag-local \
-  -d client_secret=local-secret -d username=evaluator@example.com \
-  -d password=evaluator -d scope="openid email profile" \
-  | python3 -c "import sys, json; print(json.load(sys.stdin)['id_token'])")
-
-curl -s http://localhost:8080/usage -H "Authorization: Bearer $TOKEN"
-```
-
-- issuer: the Dex issuer URL (see the gotcha below).
-- audience: the Dex client id, `opsrag-local` in the bundled config. Dex
-  puts the client id into the token `aud`, so `auth.audience` must equal it.
-
-This Dex config is for local eval only. Do not use the placeholder client
-secret or static password outside local development.
-
-#### Local-Dex issuer-vs-cluster-host gotcha
-
-Dex advertises a single canonical issuer in its config and in every token's
-`iss` claim. The bundled Dex sets:
+Add SSO on top of (or instead of) password login via the `sso` block.
+For SSO-only, set `password_enabled: false`.
 
 ```yaml
-issuer: http://localhost:5556/dex
+auth:
+  mode: login
+  login:
+    password_enabled: true
+    signing_key_env: OPSRAG_SESSION_SIGNING_KEY
+    # MUST match the redirect URI you register with each IdP. This is the
+    # external base URL the browser uses, including any reverse-proxy
+    # prefix (e.g. the UI proxy's /api). The callback path appended is
+    # /auth/sso/{provider}/callback.
+    sso_callback_base: https://opsrag.example.com/api
+  sso:
+    google:
+      enabled: true
+      client_id: "<google-oauth-client-id>.apps.googleusercontent.com"
+      client_secret_env: OPSRAG_SSO_GOOGLE_SECRET
+      # scopes default to openid/email/profile if omitted
+    microsoft:
+      enabled: true
+      client_id: "<entra-app-client-id>"
+      client_secret_env: OPSRAG_SSO_MICROSOFT_SECRET
+      # Single-tenant? Pin the tenant issuer metadata (else the common
+      # multi-tenant endpoint is used):
+      server_metadata_url: "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"
+    github:
+      enabled: true
+      client_id: "<github-oauth-app-client-id>"
+      client_secret_env: OPSRAG_SSO_GITHUB_SECRET
 ```
 
-Inside the compose network, however, the API container reaches Dex by its
-service name at `http://dex:5556/dex`, not `localhost`. This creates a
-mismatch: tokens carry `iss = http://localhost:5556/dex`, but the API may
-be configured with `issuer: http://dex:5556/dex` for in-cluster discovery.
-Discovery and `iss` verification will then fail (`issuer_mismatch`), because
-the verifier requires the discovered/configured issuer to match the token
-`iss` exactly.
+Client SECRETS come from the named env var only, never inline:
 
-Align them on ONE value used everywhere - in the Dex `issuer` field, in the
-token `iss`, and in `auth.issuer`:
+```sh
+OPSRAG_SSO_GOOGLE_SECRET=<google-oauth-client-secret>
+OPSRAG_SSO_MICROSOFT_SECRET=<entra-client-secret>
+OPSRAG_SSO_GITHUB_SECRET=<github-oauth-app-secret>
+```
 
-- Simplest for the quickstart: set Dex `issuer` to the same host the API
-  uses to reach it (for example `http://dex:5556/dex`), and set
-  `auth.issuer` to that same value. The browser/UI must then also be able
-  to resolve `dex` (for example via a hosts entry or by running the token
-  exchange from inside the network).
-- Alternatively, keep `issuer: http://localhost:5556/dex` and make the API
-  resolve `localhost:5556` to the Dex container (shared network namespace or
-  a host alias), then set `auth.issuer: http://localhost:5556/dex`.
+**Registering the OAuth apps.** In each provider's console, register an
+OAuth/OIDC application and set the Authorized redirect URI to:
 
-The rule: Dex `issuer`, the token `iss`, and `auth.issuer` must be byte-for-
-byte the same string, and every party must be able to reach that URL.
+```
+<sso_callback_base>/auth/sso/<provider>/callback
+```
 
-### Keycloak
+e.g. `https://opsrag.example.com/api/auth/sso/google/callback`,
+`.../auth/sso/microsoft/callback`, `.../auth/sso/github/callback`. The
+`sso_callback_base` MUST be the URL the BROWSER can reach (including any
+reverse-proxy path prefix). If `sso_callback_base` is unset, OpsRAG
+derives the redirect from the inbound request, which is only correct when
+the API is hit directly (not behind a path-stripping proxy) -- set it
+explicitly in production.
 
-- issuer: `https://your-keycloak.example.com/realms/<realm>`. Keycloak's
-  per-realm discovery lives at
-  `https://your-keycloak.example.com/realms/<realm>/.well-known/openid-configuration`.
-- audience: by default Keycloak does not put your client id in `aud` unless
-  you add an audience mapper. Either add a "Audience" protocol mapper that
-  emits the value you set in `auth.audience`, or set `auth.audience` to a
-  value Keycloak does include. Verify the actual `aud` of a sample token.
+- **google** / **microsoft** are OIDC: discovered via
+  `server_metadata_url` (defaults to the provider's well-known endpoint;
+  Microsoft defaults to the multi-tenant `common` endpoint -- override
+  `server_metadata_url` for single-tenant). The returned `id_token` is
+  validated (signature, `iss`, `aud`, `exp`, and the `nonce`).
+- **github** is plain OAuth2 (no `id_token`): OpsRAG exchanges the code,
+  then reads `/user` + `/user/emails` to find the PRIMARY VERIFIED email.
 
-### Okta
+The SSO flow is terminated server-side (Authorization Code, no browser
+PKCE) and protected by a signed single-use `state` (CSRF) and an OIDC
+`nonce` (replay protection).
 
-- issuer: your authorization server issuer, for example
-  `https://your-org.okta.com/oauth2/<authServerId>` (or
-  `https://your-org.okta.com/oauth2/default` for the default server).
-- audience: the audience configured on that Okta authorization server (the
-  "Audience" field, often an API URI like `api://opsrag`). Set
-  `auth.audience` to that exact value. Tokens minted by the org
-  authorization server (no custom server) may not carry a usable `aud`; use
-  a custom authorization server so you control the `aud`.
+**Account-takeover guard (important).** A federated identity is
+auto-linked to an existing local account by email ONLY when the IdP
+asserts `email_verified`. If the IdP does not assert a verified email,
+OpsRAG refuses to link to an existing account and instead creates a fresh
+federated-only account (or returns a clear error on an email clash). This
+prevents an unverified-email IdP response from taking over a
+password/local account.
 
-### Auth0
+A brand-new SSO user is created with the default `member_investigate`
+role (chat + investigate); promote them via the admin Users & Roles view
+(see below).
 
-- issuer: `https://your-tenant.us.auth0.com/` (Auth0 issuers include the
-  trailing slash in the `iss` claim; the verifier normalizes trailing
-  slashes, but keep issuer and `auth.issuer` consistent).
-- audience: the API Identifier of the Auth0 API you created, for example
-  `https://api.opsrag.example.com`. The client must request that audience
-  when fetching the token, and `auth.audience` must equal it. Without a
-  requested audience Auth0 returns an opaque token, not a verifiable JWT.
+---
 
-### Azure AD (Microsoft Entra ID)
+## Scopes and roles
 
-- issuer: `https://login.microsoftonline.com/<tenant-id>/v2.0`. Discovery
-  is at
-  `https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration`.
-  Use the v2.0 endpoint so the `iss` claim is predictable.
-- audience: the Application (client) ID of the API app registration, or the
-  Application ID URI (for example `api://<client-id>`). Entra access tokens
-  set `aud` to that value; set `auth.audience` to match.
-- gotcha: Entra tokens also carry an `azp` (authorized party) claim for the
-  calling client; opsrag verifies `aud`, not `azp`. Make sure the token's
-  `aud` (not just `azp`) equals `auth.audience`. Confirm with a decoded
-  sample token, since v1.0 and v2.0 endpoints emit different `aud`/`iss`
-  shapes.
+Authorization is by **scope**, not role. Handlers gate on scopes; roles
+are just named bundles of scopes. The single source of truth is
+`opsrag/auth/scopes.py`.
+
+### The four scopes
+
+| Scope | Grants | Example endpoints |
+|---|---|---|
+| `chat` | ask questions, read/delete your OWN sessions, submit corrections | `POST /query`, `GET/DELETE /sessions/{id}`, `POST /correction` |
+| `investigate` | run incident investigations (also implies `chat`) | `POST /investigations/...` |
+| `mcp` | mint / list / revoke your own MCP bearer tokens | `POST/GET/DELETE /api/mcp/tokens` |
+| `admin` | everything: usage/cost org-wide, indexing, correction review, cache purge, user & role management, MCP audit log | `GET /admin/usage`, `POST /index/repo`, `GET/PUT /admin/...`, `GET /admin/users`, `PUT /admin/users/{id}/roles` |
+
+A missing scope returns **403** with
+`{"error": "forbidden", "reason": "missing_scope", "scope": "<scope>"}`
+-- distinct from the **401** the auth layer raises for an
+unauthenticated request.
+
+### The role -> scope map
+
+| Role | Scopes |
+|---|---|
+| `admin` | `chat` + `investigate` + `mcp` + `admin` |
+| `member_investigate` (the default) | `chat` + `investigate` |
+| `member_chat` | `chat` |
+| `member_mcp` | `mcp` |
+
+`member_investigate` is the default role for an authenticated user with no
+explicit mapping -- a signed-in user is never left with zero scopes.
+Unknown role names contribute no scopes (default-deny).
+
+### How users get roles
+
+- **open mode**: every (anonymous) user carries ALL scopes; `require_scope`
+  always allows. This preserves zero-config behavior.
+- **oidc mode**: roles are derived from the token's `groups` (or `roles`)
+  claim via `auth.role_mappings` (`{group: [roles]}`). A user whose groups
+  match nothing gets `member_investigate`. Example:
+
+  ```yaml
+  auth:
+    mode: oidc
+    issuer: https://your-org.okta.com/oauth2/default
+    audience: api://opsrag
+    role_mappings:
+      sre-admins:    [admin]
+      oncall:        [member_investigate]
+      readonly-team: [member_chat]
+  ```
+
+  Make sure your IdP actually emits the matching group values in a
+  `groups` (or `roles`) claim on the access token.
+
+- **login mode**: roles are stored on the user record. The seeded admin
+  gets `admin`; new password and SSO users get `member_investigate`.
+  Admins change roles in the UI's Users & Roles view, which calls:
+
+  ```sh
+  # List users with their roles + derived scopes (admin scope required).
+  curl -sf http://localhost:8080/admin/users -b cookies.txt | jq
+
+  # Replace a user's roles (admin scope required).
+  curl -sf -X PUT http://localhost:8080/admin/users/<user-id>/roles \
+    -b cookies.txt -H 'Content-Type: application/json' \
+    -d '{"roles": ["member_investigate", "member_mcp"]}' | jq
+  ```
+
+  Role names are validated against the catalog (unknown -> 400). An admin
+  cannot strip their OWN `admin` role (self-lockout guard). Changing a
+  user's roles revokes their refresh sessions, so the new roles take
+  effect on their next sign-in / refresh rather than only after the old
+  (15-min) session cookie expires.
+
+Because the UI's nav gating and the server-side guards both read
+`has_scope` from the same scope model, the UI never shows a control the
+server then 403s on.
+
+---
+
+## MCP token auth
+
+External MCP clients (Claude Code's `mcp-remote`, Cursor, etc.) connect
+to OpsRAG's MCP wire protocol (`GET /api/mcp/sse`, `POST /api/mcp/messages`)
+using a dedicated bearer token, NOT a session cookie or OIDC JWT. These
+`opsrag_`-prefixed tokens are minted by an authenticated user who holds
+the `mcp` scope.
+
+### Minting a token
+
+`POST /api/mcp/tokens` is browser/session-authed (it requires the `mcp`
+scope), so call it with whatever credential your mode uses -- a session
+cookie in `login` mode, an OIDC bearer in `oidc` mode:
+
+```sh
+# login mode (session cookie):
+curl -sf -X POST http://localhost:8080/api/mcp/tokens -b cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "claude-code-laptop", "expires_in_days": 90}' | jq
+
+# oidc mode (OIDC bearer):
+curl -sf -X POST http://localhost:8080/api/mcp/tokens \
+  -H "Authorization: Bearer $OIDC_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "ci-runner", "expires_in_days": 30}' | jq
+```
+
+Request body:
+
+- `name` (required) -- human label shown in the token list (1-120 chars).
+- `expires_in_days` (optional) -- 1-365; `null` means never expires.
+
+The response includes the plaintext token EXACTLY ONCE:
+
+```json
+{
+  "id": "<uuid>",
+  "name": "claude-code-laptop",
+  "token": "opsrag_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "created_at": "2026-06-16T12:00:00Z",
+  "expires_at": "2026-09-14T12:00:00Z"
+}
+```
+
+Store the `token` value immediately -- it is hashed at rest and is NOT
+retrievable again. (Minting requires a concrete identified user; in
+`open` mode the anonymous user has no id, so minting is refused.)
+
+### Listing and revoking
+
+```sh
+# List your tokens (metadata only, no plaintext):
+curl -sf http://localhost:8080/api/mcp/tokens -b cookies.txt | jq
+
+# Revoke one of your tokens by id (204 on success):
+curl -sf -X DELETE http://localhost:8080/api/mcp/tokens/<token-id> -b cookies.txt
+```
+
+You can only list/revoke your OWN tokens. Admins can review usage across
+the org via the MCP audit log (admin scope).
+
+### Using the token
+
+Point your MCP client at the SSE endpoint with the token as a Bearer:
+
+```
+Authorization: Bearer opsrag_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+The wire-protocol endpoints validate the token in-handler (against
+`MCPTokenStore`) and 401 on missing / invalid / revoked / expired tokens;
+they bypass the global session/OIDC enforcement because they are
+self-protecting.
+
+---
 
 ## Per-session ownership
 
-Authentication answers *who is calling*; ownership answers *what they may
-touch*. A conversation thread (session) is owned by the verified identity
-that created it, and only that owner can read or delete it. The owner is the
-caller's stable subject id (`current_user.oid`, derived from the JWT `sub`
-in `oidc` mode or the SSO/`sub` identity in `login` mode), recorded into the
-checkpoint metadata as `user_id` when the thread is first written.
+Authentication answers "who is calling"; ownership answers "what they may
+touch". A conversation thread (session) is owned by the verified identity
+that created it, and only that owner can read or delete it.
 
-### Enforcement
+The owner is the caller's stable subject id (`current_user.oid`, the JWT
+`sub` in `oidc` mode or the session user id in `login` mode), recorded
+into the thread's metadata when it is first written.
 
-On every single-thread read or delete (for example `GET /sessions/{thread_id}`,
-`GET /sessions/{thread_id}/messages`, `DELETE /sessions/{thread_id}`), opsrag
-looks up the thread's recorded owner via `store.get_session_owner(thread_id)`
-and compares it to the caller. The check lives in
-`opsrag/api/routes.py:_deny_if_not_owner`:
+On every single-thread read or delete (e.g. `GET /sessions/{id}`,
+`GET /sessions/{id}/messages`, `DELETE /sessions/{id}`), OpsRAG compares
+the thread's recorded owner to the caller
+(`opsrag/api/routes.py: _deny_if_not_owner`). Three deliberate
+properties:
 
-```python
-if _is_real_owner(owner) and owner != current_user.oid:
-    raise HTTPException(status_code=404, detail="session not found")
-```
-
-Three deliberate properties:
-
-- **Cross-user access returns 404, not 403.** A non-owner gets "session not
-  found" — the same response as a thread that does not exist. Returning 403
-  would be an existence oracle, leaking that the thread is real but
-  forbidden. 404 reveals nothing.
-- **Open / anonymous mode is unenforced.** When the caller is anonymous
-  (`current_user.is_anonymous` or no `oid` — i.e. `auth.mode: open`, no
-  `auth` block, or a request with no usable identity), the ownership check
-  is a no-op. This preserves zero-config local-dev behavior where every
+- **Cross-user access returns 404, not 403.** A non-owner gets "session
+  not found" -- the same response as a thread that does not exist.
+  Returning 403 would be an existence oracle.
+- **Open / anonymous mode is a no-op.** When the caller is anonymous
+  (open mode, or no usable identity), ownership is not enforced -- every
   caller shares one anonymous identity.
 - **Legacy anonymous-owned threads are grandfathered.** Threads created
-  before owner binding existed have an empty or `"anonymous"` owner.
-  `_is_real_owner` treats only a non-empty, non-`"anonymous"` owner as a
-  lockable identity, so these pre-auth threads stay readable and deletable
-  by anyone. opsrag cannot retroactively assign them an owner, so locking
-  them down would orphan them; only threads with a real authenticated owner
-  are guarded.
+  before owner binding existed (empty or `"anonymous"` owner) stay
+  readable/deletable by anyone; only threads with a real authenticated
+  owner are guarded.
 
-Ownership binds to the *verified* id. A client may still pass a `user_id` in
-the request body for memory/personalization, but it never overrides the
-owner binding — that always uses `current_user.oid`.
+Ownership binds to the VERIFIED id. A client may still pass a `user_id`
+in the request body for memory/personalization, but it never overrides
+the owner binding.
+
+> Note: **investigations are shared, not owner-scoped.** They are gated by
+> the `investigate` scope and visible to everyone who holds it -- by
+> design, since an incident is a team artifact. Sessions and usage are
+> owner-scoped; investigations are scope-gated and shared.
+
+---
 
 ## Rate limiting
 
-opsrag applies two independent throttles, both backed by a pluggable
+OpsRAG applies two independent throttles, both backed by a pluggable
 storage seam (`opsrag/api/rate_limit_backend.py`):
 
-1. **Per-request rate limit** — `RateLimitMiddleware` caps requests per key
-   (per client) to `api.rate_limit_rpm` requests per minute. Over the limit
-   returns HTTP 429 with a `Retry-After`.
-2. **Login lockout** — `LoginRateLimiter` (used only in `auth.mode: login`)
-   throttles failed `POST /auth/login` attempts. After
-   `login_max_attempts` failures within `login_window_seconds`, the
-   key (email/IP) is locked for `login_lockout_seconds`; a successful login
+1. **Per-request rate limit** -- `RateLimitMiddleware` caps requests per
+   client to `api.rate_limit_rpm` per minute. Over the limit returns HTTP
+   429 with a `Retry-After`.
+2. **Login lockout** -- `LoginRateLimiter` (used only in `auth.mode:
+   login`) throttles failed `POST /auth/login` attempts. After
+   `login_max_attempts` failures within `login_window_seconds`, the key
+   (email + IP) is locked for `login_lockout_seconds`; a successful login
    clears the counter.
 
 ### Backend selection: memory vs redis
-
-`api.rate_limit_backend` selects where the throttle state lives:
 
 ```yaml
 api:
@@ -326,32 +765,96 @@ api:
   redis_url_env: OPSRAG_REDIS_URL   # env var holding the Redis URL
 ```
 
-- `memory` (default) — in-process counters. Correct and dependency-free for
-  a **single replica**, but state is per-process: with multiple replicas
-  each enforces its own limit, so the effective aggregate limit is
-  `rpm x replicas` and a login lockout on one pod is not seen by the others.
-- `redis` — shared state across replicas. The request limiter uses an atomic
-  fixed-window counter (`INCR` + `EXPIRE`); login uses a failure counter plus
-  a `SETEX` lockout key whose TTL is the authoritative retry-after. Use this
-  for any horizontally-scaled deployment.
+- `memory` (default) -- in-process counters. Correct and dependency-free
+  for a SINGLE replica, but per-process: with multiple replicas each
+  enforces its own limit (effective aggregate = `rpm x replicas`) and a
+  login lockout on one pod is not seen by the others.
+- `redis` -- shared state across replicas. Use this for any
+  horizontally-scaled deployment.
 
-**Redis is REQUIRED when selected.** `redis` is an optional extra (the
-`redis` import is lazy, so the API stays importable without it). When
-`rate_limit_backend: redis`, opsrag reads the URL from `redis_url_env`,
-`PING`s the server at startup, and **fails fast** if it is unreachable —
-there is no silent fallback to in-memory, because a half-enforced limiter is
-worse than a loud boot failure. The session config also exposes
-`login_max_attempts` / `login_window_seconds` / `login_lockout_seconds`
-(under `auth.login`) so both throttles ride the same backend.
+**Redis is REQUIRED when selected.** With `rate_limit_backend: redis`,
+OpsRAG reads the URL from `redis_url_env`, `PING`s at startup, and FAILS
+FAST if it is unreachable -- there is no silent fallback to in-memory.
+The login lockout thresholds live under `auth.login`
+(`login_max_attempts` / `login_window_seconds` / `login_lockout_seconds`)
+and ride the same backend when it is `redis`.
 
-See [`operations.md`](./operations.md#rate-limiting-across-replicas) for the
-multi-replica deployment checklist.
+See [`operations.md`](./operations.md#rate-limiting-across-replicas) for
+the multi-replica checklist.
+
+---
+
+## Production hardening checklist
+
+General
+
+- [ ] Set `auth.mode` to `oidc` or `login`. Never run `open` mode on a
+      shared or internet-reachable deployment.
+- [ ] Terminate TLS in front of OpsRAG; serve every route over HTTPS.
+- [ ] Restrict the always-open paths (`/docs`, `/redoc`, `/openapi.json`)
+      at the gateway if you do not want the schema public.
+- [ ] Keep secrets in env vars or mounted secret files -- never inline in
+      `config.yaml`. Tokens already live behind `*_env` indirection.
+
+oidc mode
+
+- [ ] `issuer` and `audience` are set and confirmed against a DECODED
+      sample token (`iss`/`aud` match exactly).
+- [ ] Use a CUSTOM authorization server / API registration so you control
+      the `aud` (Okta, Entra, Auth0, Keycloak audience mapper).
+- [ ] Configure `role_mappings` for least privilege (don't leave everyone
+      at the default `member_investigate` if some should be admins or
+      chat-only).
+- [ ] Confirm your IdP emits the `groups` (or `roles`) claim that your
+      `role_mappings` keys on.
+
+login mode
+
+- [ ] `OPSRAG_SESSION_SIGNING_KEY` is a fresh, high-entropy value (>= 32
+      bytes), distinct per environment, and rotated periodically (prefer
+      `signing_key_path` to a mounted secret).
+- [ ] `OPSRAG_ADMIN_PASSWORD` is strong and supplied via a secret;
+      consider changing it (or disabling password and using SSO-only)
+      after first boot.
+- [ ] `session.provider: postgres` (with `POSTGRES_DSN`) so users and
+      sessions survive restarts and are shared across replicas.
+- [ ] `cookie_secure: true` (default) and an appropriate `cookie_samesite`
+      (`lax` for typical, `strict` if no cross-site flows). Use `none`
+      only with `Secure` and a deliberate cross-site setup.
+- [ ] `sso_callback_base` is set to the exact external URL the browser
+      uses (incl. any `/api` proxy prefix), and matches the redirect URIs
+      registered with each IdP.
+- [ ] SSO client SECRETS come from env (`client_secret_env`), never
+      inline.
+- [ ] Keep the account-takeover guard intact (don't disable the
+      `email_verified` requirement for SSO linking).
+
+Multi-replica / scaling
+
+- [ ] `api.rate_limit_backend: redis` with a reachable `OPSRAG_REDIS_URL`,
+      so the per-request limit and the login lockout are enforced
+      cluster-wide (it fails fast if Redis is unreachable).
+
+Operational
+
+- [ ] Confirm the Bearer token and `sub` are never logged (default
+      behavior); enable per-user telemetry deliberately only where needed.
+- [ ] Review MCP tokens: set `expires_in_days`, revoke unused tokens, and
+      watch the admin MCP audit log.
+- [ ] Tighten `role_mappings` / user roles toward least privilege; audit
+      who holds the `admin` scope.
+
+---
 
 ## See also
 
-- [`configuration.md`](./configuration.md) — the full `auth` and `api`
+- [`configuration.md`](./configuration.md) -- the full `auth` and `api`
   config blocks and env precedence.
-- [`operations.md`](./operations.md) — day-2 ops, including rate limiting
+- [`operations.md`](./operations.md) -- day-2 ops, including rate limiting
   across replicas and the security hardening checklist.
-- [`architecture.md`](./architecture.md) — where the verifier and middleware
-  sit in the request flow.
+- [`architecture.md`](./architecture.md) -- where the verifier and
+  middleware sit in the request flow.
+- [`mcp-integrations.md`](./mcp-integrations.md) -- the read-only
+  integrations exposed over the MCP wire protocol.
+</content>
+</invoke>

@@ -8,7 +8,30 @@ from __future__ import annotations
 
 import pytest
 
-from opsrag.mcp.pagerduty import PAGERDUTY_TOOLS, build_fake, get_tool
+from opsrag.mcp.pagerduty import PAGERDUTY_TOOLS, _resolve_token, build_fake, get_tool
+from opsrag.mcp.registry import REGISTRY
+
+
+def test_resolve_token_accepts_alias(monkeypatch):
+    """Token is accepted from EITHER env var; OPSRAG_ alias takes precedence."""
+    monkeypatch.delenv("PAGERDUTY_API_TOKEN", raising=False)
+    monkeypatch.setenv("OPSRAG_PAGERDUTY_TOKEN", "alias-tok")
+    assert _resolve_token() == "alias-tok"  # alias alone works
+    monkeypatch.setenv("PAGERDUTY_API_TOKEN", "primary-tok")
+    assert _resolve_token() == "alias-tok"  # OPSRAG_ alias wins (listed first)
+    monkeypatch.delenv("OPSRAG_PAGERDUTY_TOKEN", raising=False)
+    assert _resolve_token() == "primary-tok"
+
+
+def test_failfast_validator_accepts_either_env():
+    """The registry validator must NOT spuriously fail when only the alias is
+    set (it would, if it used the flat required_env check)."""
+    validate = REGISTRY["pagerduty"].validate
+    assert validate is not None, "pagerduty needs a custom validator for the alias"
+    assert validate(None, {"PAGERDUTY_API_TOKEN": "x"}) is None
+    assert validate(None, {"OPSRAG_PAGERDUTY_TOKEN": "x"}) is None
+    missing = validate(None, {})
+    assert missing and "OPSRAG_PAGERDUTY_TOKEN" in missing and "PAGERDUTY_API_TOKEN" in missing
 
 _EXPECTED_TOOLS = {
     "pagerduty_list_incidents",

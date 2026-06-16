@@ -32,7 +32,7 @@ postmortems into **cited, trustworthy answers** — and let an agent run
 
 OpsRAG is an open-source, vendor-neutral retrieval system built for SRE and
 platform teams. It bundles a LangGraph agent, a pluggable retrieval pipeline
-(vector + optional knowledge graph + 20 opt-in MCP integrations), a FastAPI
+(vector + optional knowledge graph + 23 opt-in, categorized MCP connectors), a FastAPI
 surface with OIDC/SSO auth, a React UI, chat bots for Slack/Telegram/Discord/Teams
 (with image understanding), an evaluation harness, a first-class Helm chart, and a
 one-command local stack.
@@ -50,7 +50,7 @@ account, and no external identity provider required.
 | 🕵️ **Incident investigations** | An event-driven engine that forms hypotheses and verifies them against live telemetry, with resumable SSE and a hard budget. |
 | 💬 **Chat bots** | Talk to OpsRAG from Slack, Telegram, Discord, and Teams — same agent, allowlist/scoped, with a read-only web view of shared-channel conversations. |
 | 🖼️ **Image understanding** | Attach a screenshot or diagram on the web UI or any channel bot — ephemeral, vision pass-through with provider-aware auto-routing to a vision model when the active one can't see (bytes are never persisted). |
-| 🔌 **20 MCP integrations** | Read-only, opt-in connectors — Datadog, Prometheus, Kubernetes, Elasticsearch, GitHub, GitLab, Sentry, Grafana, Loki, Splunk, Rootly, Slack, and more. |
+| 🔌 **23 MCP connectors** | Read-only, opt-in connectors, grouped by category — Cloud (AWS, Azure, GCP, Cloudflare), Observability (Prometheus, Datadog, Grafana, Loki, Splunk, Sentry, Elasticsearch, CloudWatch, Stackdriver), Source & Code (GitHub, GitLab), Incident Management (PagerDuty, Rootly, Slack), Kubernetes, and the local knowledge base. |
 | 🌍 **Multi-environment** | One instance targeting many environments' Kubernetes / Prometheus / Elasticsearch via a single `environments:` registry. |
 | 🔐 **Auth built in** | `open` / `oidc` / first-party `login` modes, SSO (Google · GitHub · Microsoft), per-session ownership, optional Redis rate limiting. |
 | 🧩 **Pluggable everything** | Vector store, knowledge graph, and LLM / embedding / reranker providers are all swappable from config — no rebuild. |
@@ -73,7 +73,7 @@ flowchart LR
 
     VS --> AGENT
     KG --> AGENT
-    MCP[20 read-only<br/>MCP integrations] --> AGENT
+    MCP[23 read-only<br/>MCP connectors<br/>6 categories] --> AGENT
 
     AGENT{{LangGraph agent<br/>hybrid retrieval · RRF · MMR<br/>CRAG / Self-RAG · grounding gates}}
 
@@ -187,7 +187,7 @@ Full docs are in **[`docs/`](docs/README.md)**. Start here:
 | [RAG pipeline](docs/rag-pipeline.md) | Ingestion, chunking, hybrid retrieval, reranking, CRAG/Self-RAG, and the answer cache. |
 | [Evaluation](docs/evaluation.md) | The two-tier golden eval over `samples/`: the offline retrieval gate (no secrets) and the answer-quality judge. |
 | [Investigations](docs/investigations.md) | The event-driven incident-investigation engine. |
-| [MCP integrations](docs/mcp-integrations.md) | The 20 read-only integrations, their env vars, and the safety model. |
+| [MCP integrations](docs/mcp-integrations.md) | The 23 read-only connectors, organized by category, with their env vars and the safety model. |
 | [Multi-environment](docs/multi-environment.md) | One instance, many environments' Kubernetes / Prometheus / Elasticsearch. |
 | [Authentication](docs/auth.md) · [Operations](docs/operations.md) · [API reference](docs/api-reference.md) | Auth modes + SSO, day-2 ops, and the HTTP/SSE surface. |
 
@@ -230,7 +230,7 @@ opsrag/                  Python backend package
   investigations/        Event-driven incident-investigation engine
   api/                   FastAPI surface (HTTP + SSE + webhooks)
   auth/                  OIDC / SSO / first-party login
-  mcp/                   20 MCP integrations, each opt-in
+  mcp/                   23 MCP connectors (6 categories), each opt-in
   environments.py        Multi-environment registry resolver
 ui/                      React single-page UI (Vite)
 deploy/
