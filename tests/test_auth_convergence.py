@@ -1,8 +1,10 @@
 """Tests for the converged get_current_user_dep + current_user_with_authz.
 
 Verifies there is ONE OIDC-shaped identity dependency (no dual shape) and
-that RBAC scopes are resolved off app.state in oidc mode while open mode
-yields all-scopes anonymous.
+that RBAC scopes are resolved off app.state from the user's roles/claims.
+Authentication is ALWAYS enforced -- there is no anonymous / "open" mode
+that grants scopes; a token-less request on an allowlisted route yields a
+SCOPELESS anonymous user.
 """
 from __future__ import annotations
 
@@ -14,7 +16,6 @@ import opsrag.auth as auth_pkg
 import opsrag.auth.middleware as mw
 from opsrag.auth.oidc import CurrentUser
 from opsrag.auth.scopes import (
-    ALL_SCOPES,
     Scope,
     current_user_with_authz,
 )
@@ -30,6 +31,8 @@ def test_single_converged_dep_is_oidc_shape():
     assert hasattr(u, "sub")
     assert u.oid == u.sub  # back-compat alias
     assert hasattr(u, "roles") and hasattr(u, "scopes")
+    # Anonymous carries NO scopes now (auth is always enforced).
+    assert u.scopes == frozenset()
 
 
 class _FakeState:
@@ -61,13 +64,17 @@ class _StubVerifier:
 
 
 @pytest.mark.asyncio
-async def test_open_mode_returns_all_scopes_anonymous():
-    # auth_config.mode == "open" -> open mode regardless of verifier.
-    state = _FakeState(auth_config=_FakeState(mode="open", role_mappings={}))
+async def test_tokenless_oidc_request_is_scopeless_anonymous():
+    # oidc mode, no verifier wired (allowlisted route reached pre-verifier),
+    # no bearer -> scopeless anonymous. There is NO open/all-scopes path.
+    state = _FakeState(auth_config=_FakeState(mode="oidc", role_mappings={}))
     req = _FakeRequest(app_state=state)
     user = await current_user_with_authz(req)
     assert user.is_anonymous
-    assert user.scopes == frozenset(ALL_SCOPES)
+    # Auth is always enforced: anonymous carries NO scopes.
+    assert user.scopes == frozenset()
+    assert not user.has_scope(Scope.CHAT)
+    assert not user.has_scope(Scope.ADMIN)
 
 
 @pytest.mark.asyncio
@@ -103,9 +110,12 @@ async def test_oidc_mode_no_token_is_anonymous():
 
 
 @pytest.mark.asyncio
-async def test_middleware_dep_open_mode_no_401():
-    # middleware.get_current_user_dep must NOT 401 in open mode.
-    state = _FakeState(auth_config=_FakeState(mode="open"))
+async def test_middleware_dep_tokenless_is_scopeless_anonymous():
+    # middleware.get_current_user_dep never 401s itself (the global
+    # middleware enforces 401 on protected routes). With no verifier wired
+    # and no token, it returns a SCOPELESS anonymous user (no open mode).
+    state = _FakeState(auth_config=_FakeState(mode="oidc"))
     req = _FakeRequest(app_state=state)
     user = await mw.get_current_user_dep(req)
     assert user.is_anonymous
+    assert user.scopes == frozenset()

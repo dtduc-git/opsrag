@@ -5621,6 +5621,28 @@ html[data-ui-variant="classic"] .avatar.bot img {
 .integration-tool-chips { margin-top: 0; }
 .integration-error { color: var(--red, #c0392b); font-size: 13px; }
 
+/* Category sections — group integration cards under a header per category.
+   Reuses .cache-grid / .integration-grid for the cards; these only style
+   the section header (title + count chip + optional toggle). */
+.integration-section { margin-top: 24px; }
+.integration-section:first-of-type { margin-top: 16px; }
+.integration-section-head {
+  display: flex; align-items: center; gap: 10px;
+  padding-bottom: 8px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.integration-section-title {
+  margin: 0; font-size: 14px; font-weight: 600; color: var(--fg);
+}
+.integration-section-count {
+  background: var(--bg-3); color: var(--fg-dim);
+  font-family: var(--mono); font-size: 10px;
+  padding: 1px 7px; border-radius: 999px;
+}
+.integration-internal-toggle {
+  margin-left: auto; font-size: 12px; padding: 3px 10px;
+}
+
 /* Knowledge graph
    ----------------
    Status line + badge variants + empty-list note for KnowledgeGraphPage.

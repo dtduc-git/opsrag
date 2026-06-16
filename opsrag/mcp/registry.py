@@ -81,6 +81,7 @@ class MCPIntegration:
     name: str
     display_name: str
     config_type: type[MCPConfigBlock]
+    category: str = "Integrations"
     required_env: tuple[str, ...] = field(default_factory=tuple)
     required_config: tuple[str, ...] = field(default_factory=tuple)
     tool_names: tuple[str, ...] = field(default_factory=tuple)
@@ -95,7 +96,7 @@ class MCPIntegration:
 
 
 # ---------------------------------------------------------------------------
-# The 20 entries.
+# The registry entries.
 # ---------------------------------------------------------------------------
 #
 # tool_names: harvested from each MCP's tool definitions (alphabetised
@@ -147,22 +148,29 @@ def _validate_prometheus(settings: Any, env: Any) -> str | None:
             "k8s.clusters / deployment.kubernetes.clusters / KUBECONFIG")
 
 
+def _validate_pagerduty(settings: Any, env: Any) -> str | None:
+    """PagerDuty accepts its token from EITHER env var (see
+    ``opsrag/mcp/pagerduty._TOKEN_ENV_KEYS``). The flat ``required_env`` check
+    would only honor one and spuriously fail-fast when the operator sets the
+    other; replace it with an explicit either-or check."""
+    if env.get("OPSRAG_PAGERDUTY_TOKEN") or env.get("PAGERDUTY_API_TOKEN"):
+        return None
+    return "OPSRAG_PAGERDUTY_TOKEN or PAGERDUTY_API_TOKEN"
+
+
 REGISTRY: dict[str, MCPIntegration] = {
     "aws": MCPIntegration(
         name="aws",
         display_name="AWS (read-only)",
         config_type=MCP_CONFIG_TYPES["aws"],
+        category="Cloud",
         required_env=(),  # boto3 credential chain (AWS_PROFILE / AWS_REGION / IRSA)
         tool_names=(
-            "aws_cloudwatch_describe_alarms",
-            "aws_cloudwatch_get_metric_data",
             "aws_cost_and_usage",
             "aws_describe_ec2_instances",
             "aws_describe_eks_cluster",
             "aws_list_ecs_services",
             "aws_list_eks_clusters",
-            "aws_logs_filter_events",
-            "aws_logs_insights_query",
             "aws_read",
             "aws_s3_list_buckets",
         ),
@@ -173,6 +181,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="azure",
         display_name="Azure (read-only)",
         config_type=MCP_CONFIG_TYPES["azure"],
+        category="Cloud",
         required_env=(),  # DefaultAzureCredential (AZURE_* / managed identity)
         tool_names=(
             "azure_aks_list_clusters",
@@ -188,6 +197,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="cloudflare",
         display_name="Cloudflare (zones, DNS, Zero-Trust)",
         config_type=MCP_CONFIG_TYPES["cloudflare"],
+        category="Cloud",
         required_env=("CLOUDFLARE_API_TOKEN",),
         tool_names=(
             "cloudflare_get_access_app_policies",
@@ -201,10 +211,27 @@ REGISTRY: dict[str, MCPIntegration] = {
         factory=_lazy("opsrag.mcp.cloudflare", "build"),
         fake_factory=_lazy("opsrag.mcp.cloudflare", "build_fake"),
     ),
+    "cloudwatch": MCPIntegration(
+        name="cloudwatch",
+        display_name="Amazon CloudWatch (metrics/alarms/logs)",
+        config_type=MCP_CONFIG_TYPES["cloudwatch"],
+        category="Observability",
+        required_env=(),  # boto3 credential chain (AWS_PROFILE / AWS_REGION / IRSA)
+        tool_names=(
+            "cloudwatch_describe_alarms",
+            "cloudwatch_get_metric_data",
+            "cloudwatch_list_metrics",
+            "cloudwatch_logs_describe_groups",
+            "cloudwatch_logs_filter",
+        ),
+        factory=_lazy("opsrag.mcp.cloudwatch", "build"),
+        fake_factory=_lazy("opsrag.mcp.cloudwatch", "build_fake"),
+    ),
     "code": MCPIntegration(
         name="code",
         display_name="Local code search",
         config_type=MCP_CONFIG_TYPES["code"],
+        category="Source & Code",
         required_env=(),
         tool_names=(
             "code_dependency_lookup",
@@ -221,6 +248,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="datadog",
         display_name="Datadog APM",
         config_type=MCP_CONFIG_TYPES["datadog"],
+        category="Observability",
         required_env=("DD_API_KEY", "DD_APP_KEY"),
         tool_names=(
             "datadog_get_monitor",
@@ -241,6 +269,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="elasticsearch",
         display_name="Elasticsearch / OpenSearch",
         config_type=MCP_CONFIG_TYPES["elasticsearch"],
+        category="Observability",
         required_env=(),  # ES_URL + ES_API_KEY/basic via env, or elasticsearch.url in config
         tool_names=(
             "elasticsearch_cluster_health",
@@ -256,13 +285,11 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="gcp",
         display_name="Google Cloud (read-only)",
         config_type=MCP_CONFIG_TYPES["gcp"],
+        category="Cloud",
         required_env=(),  # ADC / Workload Identity (GOOGLE_CLOUD_PROJECT optional)
         tool_names=(
             "gcp_asset_search",
             "gcp_gke_list_clusters",
-            "gcp_logging_list_entries",
-            "gcp_monitoring_list_alert_policies",
-            "gcp_monitoring_list_timeseries",
             "gcp_run_list_services",
         ),
         factory=_lazy("opsrag.mcp.gcp", "build"),
@@ -272,6 +299,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="github",
         display_name="GitHub",
         config_type=MCP_CONFIG_TYPES["github"],
+        category="Source & Code",
         required_env=("GITHUB_TOKEN",),
         tool_names=(
             "github_get_commit",
@@ -295,6 +323,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="gitlab",
         display_name="GitLab",
         config_type=MCP_CONFIG_TYPES["gitlab"],
+        category="Source & Code",
         required_env=("GITLAB_TOKEN",),
         tool_names=(
             "gitlab_get_commit",
@@ -319,6 +348,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="grafana",
         display_name="Grafana (dashboards/metrics/logs)",
         config_type=MCP_CONFIG_TYPES["grafana"],
+        category="Observability",
         required_env=("GRAFANA_URL", "GRAFANA_TOKEN"),
         tool_names=(
             "grafana_get_dashboard",
@@ -338,6 +368,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="knowledge",
         display_name="Knowledge-base retrieval",
         config_type=MCP_CONFIG_TYPES["knowledge"],
+        category="Knowledge",
         required_env=(),
         tool_names=(
             "knowledge_search",
@@ -349,6 +380,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="kubernetes",
         display_name="Kubernetes (multi-cluster)",
         config_type=MCP_CONFIG_TYPES["kubernetes"],
+        category="Kubernetes & Infra",
         required_env=(),  # in-cluster SA, or KUBECONFIG, or opt-in k8s.clusters (GKE WI)
         tool_names=(
             "k8s_find_workloads",
@@ -378,6 +410,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="loki",
         display_name="Grafana Loki (logs)",
         config_type=MCP_CONFIG_TYPES["loki"],
+        category="Observability",
         required_env=("LOKI_URL",),
         tool_names=(
             "loki_label_values",
@@ -389,10 +422,31 @@ REGISTRY: dict[str, MCPIntegration] = {
         factory=_lazy("opsrag.mcp.loki", "build"),
         fake_factory=_lazy("opsrag.mcp.loki", "build_fake"),
     ),
+    "pagerduty": MCPIntegration(
+        name="pagerduty",
+        display_name="PagerDuty incidents / on-call",
+        config_type=MCP_CONFIG_TYPES["pagerduty"],
+        category="Incident Management",
+        required_env=("PAGERDUTY_API_TOKEN",),
+        # The module also accepts OPSRAG_PAGERDUTY_TOKEN; a custom validator
+        # honors EITHER so a token under the alias doesn't trip fail-fast.
+        validate=_validate_pagerduty,
+        tool_names=(
+            "pagerduty_get_incident",
+            "pagerduty_get_incident_log_entries",
+            "pagerduty_list_incidents",
+            "pagerduty_list_oncalls",
+            "pagerduty_list_services",
+        ),
+        health_url_template="https://api.pagerduty.com/abilities",
+        factory=_lazy("opsrag.mcp.pagerduty", "build"),
+        fake_factory=_lazy("opsrag.mcp.pagerduty", "build_fake"),
+    ),
     "prometheus": MCPIntegration(
         name="prometheus",
         display_name="Prometheus (multi-cluster)",
         config_type=MCP_CONFIG_TYPES["prometheus"],
+        category="Observability",
         # `validate` supersedes these: prometheus is valid via the
         # `environments:` registry OR any legacy cluster source (KUBECONFIG /
         # k8s.clusters / deployment.kubernetes.clusters / in-cluster).
@@ -414,6 +468,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="rootly",
         display_name="Rootly incidents",
         config_type=MCP_CONFIG_TYPES["rootly"],
+        category="Incident Management",
         required_env=("ROOTLY_API_TOKEN",),
         tool_names=(
             "rootly_get_alert",
@@ -433,6 +488,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="runbooks",
         display_name="Local runbooks",
         config_type=MCP_CONFIG_TYPES["runbooks"],
+        category="Knowledge",
         required_env=(),
         tool_names=(
             "runbook_list",
@@ -445,6 +501,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="sentry",
         display_name="Sentry (errors)",
         config_type=MCP_CONFIG_TYPES["sentry"],
+        category="Observability",
         required_env=("SENTRY_TOKEN",),
         tool_names=(
             "sentry_get_event",
@@ -463,6 +520,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="slack",
         display_name="Slack (message / thread fetch)",
         config_type=MCP_CONFIG_TYPES["slack"],
+        category="Incident Management",
         required_env=("SLACK_BOT_TOKEN",),
         tool_names=(
             "slack_get_message_by_url",
@@ -476,6 +534,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         name="splunk",
         display_name="Splunk (logs/search)",
         config_type=MCP_CONFIG_TYPES["splunk"],
+        category="Observability",
         required_env=("SPLUNK_URL", "SPLUNK_TOKEN"),
         tool_names=(
             "splunk_export_search",
@@ -488,10 +547,25 @@ REGISTRY: dict[str, MCPIntegration] = {
         factory=_lazy("opsrag.mcp.splunk", "build"),
         fake_factory=_lazy("opsrag.mcp.splunk", "build_fake"),
     ),
+    "stackdriver": MCPIntegration(
+        name="stackdriver",
+        display_name="Stackdriver (GCP Monitoring + Logging)",
+        config_type=MCP_CONFIG_TYPES["stackdriver"],
+        category="Observability",
+        required_env=(),  # ADC / Workload Identity (GOOGLE_CLOUD_PROJECT optional)
+        tool_names=(
+            "stackdriver_list_alert_policies",
+            "stackdriver_list_log_entries",
+            "stackdriver_list_timeseries",
+        ),
+        factory=_lazy("opsrag.mcp.stackdriver", "build"),
+        fake_factory=_lazy("opsrag.mcp.stackdriver", "build_fake"),
+    ),
     "tool_cache": MCPIntegration(
         name="tool_cache",
         display_name="Read-through cache (wraps other MCPs)",
         config_type=MCP_CONFIG_TYPES["tool_cache"],
+        category="Internal",
         required_env=(),
         # No tools of its own; wraps idempotent calls on other MCPs.
         tool_names=(),

@@ -60,6 +60,12 @@ SAFE_FOR_EXTERNAL_TOOLS: set[str] = {
     "rootly_list_alerts",
     "rootly_search",
     "rootly_list_services",
+    # PagerDuty (read-only REST)
+    "pagerduty_list_incidents",
+    "pagerduty_get_incident",
+    "pagerduty_list_services",
+    "pagerduty_list_oncalls",
+    "pagerduty_get_incident_log_entries",
     # GitLab -- only get_/list_ tools (all are HTTP GET upstream)
     "gitlab_list_pipelines",
     "gitlab_get_pipeline",
@@ -179,6 +185,21 @@ SAFE_FOR_EXTERNAL_TOOLS: set[str] = {
     "elasticsearch_search",
     "elasticsearch_esql_query",
     "elasticsearch_cluster_health",
+    # CloudWatch -- read-only metrics + alarms + Logs over the boto3
+    # credential chain (AWS_PROFILE / AWS_REGION / IRSA). All Get/Describe/
+    # List/Filter calls -- no mutating ops, no escape hatch.
+    "cloudwatch_get_metric_data",
+    "cloudwatch_describe_alarms",
+    "cloudwatch_list_metrics",
+    "cloudwatch_logs_filter",
+    "cloudwatch_logs_describe_groups",
+    # Stackdriver -- read-only GCP Cloud Monitoring (metric time series +
+    # alert policies) and Cloud Logging (entries) over ADC / Workload
+    # Identity. All list verbs -- the entries:list POST is read-only per the
+    # Cloud Logging v2 spec. No mutating ops.
+    "stackdriver_list_timeseries",
+    "stackdriver_list_alert_policies",
+    "stackdriver_list_log_entries",
 }
 
 # Verb-based deny-list -- defence in depth. Anything whose name matches

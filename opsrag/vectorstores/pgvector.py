@@ -121,13 +121,31 @@ class PgVectorStore:
             current = int(existing.split("(")[1].rstrip(")"))
         except (IndexError, ValueError):
             return  # unparseable (untyped vector) -- nothing to compare
-        if current != self._dimension and not self._allow_dimension_change:
+        if current == self._dimension:
+            return  # dimension matches -- nothing to do
+        if not self._allow_dimension_change:
             raise RuntimeError(
                 f"pgvector dimension mismatch: table {self._table!r} is "
                 f"vector({current}) but the embedder produces {self._dimension}-d "
                 f"vectors. Re-index into a fresh table or set "
                 f"allow_dimension_change=true to override."
             )
+        # allow_dimension_change=true is a TRUTHFUL opt-in to a reindex: the old
+        # vector({current}) column is incompatible with the new embedder, and
+        # CREATE TABLE IF NOT EXISTS would NOT alter the existing column -- so
+        # without a drop the new dimension never takes effect and every upsert
+        # fails with a cryptic pgvector size error. DROP the table here (loudly)
+        # so the CREATE TABLE that follows rebuilds it at the new dimension.
+        # Existing rows in this table are discarded -- exactly what the operator
+        # asked for by setting allow_dimension_change=true.
+        _log.warning(
+            "pgvector dimension change: table %r is vector(%d) but the embedder "
+            "produces %d-d vectors -- allow_dimension_change=true: DROPPING "
+            "TABLE %s so it is recreated at the new dimension (all existing "
+            "rows in this table are discarded; a full re-index is required).",
+            self._table, current, self._dimension, self._table,
+        )
+        await conn.execute(f"DROP TABLE IF EXISTS {self._table}")
 
     async def open(self) -> None:
         self._pool = await asyncpg.create_pool(

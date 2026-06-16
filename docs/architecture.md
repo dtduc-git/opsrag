@@ -7,6 +7,25 @@ store, then answers questions with a LangGraph agent that retrieves,
 optionally calls live infrastructure tools, generates an answer, and
 cites every source it used.
 
+"GraphRAG" here means vector-RAG retrieval -- dense + BM25 + a
+code-aware lane, fused with RRF and diversified with MMR -- which is what
+actually answers a `/query`, sitting beside (not on top of) two distinct
+graphs:
+
+1. The Neo4j knowledge graph, which captures relationships between
+   services, libraries, features, and dependencies. It is built at
+   ingest by a hybrid rule + LLM extractor (the default; set
+   `entity_extraction.method: rule_based` for a fully deterministic,
+   no-LLM build). It powers the topology viewer and is NOT consulted in
+   the vector-retrieval lane that answers a `/query`.
+2. An optional light entity-graph (Postgres adjacency, zero-LLM
+   rule-based), which adds a 1-hop entity expansion to retrieval when
+   `light_graph.enabled: true`. It is off by default.
+
+So by default vector retrieval consults no graph; with the light
+entity-graph enabled it adds 1-hop entity expansion; the Neo4j
+relationship/topology graph is never used during retrieval.
+
 This document gives a high-level map of the system, the request flow for
 a `/query`, the pluggable-provider model, the config-gated MCP tool
 surface, the `DeploymentContext` boundary, and the deployment options.
@@ -33,7 +52,7 @@ surface, the `DeploymentContext` boundary, and the deployment options.
        v                    v                   v                 v
   +----------+      +---------------+    +-------------+   +---------------+
   | Agent    |      | Ingestion     |    | Providers   |   | MCP registry  |
-  | graph    |      | pipeline      |    | (factory)   |   | (20, gated)   |
+  | graph    |      | pipeline      |    | (factory)   |   | (23, gated)   |
   | (LangGr) |      | SCM->parse->  |    | LLM/embed/  |   | config-gated  |
   |          |      | chunk->embed  |    | vector/graph|   | tool exposure |
   +----+-----+      +-------+-------+    +------+------+   +-------+-------+
@@ -77,7 +96,7 @@ Top-level packages (under `opsrag/`):
 - `factory.py` + `config.py` + `context.py` + `environments.py` -
   provider wiring, the Pydantic settings root, the operator-supplied
   `DeploymentContext`, and the multi-environment registry resolver.
-- `mcp/` + `mcp_server/` - the 20 MCP integrations, their registry, and
+- `mcp/` + `mcp_server/` - the 23 MCP integrations, their registry, and
   the gating that decides which tools the agent may see.
 - `interfaces/` - the Protocol interfaces every provider implements
   (the plugin contracts).
@@ -256,13 +275,26 @@ deployment run with no graph database at all - the default config needs
 only an LLM key, a vector store, and the local OIDC issuer.
 
 Selecting `knowledge_graph.provider: neo4j` wires the Neo4j driver
-instead. The legacy graph-anchored retrieval lane was removed; the Neo4j
-driver remains available for graph-oriented MCP queries rather than
-ingest-time entity writes.
+instead. When a graph backend is bound, ingestion populates it via the
+`HybridExtractor`, which by default (`entity_extraction.method: hybrid`)
+uses an LLM for prose documents on top of deterministic rule/metadata
+lanes; set `entity_extraction.method: rule_based` for a fully
+deterministic, no-LLM build. It captures relationships between services,
+libraries, features, and dependencies. This graph is a separate,
+on-demand relationship/topology source: it is NOT consulted in the
+vector-retrieval lane that answers `/query`. The legacy graph-anchored
+retrieval lane was removed. Today the graph powers the topology viewer;
+on-demand relationship/topology queries are on the roadmap.
+
+The light entity-graph is a different, optional component: a Postgres
+adjacency table built at ingest by the zero-LLM `RuleBasedExtractor`.
+When `light_graph.enabled: true`, a 1-hop `entity_expand` node augments
+vector retrieval with related chunks; it is off by default and works
+even with `knowledge_graph.provider: none`.
 
 ## Config-gated MCP tools
 
-opsrag ships 20 named MCP integrations (live infrastructure surfaces
+opsrag ships 23 named MCP integrations (live infrastructure surfaces
 such as Kubernetes, metrics, logs, SCM, incident trackers, cloud
 inventory, and a read-through tool cache). The registry at
 `opsrag/mcp/registry.py` is the single source of truth: each entry

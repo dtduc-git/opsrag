@@ -112,55 +112,37 @@ async def optional_user(request: Request) -> CurrentUser:
     return user
 
 
-def _is_open_mode(request: Request) -> bool:
-    """True when no auth enforcement applies.
-
-    Open mode is intentional zero-config (``auth is None`` or
-    ``auth.mode == "open"``), distinct from a misconfigured auth-required
-    route with a missing verifier. We read ``app.state.auth_config.mode``
-    when present and otherwise fall back to "no verifier == open" so
-    today's local-dev behavior is preserved."""
-    auth_cfg = getattr(request.app.state, "auth_config", None)
-    if auth_cfg is not None:
-        mode = getattr(auth_cfg, "mode", None)
-        if mode is not None:
-            return mode == "open"
-    return _get_verifier(request) is None
-
-
 async def get_current_user_dep(request: Request) -> CurrentUser:
-    """The ONE converged identity dependency (OIDC-shape in all modes).
+    """The ONE converged identity dependency (OIDC-shape).
 
     This replaces the two same-named ``get_current_user_dep`` that used
     to exist (the ``middleware`` alias to ``require_authenticated_user``
     which 401'd, and the ``__init__`` bridge that produced the legacy
     Pomerium ``oid``-shape). Both are gone; this is the single source.
 
-    Behavior by mode:
-      * **open** (``auth is None`` / ``auth.mode == "open"``) -- never
-        401; returns ``CurrentUser.anonymous()`` (which carries ALL
-        scopes), preserving today's open behavior.
-      * **oidc / login** -- verifies the Bearer token and returns the
-        OIDC-shape ``CurrentUser``. A missing/invalid token here yields
-        anonymous (the global ``OIDCAuthMiddleware`` has already rejected
-        unauthenticated requests on protected routes before the handler
-        runs, so reaching here token-less means an open route).
+    Authentication is ALWAYS enforced -- there is no anonymous / "open"
+    mode. The global ``OIDCAuthMiddleware`` rejects (401) every
+    non-allowlisted request that lacks a valid identity BEFORE it reaches
+    a handler. So reaching this dependency token-less means the route is
+    on the public allowlist (``/healthz``, ``/ui-config``, ...); for those
+    we return ``CurrentUser.anonymous()`` -- which now carries NO scopes,
+    so it passes no ``require_scope`` guard.
+
+    Behavior:
+      * A valid Bearer token -> the verified OIDC-shape ``CurrentUser``.
+      * No/invalid token on an allowlisted route -> scopeless anonymous.
 
     Note: this returns identity WITHOUT resolved RBAC scopes. Routes that
     enforce scopes should depend on
     ``opsrag.auth.scopes.current_user_with_authz`` (or a
     ``require_scope(...)`` guard), which calls this and then attaches
-    roles/scopes. ``CurrentUser.anonymous()`` already carries all scopes
-    so open-mode handlers that read ``.scopes`` work without the authz
-    step.
+    roles/scopes.
     """
-    if _is_open_mode(request):
-        return CurrentUser.anonymous()
     verifier = _get_verifier(request)
     if verifier is None:
-        # auth.mode is oidc/login but no verifier wired: misconfiguration.
-        # Fail closed -- treat as anonymous (the global middleware will
-        # already have 401'd protected routes).
+        # No verifier wired (login mode, or an allowlisted route reached
+        # before the verifier is built). Fail closed -- scopeless anonymous;
+        # the global middleware already 401'd any protected route.
         return CurrentUser.anonymous()
     token = _extract_bearer(request)
     if token is None:

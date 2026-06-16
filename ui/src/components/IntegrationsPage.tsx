@@ -1,12 +1,49 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { fetchIntegrations, type Integration, type IntegrationsSummary } from "../api";
 
+// Display order for category section headers. Anything not listed here
+// (e.g. the registry default "Integrations") is appended after these,
+// alphabetically; "Internal" is always pinned LAST and hidden behind a
+// toggle (see INTERNAL_CATEGORY).
+const CATEGORY_ORDER = [
+  "Observability",
+  "Incident Management",
+  "Cloud",
+  "Kubernetes & Infra",
+  "Source & Code",
+  "Knowledge",
+];
+const INTERNAL_CATEGORY = "Internal";
+
 // Sort: enabled first, then alphabetically by display_name.
 function sortIntegrations(items: Integration[]): Integration[] {
   return [...items].sort((a, b) => {
     if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
     return a.display_name.localeCompare(b.display_name);
   });
+}
+
+// Group already-sorted integrations into category sections, ordered by
+// CATEGORY_ORDER first, then any unknown categories alphabetically, then
+// Internal pinned last. Empty categories are omitted.
+function groupByCategory(items: Integration[]): { category: string; items: Integration[] }[] {
+  const buckets = new Map<string, Integration[]>();
+  for (const it of items) {
+    const cat = it.category || "Integrations";
+    const bucket = buckets.get(cat);
+    if (bucket) bucket.push(it);
+    else buckets.set(cat, [it]);
+  }
+
+  const seen = new Set<string>([...CATEGORY_ORDER, INTERNAL_CATEGORY]);
+  const extras = [...buckets.keys()]
+    .filter((c) => !seen.has(c))
+    .sort((a, b) => a.localeCompare(b));
+
+  const ordered = [...CATEGORY_ORDER, ...extras, INTERNAL_CATEGORY];
+  return ordered
+    .filter((cat) => buckets.has(cat))
+    .map((cat) => ({ category: cat, items: buckets.get(cat)! }));
 }
 
 function IntegrationCard({ integration }: { integration: Integration }) {
@@ -78,6 +115,7 @@ export default function IntegrationsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [enabledOnly, setEnabledOnly] = useState(false);
+  const [showInternal, setShowInternal] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -104,6 +142,19 @@ export default function IntegrationsPage() {
   const visible = useMemo(
     () => (enabledOnly ? sorted.filter((i) => i.enabled) : sorted),
     [sorted, enabledOnly],
+  );
+
+  // Group the filtered (All / Enabled-only) set into category sections.
+  // Internal is split out so it can be hidden behind a toggle without
+  // disturbing the ordered groups above it.
+  const groups = useMemo(() => groupByCategory(visible), [visible]);
+  const mainGroups = useMemo(
+    () => groups.filter((g) => g.category !== INTERNAL_CATEGORY),
+    [groups],
+  );
+  const internalGroup = useMemo(
+    () => groups.find((g) => g.category === INTERNAL_CATEGORY) ?? null,
+    [groups],
   );
 
   // Total tool count across enabled integrations only.
@@ -178,12 +229,41 @@ export default function IntegrationsPage() {
         </div>
       )}
 
-      {visible.length > 0 && (
-        <div className="cache-grid integration-grid">
-          {visible.map((integration) => (
-            <IntegrationCard key={integration.name} integration={integration} />
-          ))}
-        </div>
+      {mainGroups.map((group) => (
+        <section key={group.category} className="integration-section">
+          <div className="integration-section-head">
+            <h3 className="integration-section-title">{group.category}</h3>
+            <span className="integration-section-count">{group.items.length}</span>
+          </div>
+          <div className="cache-grid integration-grid">
+            {group.items.map((integration) => (
+              <IntegrationCard key={integration.name} integration={integration} />
+            ))}
+          </div>
+        </section>
+      ))}
+
+      {internalGroup && (
+        <section className="integration-section integration-section-internal">
+          <div className="integration-section-head">
+            <h3 className="integration-section-title">{internalGroup.category}</h3>
+            <span className="integration-section-count">{internalGroup.items.length}</span>
+            <button
+              type="button"
+              className="btn btn-secondary integration-internal-toggle"
+              onClick={() => setShowInternal((v) => !v)}
+            >
+              {showInternal ? "Hide" : "Show"}
+            </button>
+          </div>
+          {showInternal && (
+            <div className="cache-grid integration-grid">
+              {internalGroup.items.map((integration) => (
+                <IntegrationCard key={integration.name} integration={integration} />
+              ))}
+            </div>
+          )}
+        </section>
       )}
     </div>
   );

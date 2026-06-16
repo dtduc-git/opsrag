@@ -19,15 +19,13 @@ interface Props {
 
 type Phase = "loading" | "login" | "ready";
 
-// <AuthGate> wraps the app shell. On boot it fetches /me:
-//   • OPEN mode  → /me returns a (possibly anonymous) identity WITH scopes,
-//                  never 401s → phase "ready", gate is transparent.
-//   • login/oidc → an unauthenticated caller trips a 401 envelope somewhere
-//                  (or /me itself reports auth is required) → phase "login".
+// <AuthGate> wraps the app shell. On boot it fetches /me. Auth is ALWAYS
+// required (login or oidc) -- there is no open/anonymous mode -- so:
+//   • signed in      → /me returns a real identity (oid set) → phase "ready".
+//   • not signed in  → /me is anonymous / 401 → phase "login" (LoginPage).
 //
-// We only show the Login page when the backend has actually demanded auth:
-// either apiFetch latched a 401 (isAuthRequired) or the URL hash is the login
-// route. An anonymous-but-allowed identity (open demo) renders the shell.
+// We show the Login page whenever the identity is anonymous / has no oid, or a
+// 401 was latched by apiFetch, or the URL hash is the login route.
 export default function AuthGate({ children }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [me, setMe] = useState<MeResponse | null>(null);
@@ -41,11 +39,12 @@ export default function AuthGate({ children }: Props) {
   const resolve = useCallback(async () => {
     const identity = await fetchMe();
     setMe(identity);
-    // Decide whether to wall off the shell. The login wall only appears when
-    // the backend is enforcing auth: a 401 was latched, OR the hash explicitly
-    // requests login. In OPEN mode neither is true, so we go straight to ready
-    // even for an anonymous identity.
+    // Auth is ALWAYS required (login or oidc) -- there is no open/anonymous
+    // mode. Any anonymous / no-identity result means "not signed in", so wall
+    // off the shell and show the login page. (Also honors a latched 401 or the
+    // explicit login hash.)
     const wantsLogin =
+      identity.is_anonymous || !identity.oid ||
       isAuthRequired() || window.location.hash === LOGIN_HASH;
     setPhase(wantsLogin ? "login" : "ready");
   }, []);

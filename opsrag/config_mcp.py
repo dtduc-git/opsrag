@@ -37,6 +37,7 @@ KNOWN_MCP_NAMES: tuple[str, ...] = (
     "aws",
     "azure",
     "cloudflare",
+    "cloudwatch",
     "code",
     "datadog",
     "elasticsearch",
@@ -47,12 +48,14 @@ KNOWN_MCP_NAMES: tuple[str, ...] = (
     "knowledge",
     "kubernetes",
     "loki",
+    "pagerduty",
     "prometheus",
     "rootly",
     "runbooks",
     "sentry",
     "slack",
     "splunk",
+    "stackdriver",
     "tool_cache",
 )
 
@@ -84,11 +87,20 @@ class MCPConfigBlock(BaseModel):
 # Per-integration subclasses.
 # ---------------------------------------------------------------------------
 class AWSMCPConfig(MCPConfigBlock):
-    """AWS read-only tools (EC2/EKS/ECS inventory, CloudWatch metrics +
-    logs + alarms, S3, Cost Explorer, + a read-only generic `aws_read`).
-    Auth via the boto3 credential chain (AWS_PROFILE / AWS_REGION / IRSA)."""
+    """AWS read-only tools (EC2/EKS/ECS inventory, S3, Cost Explorer, + a
+    read-only generic `aws_read`). CloudWatch metrics/logs/alarms now live in
+    the dedicated `cloudwatch` connector. Auth via the boto3 credential chain
+    (AWS_PROFILE / AWS_REGION / IRSA)."""
 
     name: Literal["aws"] = "aws"
+
+
+class CloudWatchMCPConfig(MCPConfigBlock):
+    """Amazon CloudWatch read-only tools (metric data, alarms, list-metrics,
+    Logs filter + describe-groups). Auth via the boto3 credential chain
+    (AWS_PROFILE / AWS_REGION / IRSA), same as the AWS connector."""
+
+    name: Literal["cloudwatch"] = "cloudwatch"
 
 
 class AzureMCPConfig(MCPConfigBlock):
@@ -106,10 +118,19 @@ class CloudflareMCPConfig(MCPConfigBlock):
 
 
 class GCPMCPConfig(MCPConfigBlock):
-    """Google Cloud read-only tools (Cloud Logging, Monitoring, GKE, Cloud
-    Run, + Asset Inventory search). Auth via ADC / Workload Identity."""
+    """Google Cloud read-only tools (GKE, Cloud Run, + Asset Inventory
+    search). Cloud Monitoring/Logging now live in the dedicated
+    `stackdriver` connector. Auth via ADC / Workload Identity."""
 
     name: Literal["gcp"] = "gcp"
+
+
+class StackdriverMCPConfig(MCPConfigBlock):
+    """Stackdriver (GCP Cloud Monitoring + Logging) read-only tools (metric
+    time series, alert policies, log entries). Auth via ADC / Workload
+    Identity, same as the GCP connector."""
+
+    name: Literal["stackdriver"] = "stackdriver"
 
 
 class GitHubMCPConfig(MCPConfigBlock):
@@ -188,6 +209,13 @@ class KubernetesMCPConfig(MCPConfigBlock):
     name: Literal["kubernetes"] = "kubernetes"
 
 
+class PagerDutyMCPConfig(MCPConfigBlock):
+    """PagerDuty incidents, services, on-calls, incident log entries
+    (read-only). Env PAGERDUTY_API_TOKEN."""
+
+    name: Literal["pagerduty"] = "pagerduty"
+
+
 class PrometheusMCPConfig(MCPConfigBlock):
     """Prometheus queries (instant / range), alerts, targets, series,
     label values."""
@@ -227,6 +255,7 @@ MCP_CONFIG_TYPES: dict[str, type[MCPConfigBlock]] = {
     "aws": AWSMCPConfig,
     "azure": AzureMCPConfig,
     "cloudflare": CloudflareMCPConfig,
+    "cloudwatch": CloudWatchMCPConfig,
     "code": CodeMCPConfig,
     "datadog": DatadogMCPConfig,
     "elasticsearch": ElasticsearchMCPConfig,
@@ -237,12 +266,14 @@ MCP_CONFIG_TYPES: dict[str, type[MCPConfigBlock]] = {
     "knowledge": KnowledgeMCPConfig,
     "kubernetes": KubernetesMCPConfig,
     "loki": LokiMCPConfig,
+    "pagerduty": PagerDutyMCPConfig,
     "prometheus": PrometheusMCPConfig,
     "rootly": RootlyMCPConfig,
     "runbooks": RunbooksMCPConfig,
     "sentry": SentryMCPConfig,
     "slack": SlackMCPConfig,
     "splunk": SplunkMCPConfig,
+    "stackdriver": StackdriverMCPConfig,
     "tool_cache": ToolCacheMCPConfig,
 }
 

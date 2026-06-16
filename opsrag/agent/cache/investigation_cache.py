@@ -24,7 +24,17 @@ Schema (Qdrant point payload):
   model_route_decision: dict
   thread_id:       str
   user_id:         str
+  user_scope:      str (present ONLY when the answer wove in per-user
+                   memories -- absent for shared investigations)
   created_at:      float (unix seconds)
+
+Cross-user scoping: investigations are SHARED by default (matching the
+documented shared / scope-gated authz model -- any user may learn from
+another user's tool-path reasoning). The one carve-out mirrors
+`opsrag.qa_cache`: when an answer wove in per-user Mem0 memories it is
+stamped with ``user_scope`` and returned ONLY to its author, so a
+recalled personal fact never leaks into another user's reasoning on a
+high cosine match.
 """
 from __future__ import annotations
 
@@ -83,6 +93,12 @@ class InvestigationHit:
     thread_id: str = ""
     investigation_id: str = ""
     feedback: dict = field(default_factory=dict)
+    # Author of the originating turn. `user_scope` is set ONLY when the
+    # answer wove in per-user memories -- such hits are returned only to
+    # this same `user_scope` (see `search`). Exposed so callers/tests can
+    # observe the cross-user scoping decision.
+    user_id: str = ""
+    user_scope: str | None = None
 
 
 class InvestigationCache:
@@ -116,6 +132,16 @@ class InvestigationCache:
                         size=self._vector_size, distance=qm.Distance.COSINE,
                     ),
                 )
+                # Index user_scope so the shared-or-mine search filter is
+                # served efficiently (mirrors qa_cache).
+                try:
+                    await self._qdrant.create_payload_index(
+                        collection_name=self._collection,
+                        field_name="user_scope",
+                        field_schema=qm.PayloadSchemaType.KEYWORD,
+                    )
+                except Exception:
+                    pass
                 _log.info("created investigation cache collection %s", self._collection)
             except Exception as exc:
                 _log.warning(
@@ -135,9 +161,17 @@ class InvestigationCache:
         model_route_decision: dict | None = None,
         thread_id: str = "",
         user_id: str = "",
+        user_scope: str | None = None,
     ) -> str | None:
         """Store one investigation. Returns the point id or None on
-        failure. Idempotent on re-call (each call generates a new uuid)."""
+        failure. Idempotent on re-call (each call generates a new uuid).
+
+        ``user_scope`` is set ONLY for answers that wove in per-user
+        memories (Mem0); pass ``user_id`` as the scope in that case
+        (mirrors the graph.py ``_user_scope = user_id if
+        result.get("user_memories") else None`` pattern). A scoped entry
+        is returned only to that same user (see ``search``); shared
+        investigations leave it unset so any user can learn from them."""
         await self._ensure_collection()
         if not self._ensured:
             return None
@@ -153,6 +187,11 @@ class InvestigationCache:
             "user_id": user_id,
             "created_at": time.time(),
         }
+        # Only stamp user_scope when the answer is user-specific. Leaving
+        # it absent (not null) keeps the IsEmpty("shared") search filter
+        # matching legacy + shared entries.
+        if user_scope:
+            payload["user_scope"] = user_scope
         try:
             await self._qdrant.upsert(
                 collection_name=self._collection,
@@ -173,12 +212,14 @@ class InvestigationCache:
         *,
         top_k: int | None = None,
         threshold: float | None = None,
+        user_id: str | None = None,
     ) -> list[InvestigationHit]:
         """Top-K past investigations above `threshold` (compared against
         DECAY-ADJUSTED similarity). Empty list on miss.
 
         Algorithm:
-          1. Pull a wider Qdrant top-K' (3x requested) by raw cosine.
+          1. Pull a wider Qdrant top-K' (3x requested) by raw cosine,
+             pre-filtered by the shared-or-mine scope clause.
           2. Apply V1 confidence decay: `adjusted = raw x decay(age)`.
           3. Re-sort by adjusted score, drop entries below `threshold`,
              return up to `top_k`.
@@ -187,6 +228,14 @@ class InvestigationCache:
         below the 0.85 threshold, while a 1-day-old 0.86 stays at ~0.86
         and gets through. Older investigations need higher raw
         similarity to clear the same bar.
+
+        `user_id` scopes the search the same way `qa_cache.lookup` does:
+        the caller is eligible for SHARED investigations (no `user_scope`)
+        plus those scoped to this same user. A memory-influenced
+        investigation cached for another user is never returned here --
+        otherwise its answer + tool_call_audit would leak that user's
+        personal facts into a different user's reasoning. When `user_id`
+        is None only shared investigations are eligible.
         """
         await self._ensure_collection()
         if not self._ensured or not embedding:
@@ -196,6 +245,17 @@ class InvestigationCache:
         # Pull wider so decay can pull in older but high-raw hits the
         # threshold-on-raw filter would have included.
         wide_k = max(k * 3, k)
+        # Shared-or-mine filter. IsEmpty matches legacy + shared entries;
+        # the match clause adds this user's own scoped entries. Without a
+        # user_id only shared entries are eligible.
+        shared = qm.IsEmptyCondition(is_empty=qm.PayloadField(key="user_scope"))
+        if user_id:
+            query_filter = qm.Filter(should=[
+                shared,
+                qm.FieldCondition(key="user_scope", match=qm.MatchValue(value=user_id)),
+            ])
+        else:
+            query_filter = qm.Filter(must=[shared])
         try:
             # qdrant-client >= 1.10 deprecated `search`. `query_points` is the
             # current API and returns the same .points list with .score/.payload.
@@ -205,6 +265,7 @@ class InvestigationCache:
                 query=embedding,
                 limit=wide_k,
                 with_payload=True,
+                query_filter=query_filter,
             )
             hits = result.points
         except Exception as exc:
@@ -231,6 +292,8 @@ class InvestigationCache:
                 thread_id=p.get("thread_id", ""),
                 investigation_id=str(h.id),
                 feedback=p.get("feedback", {}) or {},
+                user_id=p.get("user_id", "") or "",
+                user_scope=p.get("user_scope"),
             ))
         out.sort(key=lambda x: x.decayed_similarity, reverse=True)
         out = out[:k]

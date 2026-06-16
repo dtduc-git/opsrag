@@ -1,4 +1,18 @@
-"""OIDC identity package.
+"""Identity package.
+
+Authentication is ALWAYS enforced -- the product never serves anonymous
+traffic. Two modes:
+
+  * **login** (default) -- first-party login: a built-in admin account plus
+    optional SSO providers, with signed cookie sessions.
+  * **oidc** -- verify incoming Bearer JWTs against an external IdP's
+    ``issuer`` / ``audience``.
+
+Either way, every non-allowlisted request without a valid identity is
+rejected (401) by the global ``OIDCAuthMiddleware`` before it reaches a
+handler. (The public-route allowlist -- ``/healthz``, ``/ui-config``,
+``/auth/*``, the SCM webhooks, the MCP wire endpoints -- is unauthenticated
+by necessity and is NOT an "open" mode.)
 
 Current (v1) surface for new code::
 
@@ -104,10 +118,13 @@ async def get_current_user(request: Request) -> CurrentUser:
     with resolved RBAC ``roles``/``scopes`` via
     ``opsrag.auth.scopes.current_user_with_authz``:
 
-      * **open** (``auth is None`` / ``auth.mode == "open"``) -> anonymous
-        carrying ALL scopes (today's zero-config behavior preserved).
-      * **oidc / login** -> verified OIDC user with roles/scopes resolved
-        from ``groups`` + ``auth.role_mappings``.
+      * **login** -> identity from the signed first-party session cookie;
+        roles baked in at login.
+      * **oidc** -> verified OIDC user with roles/scopes resolved from
+        ``groups`` + ``auth.role_mappings``.
+
+    Authentication is always enforced; a scopeless anonymous user is only
+    produced on the public allowlist routes (which do not consult scopes).
 
     The OIDC ``CurrentUser`` exposes a back-compat ``.oid`` alias of
     ``.sub`` so the not-yet-migrated ``opsrag.api.routes`` call sites and
