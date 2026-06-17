@@ -56,7 +56,7 @@ account, and no external identity provider required.
 | 🔐 **Auth built in** | first-party `login` (default) / `oidc` modes, SSO (Google · GitHub · Microsoft), a seeded admin account, per-session ownership, optional Redis rate limiting. |
 | 🧩 **Pluggable everything** | Vector store, knowledge graph, and LLM / embedding / reranker providers are all swappable from config — no rebuild. |
 | 📊 **Observability** | Per-request token + cost telemetry, Phoenix / OTLP traces, and an evaluation harness wired into CI gates. |
-| 📏 **Runnable eval** | A two-tier golden eval over the shipped `samples/` corpus — an offline retrieval gate (`pytest tests/integration/test_eval_samples_retrieval.py`, no secrets) plus a full answer-quality judge (`python -m opsrag.eval run`). |
+| 📏 **Runnable eval** | A two-tier golden eval over the shipped `samples/` corpus — an offline, no-secrets gate that scores the default core retrieval path (Dense + BM25 RRF + local rerank; no MMR/judge) via `pytest tests/integration/test_eval_samples_retrieval.py`, plus a full answer-quality judge (`python -m opsrag.eval run`). The badge reports hybrid recall@5 on `samples/`, not a full-pipeline number. |
 
 ## 🏗️ Architecture
 

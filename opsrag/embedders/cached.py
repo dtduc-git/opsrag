@@ -55,6 +55,10 @@ class CachedEmbedder:
         self._cache: OrderedDict[tuple[str, str, int], tuple[list[float], float]] = OrderedDict()
         self._hits = 0
         self._misses = 0
+        # One-shot runtime dimension check -- see `_verify_dim`. Flips True
+        # after the first non-empty result is checked so the assertion costs
+        # nothing on the hot path thereafter.
+        self._dim_verified = False
 
     @property
     def dimension(self) -> int:
@@ -77,6 +81,34 @@ class CachedEmbedder:
         # if that ever changes.
         return (query.strip(), self._inner.model_name, self._inner.dimension)
 
+    def _verify_dim(self, vector: list[float]) -> None:
+        """One-time runtime assertion that the provider's actual vector length
+        matches its DECLARED `.dimension`.
+
+        Construction-time guards (per-embedder None+unknown -> ValueError) plus
+        the H4 collection guard catch most dim drift, but a stale
+        `_MODEL_DIMENSIONS` entry or a Matryoshka model that silently truncates
+        can still declare one dim while emitting another -- baking a wrong-dim
+        FRESH collection with no error. This wraps EVERY provider centrally:
+        the first non-empty vector to flow through is length-checked against the
+        declared dim, then `_dim_verified` is set so this runs exactly ONCE
+        (negligible cost). Empty vectors are ignored -- nothing to measure.
+        """
+        if self._dim_verified or not vector:
+            return
+        declared = self._inner.dimension
+        actual = len(vector)
+        if actual != declared:
+            raise ValueError(
+                f"Embedding dimension mismatch for model "
+                f"{self._inner.model_name!r}: declared dimension {declared} "
+                f"but provider returned a vector of length {actual}. A stale "
+                f"_MODEL_DIMENSIONS entry or a truncating (Matryoshka) model "
+                f"would silently bake a wrong-dimension collection -- refusing."
+            )
+        # Mark verified only after a successful (matching) check.
+        self._dim_verified = True
+
     async def embed_query(self, query: str) -> list[float]:
         key = self._key(query)
         now = time.monotonic()
@@ -95,6 +127,8 @@ class CachedEmbedder:
         # Miss path.
         self._misses += 1
         vector = await self._inner.embed_query(query)
+        # Length-check ONCE before caching -- never store a wrong-dim vector.
+        self._verify_dim(vector)
         self._cache[key] = (vector, now + self._ttl)
         self._cache.move_to_end(key)
 
@@ -106,7 +140,14 @@ class CachedEmbedder:
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         # Batch calls bypass the cache entirely -- different semantics.
-        return await self._inner.embed_texts(texts)
+        vectors = await self._inner.embed_texts(texts)
+        # Bulk indexing flows through here -- this is exactly where a wrong-dim
+        # collection gets baked, so length-check the first non-empty vector ONCE.
+        for vector in vectors:
+            if vector:
+                self._verify_dim(vector)
+                break
+        return vectors
 
     def stats(self) -> dict:
         total = self._hits + self._misses

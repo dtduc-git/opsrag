@@ -5,10 +5,56 @@ Extracts metadata, labels, container specs for downstream entity extraction.
 """
 from __future__ import annotations
 
-import yaml
+from io import StringIO
+
+from ruamel.yaml import YAML
 
 from opsrag.interfaces.parser import DocSection, DocType, ParsedDocument
 from opsrag.interfaces.scm import RepoFile
+
+# Round-trip loader: preserves comments + anchors attached to nodes so ops
+# rationale (e.g. `# bumped to 5 replicas after incident X`) survives into the
+# emitted chunk text. PyYAML's safe_load/dump discarded both.
+_YAML = YAML(typ="rt")
+_YAML.preserve_quotes = True
+
+
+def _dump_node(node: object) -> str:
+    """Round-trip a (sub-)node back to YAML text, comments + anchors intact.
+
+    ruamel only dumps to a stream, so route through StringIO. Comments stay
+    attached to the CommentedMap/CommentedSeq node, so re-dumping a doc (or a
+    helm/alert sub-node) re-emits them.
+    """
+    buf = StringIO()
+    _YAML.dump(node, buf)
+    return buf.getvalue().strip()
+
+
+def _dump_key_slice(parent: object, key: object, value: object) -> str:
+    """Dump a single ``{key: value}`` chunk, preserving that key's comment.
+
+    A comment written *next to a top-level key* (``replicas: 5  # rationale``)
+    is stored on the PARENT CommentedMap's ``.ca.items[key]``, not on the value
+    node. A naive ``{key: value}`` dump would drop it. So we build a one-key
+    CommentedMap and copy the parent's comment association for this key across.
+    The value sub-node keeps its own attached comments/anchors automatically.
+
+    Falls back to a plain ``key: value`` line for unrepresentable values.
+    """
+    try:
+        from ruamel.yaml.comments import CommentedMap
+
+        slice_map = CommentedMap()
+        slice_map[key] = value
+        # Carry the inline / preceding comment attached to this key on the
+        # parent across to the slice so it re-emits next to the key.
+        parent_ca = getattr(parent, "ca", None)
+        if parent_ca is not None and key in getattr(parent_ca, "items", {}):
+            slice_map.ca.items[key] = parent_ca.items[key]
+        return _dump_node(slice_map)
+    except Exception:
+        return f"{key}: {value}"
 
 _K8S_KINDS = {
     "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet",
@@ -38,12 +84,14 @@ class K8sManifestParser:
 
     def parse(self, file: RepoFile) -> ParsedDocument:
         try:
-            docs = list(yaml.safe_load_all(file.content))
+            docs = list(_YAML.load_all(file.content))
         except Exception:
             docs = []
 
         sections: list[DocSection] = []
         for manifest in docs:
+            # ruamel returns CommentedMap (a dict subclass); `.get()`/iteration
+            # work unchanged. Skip non-mapping docs (lists/scalars/None).
             if not isinstance(manifest, dict):
                 continue
             kind = manifest.get("kind", "Unknown")
@@ -52,11 +100,11 @@ class K8sManifestParser:
             namespace = meta.get("namespace", "default")
             heading = f"{kind}/{namespace}/{name}"
 
-            # sort_keys=False: keep the manifest's authored key order so the
-            # chunk text tracks the source for BM25 exact-match (sorting reorders
-            # `replicas`/`image`/`env` away from how operators wrote/grep them).
-            # Comments are still lost -- PyYAML can't round-trip them.
-            body = yaml.dump(manifest, default_flow_style=False, sort_keys=False).strip()
+            # Round-trip dump keeps the manifest's authored key order (so the
+            # chunk text tracks the source for BM25 exact-match) AND the inline
+            # / standalone comments + anchors attached to this doc -- the ops
+            # rationale operators write next to `replicas`/`image`/`env`.
+            body = _dump_node(manifest)
 
             section_type = self._classify_kind(kind)
             sections.append(DocSection(

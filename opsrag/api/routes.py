@@ -1166,13 +1166,18 @@ async def index_repo(
 
 
 @router.post("/index/source", response_model=IndexSourceResponse)
-async def index_source(req: IndexSourceRequest, request: Request) -> IndexSourceResponse:
+async def index_source(
+    req: IndexSourceRequest, request: Request,
+    _user: CurrentUser = Depends(require_scope(Scope.ADMIN)),
+) -> IndexSourceResponse:
     """Trigger ingestion of a non-git source (Confluence space etc).
 
     Same fire-and-forget pattern as `/index/repo`: the tracker entry
     appears immediately and the UI watches `/indexing/status` for
     progress under the source's group.
-    """
+
+    Requires the ``admin`` scope (corpus-mutating ingestion, like
+    `/index/repo`)."""
     pipeline = request.app.state.ingestion_pipeline
     qa_cache = getattr(request.app.state, "qa_cache", None)
 
@@ -1247,9 +1252,12 @@ async def admin_reaugment_confluence(
     dry_run: bool = False,
     scope: str = "SRE",
     max_docs: int = 0,
+    _user: CurrentUser = Depends(require_scope(Scope.ADMIN)),
 ) -> dict:
     """Re-run contextual chunking on Confluence docs whose children
     lack the `[Context: ...]` prefix.
+
+    Requires the ``admin`` scope (corpus-mutating re-augmentation).
 
     A prior audit found that some Confluence children were left
     un-augmented during initial
@@ -1689,6 +1697,7 @@ async def list_feedback(
     request: Request,
     direction: int | None = None,
     limit: int = 50,
+    _user: CurrentUser = Depends(require_scope(Scope.ADMIN)),
 ) -> FeedbackListResponse:
     """List recent feedback rows for SRE triage.
 
@@ -1696,8 +1705,9 @@ async def list_feedback(
     answers, which is the primary SRE workflow ("show me what went wrong
     this week, author corrections into the SRE-KB").
 
-    Auth: same DELETE/POST-admin gate via :mod:`opsrag.api.middleware`
-    when API keys are configured -- see ADMIN_ROUTES.
+    Auth: requires the ``admin`` scope. The rows expose other users'
+    query/answer snippets, notes, and ``user_id``, so listing is gated to
+    operators -- mirroring the sibling ``GET /corrections`` endpoint.
     """
     store = getattr(request.app.state, "feedback_store", None)
     if store is None:
@@ -1923,10 +1933,15 @@ async def investigation_cache_summary(request: Request) -> InvestigationCacheSum
 
 
 @router.post("/admin/index/investigation-history")
-async def index_investigation_history(request: Request) -> dict:
+async def index_investigation_history(
+    request: Request,
+    _user: CurrentUser = Depends(require_scope(Scope.ADMIN)),
+) -> dict:
     """Trigger an on-demand index pass of the investigation-history
     source. Same code path as the daily scheduler runs -- useful for
     smoke-testing after wiring the source or after pruning the cache.
+
+    Requires the ``admin`` scope (corpus-mutating ingestion).
 
     Returns the count of investigations promoted into the corpus."""
     if "investigation-history" not in (request.app.state.ingestion_pipeline.sources or {}):

@@ -14,6 +14,53 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 _LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 _MD_EXTENSIONS = (".md", ".markdown", ".mdx")
 
+# A fenced-code marker line: starts (after optional indent) with >=3 backticks
+# or >=3 tildes. Used to pre-scan fenced char ranges so an ATX `#`-prefixed
+# line INSIDE a ``` block (a shell comment, a Python comment, a Dockerfile
+# directive) is not mis-parsed as a markdown heading and split out as its own
+# section (M5).
+_FENCE_RE = re.compile(r"^[ \t]*(?:`{3,}|~{3,})", re.MULTILINE)
+
+
+def _fenced_ranges(content: str) -> list[tuple[int, int]]:
+    """Char ranges [start, end) covered by fenced code blocks.
+
+    A fence opens on a line beginning with ``` / ~~~ and closes only on a later
+    line with the SAME marker char and a run >= the opening length (CommonMark)
+    -- a ``` block is NOT closed by ~~~, and a foreign fence line inside the
+    block is treated as content, not a close. Ranges span from the opening
+    fence's line start through the end of the closing fence's line, so any
+    heading-like line strictly inside is shielded. Unterminated -> EOF.
+    """
+    ranges: list[tuple[int, int]] = []
+    n = len(content)
+    open_start: int | None = None
+    open_char = ""
+    open_len = 0
+    for m in _FENCE_RE.finditer(content):
+        run = content[m.start():m.end()].lstrip(" \t")
+        char, length = run[0], len(run)
+        if open_start is None:
+            open_start, open_char, open_len = m.start(), char, length
+        elif char == open_char and length >= open_len:
+            line_end = content.find("\n", m.end())
+            end = (line_end + 1) if line_end != -1 else n
+            ranges.append((open_start, end))
+            open_start = None
+        # else: a different-marker / shorter fence line inside the open block
+        # is part of the code content -- ignore it.
+    if open_start is not None:
+        ranges.append((open_start, n))
+    return ranges
+
+
+def _outside_fences(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    """True if char offset ``pos`` is not inside any fenced range."""
+    for start, end in ranges:
+        if start <= pos < end:
+            return False
+    return True
+
 
 class GenericMarkdownParser:
     """Parses any Markdown file into sections by heading."""
@@ -62,7 +109,14 @@ class GenericMarkdownParser:
 
     @staticmethod
     def _extract_sections(content: str) -> list[DocSection]:
-        matches = list(_HEADING_RE.finditer(content))
+        # Only accept headings OUTSIDE fenced code blocks: a `#`-prefixed line
+        # inside a ``` block (shell/Python comment, Dockerfile directive) is
+        # NOT a markdown heading and must not split the fence into sections (M5).
+        fenced = _fenced_ranges(content)
+        matches = [
+            m for m in _HEADING_RE.finditer(content)
+            if _outside_fences(m.start(), fenced)
+        ]
         if not matches:
             return [DocSection(heading="", content=content.strip(), level=0)]
 

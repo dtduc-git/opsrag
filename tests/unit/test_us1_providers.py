@@ -115,6 +115,6 @@ def test_parsers_import(module: str, cls: str) -> None:
 def test_agent_graph_builders_exist() -> None:
     from opsrag.agent import graph
 
-    # At least the minimal + hybrid builders the server wires must exist.
+    # At least the minimal + full builders the server wires must exist.
     assert hasattr(graph, "build_minimal_graph")
-    assert hasattr(graph, "build_hybrid_graph")
+    assert hasattr(graph, "build_full_graph")

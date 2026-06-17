@@ -465,9 +465,7 @@ class QdrantVectorStore:
         embedding: list[float],
         query_text: str,
         top_k: int = 10,
-        alpha: float = 0.7,  # ignored -- kept for backwards compat with callers
         filters: dict | None = None,
-        graph_anchored_paths: list[tuple[str, str]] | None = None,
         code_embedding: list[float] | None = None,
         code_store: QdrantVectorStore | None = None,
     ) -> list[SearchResult]:
@@ -489,13 +487,10 @@ class QdrantVectorStore:
         3. Code lane (optional): code-specific embedder against the
            `opsrag_code` collection.
 
-        The `alpha` parameter is kept in the signature for backwards
-        compatibility (callers that pass it are not broken) but is
-        IGNORED -- RRF is parameter-free.
-
-        The `graph_anchored_paths` parameter is also kept for backwards
-        compat but is IGNORED -- the entity-anchored Neo4j lane was
-        removed (replacement Cartography integration in progress).
+        RRF is parameter-free, so there is no `alpha` blend knob (the prior
+        `alpha`/`graph_anchored_paths` params were vestigial -- always ignored,
+        passed by no caller -- and were removed). The entity-anchored Neo4j
+        graph lane was likewise removed.
         """
         await self.ensure_collection()
         qfilter = self._search_filter(filters)  # excludes parent chunks
@@ -521,8 +516,8 @@ class QdrantVectorStore:
         # then RE-RAISED below (see the post-gather block).
 
         # Dense (semantic) results -- skipped if caller passed zero-vec
-        # (keyword_retriever's BM25-only intent, signalled today via alpha=0
-        # but here we detect the zero-vec directly so RRF stays parameter-free).
+        # (keyword_retriever's BM25-only intent, detected directly from the
+        # zero-vector so RRF stays parameter-free -- no alpha=0 signalling).
         async def _dense() -> list:
             if not (embedding and any(abs(x) > 1e-9 for x in embedding)):
                 return []
@@ -611,12 +606,10 @@ class QdrantVectorStore:
         sparse_hits: list = sparse_res if not isinstance(sparse_res, BaseException) else []
         code_hits: list = code_res if not isinstance(code_res, BaseException) else []
 
-        # Graph-anchored Neo4j lane removed. The
-        # `graph_anchored_paths` kwarg is still accepted for backwards
-        # compat with older callers but does nothing -- entity-extractor
-        # wiring is gone and the Neo4j driver is reserved for the new
-        # Cartography integration.
-        _ = graph_anchored_paths  # silence unused-var lint
+        # Graph-anchored Neo4j lane removed (entity-extractor wiring is gone;
+        # the Neo4j driver is reserved for the new Cartography integration). The
+        # vestigial `graph_anchored_paths` kwarg that fed it was dropped -- this
+        # lane is now permanently empty.
         graph_hits: list = []
 
         # RRF fusion over all active lanes.

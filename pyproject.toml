@@ -42,6 +42,9 @@ dependencies = [
     "pydantic>=2.10",
     "pydantic-settings>=2.6",
     "pyyaml>=6.0",
+    # Round-trip YAML (comments + anchors preserved through ingestion so ops
+    # rationale comments get indexed/embedded/BM25'd -- PyYAML drops them).
+    "ruamel.yaml>=0.18",
     # OIDC Bearer-token verification (JWKS-based; provider-agnostic).
     "pyjwt[crypto]>=2.8",
     # Default LLM providers
@@ -123,6 +126,7 @@ ner = ["spacy>=3.7,<4.0"]
 eval = [
     "deepeval>=2.0",
     "pyyaml>=6.0",
+    "ruamel.yaml>=0.18",
 ]
 dev = [
     "pytest>=8.0",

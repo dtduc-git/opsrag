@@ -22,14 +22,45 @@ The offline tier is the no-secrets proof that retrieval works; the answer
 tier adds the LLM judge for faithfulness/answer-quality. The two share the
 golden set and the path-matching rules.
 
+The offline tier exercises the app's **default core retrieval path** end to
+end -- **Dense + BM25 RRF fusion** (`hybrid_search`) followed by a **local
+FastEmbed cross-encoder rerank** over the fused candidates -- all running
+locally (the `Qdrant/bm25` sparse model and the
+`Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder are ONNX, cached on disk, no
+network at score time). It deliberately does **not** exercise MMR
+diversification or the live LLM faithfulness judge; those stay in the
+live-server answer-quality tier. So the offline numbers are an honest
+Dense+BM25+RRF+rerank recall figure, not a full-pipeline answer-quality
+number.
+
 ## Tier 1 -- offline retrieval eval (no secrets)
 
 `tests/integration/test_eval_samples_retrieval.py` indexes `samples/` into an
 **in-process Qdrant** (`url=":memory:"`) using a **local FastEmbed ONNX
 embedder** (`BAAI/bge-small-en-v1.5`, 384-dim -- no API key), loads the public
-goldens, runs retrieval for every scored golden, and asserts aggregate
-**Recall@5 >= 0.85** (observed ~1.0 on the validated recipe). Negative goldens
-(empty relevant set) are skipped for ranking. Run it:
+goldens, and runs retrieval for every scored golden through the app's default
+core path: **Dense + BM25 RRF fusion** (`hybrid_search`) then a **local
+FastEmbed cross-encoder rerank** (`Xenova/ms-marco-MiniLM-L-6-v2`) over the
+fused pool. It then asserts the aggregate floors below. **MMR diversification
+and the live LLM judge are excluded** (live-server tier only). Negative goldens
+(empty relevant set) are skipped for ranking.
+
+Observed aggregate over the public goldens on this recipe (deterministic):
+
+| Metric | Observed | Gate floor |
+|---|---|---|
+| Recall@5 | 1.0000 | >= 0.85 |
+| MRR | 0.9123 | >= 0.75 |
+| Precision@5 | 0.2421 | >= 0.15 |
+| NDCG@5 | 0.9348 | >= 0.75 |
+
+Adding the cross-encoder pulls the relevant doc to rank ~1, so MRR/NDCG sit
+high; Precision@5 is lower because it is graded at **document** granularity and
+the deeper reranked pool surfaces more distinct docs in the top-5 (most goldens
+have a single relevant doc, so document-level precision is structurally
+~`1/(distinct docs in top-5)`). Each floor sits conservatively below its
+observed value so embedder/chunker/cross-encoder noise can't flake the gate
+while a real regression still trips it. Run it:
 
 ```sh
 uv sync --extra dev --extra eval --extra fastembed
@@ -38,9 +69,12 @@ pytest tests/integration/test_eval_samples_retrieval.py -v
 
 The reusable harness is `opsrag/eval/retrieval_offline.py`:
 `build_offline_index(samples_dir) -> (embedder, vector_store)` and
-`retrieval_scores(embedder, vector_store, goldens, k=5)` (returns per-golden
-Recall@K + MRR and the aggregate means). The `eval-offline` CI job runs this
-on every push/PR -- it's the always-on, secret-free gate.
+`retrieval_scores(embedder, vector_store, goldens, k=5, reranker=None)`
+(runs `hybrid_search` + local cross-encoder rerank per golden -- pass
+`reranker=` to inject one, else the app's default local `FastEmbedReranker` is
+built once -- and returns per-golden Recall@K + MRR + Precision@K + NDCG@K and
+the aggregate means). The `eval-offline` CI job runs this on every push/PR --
+it's the always-on, secret-free gate.
 
 ## Tier 2 -- answer-quality eval (live server + judge)
 

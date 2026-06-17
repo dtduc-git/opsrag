@@ -7,9 +7,15 @@ specific repo / module / service slug get drowned out by Confluence
 pages that merely link to the same repo -- both score similarly under
 pure dense+cross-encoder ranking because both mention the slug in text.
 
-The boost is multiplicative and capped to keep the cross-encoder's
-relative ordering meaningful when boosts collide (multiple chunks all
-anchor-match).
+The boost is additive and capped (see ``_PATH_ANCHOR_BONUS``) to keep
+the cross-encoder's relative ordering meaningful when boosts collide
+(multiple chunks all anchor-match) -- it only overturns CLOSE calls, not
+large quality gaps.
+
+The dedup -> rerank -> anchor-boost -> MMR pipeline lives in the shared,
+pure ``apply_rerank_enrichments`` helper so the ``knowledge_search`` MCP
+tool path (opsrag/mcp/knowledge.py) reuses the EXACT same logic and the
+two retrieval paths can't re-diverge.
 """
 from __future__ import annotations
 
@@ -37,6 +43,148 @@ _PATH_ANCHOR_BONUS = 0.15
 _DEFAULT_MIN_RERANK_SCORE = 0.05
 # Fallback grader trust floor when a reranker doesn't declare trust_score.
 _DEFAULT_TRUST_RERANK_SCORE = 0.65
+
+
+def _content_dedup_pool(
+    chunks: list[Chunk],
+    *,
+    content_dedup: bool,
+    content_dedup_threshold: float,
+    skip_near_dup: bool,
+) -> list[Chunk]:
+    """Drop exact (and optionally near-) duplicate-content chunks BEFORE the
+    rerank call -- so the cross-encoder isn't billed for duplicate bytes and a
+    copied values.yaml can't crowd out distinct docs.
+
+    Keeps the FIRST occurrence to preserve the RRF/merge order. With a >0
+    threshold AND ``skip_near_dup`` False, additionally drops a near-duplicate
+    whose max token-set Jaccard vs an already-kept chunk exceeds the threshold.
+
+    ``skip_near_dup`` is set for synthesis intent ("compare A vs B"), which
+    deliberately wants both distinct-but-similar anchor docs; only exact
+    byte-for-byte copies are collapsed there.
+
+    Pure + side-effect free (no state, no closures) so BOTH rerank_node and
+    the knowledge_search MCP path can share it and never re-diverge.
+    """
+    if not content_dedup:
+        return list(chunks)
+
+    threshold = float(content_dedup_threshold or 0.0)
+    apply_near_dup = threshold > 0.0 and not skip_near_dup
+    # Key exact-dedup on the content STRING itself, not hash(content): hashing
+    # risks a silent drop of a DISTINCT chunk on a hash collision. Membership
+    # on the string is exact.
+    seen: set[str] = set()
+    kept_token_sets: list[frozenset[str]] = []
+    deduped: list[Chunk] = []
+    for c in chunks:
+        content = c.content or ""
+        if content in seen:
+            continue
+        if apply_near_dup:
+            toks = _tokens(content)
+            is_near_dup = any(
+                (
+                    1.0 if (not toks and not kt)
+                    else 0.0 if (not toks or not kt)
+                    else len(toks & kt) / len(toks | kt)
+                ) > threshold
+                for kt in kept_token_sets
+            )
+            if is_near_dup:
+                continue
+            kept_token_sets.append(toks)
+        seen.add(content)
+        deduped.append(c)
+    if len(deduped) < len(chunks):
+        _log.info(
+            "rerank: content-dedup collapsed pool %d -> %d (threshold=%.2f)",
+            len(chunks), len(deduped), threshold,
+        )
+    return deduped
+
+
+async def apply_rerank_enrichments(
+    query: str,
+    pool: list[Chunk],
+    reranker: Reranker,
+    *,
+    anchors: list[str] | None = None,
+    top_k: int = 5,
+    diversity: float = 0.0,
+    content_dedup: bool = True,
+    content_dedup_threshold: float = 0.0,
+    skip_near_dup: bool = False,
+) -> tuple[list[Chunk], float, bool]:
+    """Shared rerank-enrichment pipeline used by BOTH the LangGraph rerank node
+    and the ``knowledge_search`` MCP tool, so the two paths can't re-diverge.
+
+    Given a candidate ``pool`` of chunks (already merged / RRF-fused), this:
+
+      1. content-deduplicates the pool BEFORE the rerank call
+         (gated by ``content_dedup`` + ``content_dedup_threshold``);
+      2. cross-encoder reranks the FULL deduped pool;
+      3. applies the additive, capped path-anchor boost
+         (``+_PATH_ANCHOR_BONUS`` when a chunk's source_path/repo literally
+         contains an anchor) and re-sorts;
+      4. optionally re-orders for MMR diversity (``diversity`` > 0).
+
+    Returns ``(kept, best_score, anchors_matched)`` where ``best_score`` is the
+    max RAW cross-encoder score (pre-boost) -- the weak-retrieval signal -- and
+    ``anchors_matched`` is True iff a kept chunk's path/repo matches an anchor.
+
+    The reranker is NOT invoked on an empty pool. This helper does NOT swallow
+    reranker exceptions -- the caller decides the fallback (the node uses a
+    neutral mid-band score; the MCP path falls back to pre-rerank order),
+    because the two paths have different outage semantics.
+    """
+    anchors = anchors or []
+    if not pool:
+        return [], 0.0, False
+
+    chunks = _content_dedup_pool(
+        pool,
+        content_dedup=content_dedup,
+        content_dedup_threshold=content_dedup_threshold,
+        skip_near_dup=skip_near_dup,
+    )
+
+    # Score the FULL candidate pool so the anchor boost can rescue an
+    # anchor-matching doc the cross-encoder ranked deep.
+    results = [SearchResult(chunk=c, score=0.0) for c in chunks]
+    reranked = await reranker.rerank(query, results, top_k=len(results))
+
+    # Path-anchor boost -- additive + capped (see _PATH_ANCHOR_BONUS).
+    boosted: list[tuple[float, float, Chunk]] = []
+    for r in reranked:
+        chunk = r.chunk
+        base = float(r.relevance_score)
+        if anchors and path_matches_any_anchor(chunk.source_path, chunk.repo, anchors):
+            score = min(1.0, base + _PATH_ANCHOR_BONUS)
+        else:
+            score = base
+        boosted.append((score, base, chunk))
+    boosted.sort(key=lambda t: t[0], reverse=True)
+
+    active_diversity = float(diversity or 0.0)
+    if active_diversity > 0.0 and len(boosted) > 1:
+        reordered = mmr_reorder(
+            boosted,
+            relevance=[s for s, _b, _c in boosted],
+            diversity=active_diversity,
+            text_of=lambda t: t[2].content,
+            top_k=top_k,
+        )
+        kept = [c for _s, _b, c in reordered]
+    else:
+        kept = [c for _s, _b, c in boosted[:top_k]]
+
+    best_base_score = max((b for _s, b, _c in boosted), default=0.0)
+    anchors_matched = any(
+        path_matches_any_anchor(c.source_path, c.repo, anchors) for c in kept
+    )
+    return kept, best_base_score, anchors_matched
 
 
 def rerank_node(
@@ -102,124 +250,62 @@ def rerank_node(
         # roughly one extra rerank request per query, fixes recall on
         # multi_doc_synthesis from 0.45 -> ~0.7+ in eval.
         effective_top_k = top_k
-        if state.get("synthesis_intent"):
+        synthesis = bool(state.get("synthesis_intent"))
+        if synthesis:
             effective_top_k = max(top_k, 10)
 
-        # Content dedup BEFORE the rerank call -- duplicate-content chunks
-        # (e.g. the same values.yaml copied across repos) are otherwise all
-        # billed by the cross-encoder and can crowd out distinct docs. The
-        # existing id / (repo, source_path) dedup upstream never keys on
-        # CONTENT, so identical bytes from two different paths slip through.
-        # Keep the FIRST occurrence to preserve the RRF/merge order, drop
-        # later identical-content chunks. With a >0 threshold, additionally
-        # drop a near-duplicate whose max token-set Jaccard vs an
-        # already-kept chunk exceeds the threshold. Reads the flag from state
-        # (mirrors rerank_diversity), falling back to the node closure args
-        # forwarded from cfg.agent.* -- so config-only settings actually take
-        # effect (without a closure fallback the cfg values were dead).
-        if state.get("rerank_content_dedup", content_dedup):
-            dedup_threshold = float(
-                state.get("rerank_content_dedup_threshold", content_dedup_threshold) or 0.0
-            )
-            # Synthesis intent ("compare A vs B") deliberately widened top_k to
-            # keep both anchor docs; the near-dup (Jaccard) pass could drop one
-            # of two DISTINCT-but-similar synthesis docs the path wants to keep,
-            # so skip it for synthesis. Exact-content dedup still runs (an
-            # identical byte-for-byte copy is never the doc synthesis needs).
-            synthesis = bool(state.get("synthesis_intent"))
-            apply_near_dup = dedup_threshold > 0.0 and not synthesis
-            # Key exact-dedup on the content STRING itself, not hash(content):
-            # hashing risks a silent drop of a DISTINCT chunk on a hash
-            # collision. Membership on the string is exact.
-            seen: set[str] = set()
-            kept_token_sets: list[frozenset[str]] = []
-            deduped_chunks: list[Chunk] = []
-            for c in chunks:
-                content = c.content or ""
-                if content in seen:
-                    continue
-                if apply_near_dup:
-                    toks = _tokens(content)
-                    # Jaccard against already-kept chunks; reuse the cached
-                    # token sets so each candidate is tokenized once.
-                    is_near_dup = any(
-                        (
-                            1.0 if (not toks and not kt)
-                            else 0.0 if (not toks or not kt)
-                            else len(toks & kt) / len(toks | kt)
-                        ) > dedup_threshold
-                        for kt in kept_token_sets
-                    )
-                    if is_near_dup:
-                        continue
-                    kept_token_sets.append(toks)
-                seen.add(content)
-                deduped_chunks.append(c)
-            if len(deduped_chunks) < len(chunks):
-                _log.info(
-                    "rerank: content-dedup collapsed pool %d -> %d (threshold=%.2f)",
-                    len(chunks), len(deduped_chunks), dedup_threshold,
-                )
-            chunks = deduped_chunks
-
-        results = [SearchResult(chunk=c, score=0.0) for c in chunks]
-        # Score the FULL candidate pool so the anchor boost can rescue an
-        # anchor-matching doc the cross-encoder ranked deep (passing
-        # effective_top_k*3 capped the boost's view to ~15 of the ~40 pool).
-        # Fall back to bi-encoder order if the reranker errors (a cloud
-        # reranker API hiccup must not crash the whole query).
-        wide_top_k = len(results)
-        reranker_outage = False
-        try:
-            reranked = await reranker.rerank(query, results, top_k=wide_top_k)
-        except Exception as exc:
-            _log.warning("reranker failed (%s) -- falling back to vector order", exc)
-            from opsrag.interfaces.reranker import RerankResult
-            reranker_outage = True
-            # Score that DECOUPLES the two things a reranker score drives:
-            #   * bypass the weak-retrieval gate (>= floor) -- an outage must not
-            #     fake a spurious "insufficient information", AND
-            #   * do NOT signal max confidence (< trust) to the grader's
-            #     trust-rerank-over-CRAG floor -- an outage is when retrieval is
-            #     LEAST verifiable, so it must not suppress CRAG correction.
-            # The prior 1.0 did the first but broke the second. Mid-band value.
-            _neutral = (rerank_floor + rerank_trust) / 2.0
-            reranked = [RerankResult(chunk=c, relevance_score=_neutral) for c in chunks]
-
-        # Apply path-anchor boost -- additive + capped (see _PATH_ANCHOR_BONUS).
-        boosted = []
-        for r in reranked:
-            chunk = r.chunk
-            base = float(r.relevance_score)
-            if anchors and path_matches_any_anchor(chunk.source_path, chunk.repo, anchors):
-                score = min(1.0, base + _PATH_ANCHOR_BONUS)
-            else:
-                score = base
-            boosted.append((score, base, chunk))
-        boosted.sort(key=lambda t: t[0], reverse=True)
-
-        # Optional post-rerank MMR diversity re-ordering (default OFF).
-        # When state["rerank_diversity"] / the node's `diversity` arg is 0,
-        # this is a strict pass-through (mmr_reorder returns input order), so
-        # default output is unchanged. When >0 it breaks up near-duplicate
-        # config variants the cross-encoder stacked at the top, using the
-        # boosted rerank score as relevance and chunk content for similarity.
-        active_diversity = float(state.get("rerank_diversity", diversity) or 0.0)
-        if active_diversity > 0.0 and len(boosted) > 1:
-            reordered = mmr_reorder(
-                boosted,
-                relevance=[s for s, _b, _c in boosted],
-                diversity=active_diversity,
-                text_of=lambda t: t[2].content,
-                top_k=effective_top_k,
-            )
-            kept = [c for _s, _b, c in reordered]
-        else:
-            kept = [c for _s, _b, c in boosted[:effective_top_k]]
-        best_base_score = max((b for _s, b, _c in boosted), default=0.0)
-        anchors_in_kept = any(
-            path_matches_any_anchor(c.source_path, c.repo, anchors) for c in kept
+        # Content dedup + path-anchor boost + MMR run via the SHARED
+        # apply_rerank_enrichments helper (also used by the knowledge_search
+        # MCP tool) so the two retrieval paths can't re-diverge. State keys win
+        # over the node's closure args (forwarded from cfg.agent.*), so both
+        # per-request/eval overrides AND config-only settings take effect.
+        #   * content_dedup gate (mirrors rerank_diversity): state -> closure.
+        #   * synthesis intent skips the near-dup (Jaccard) pass so two
+        #     distinct-but-similar anchor docs both survive; exact-dup collapse
+        #     still runs.
+        active_dedup = state.get("rerank_content_dedup", content_dedup)
+        dedup_threshold = float(
+            state.get("rerank_content_dedup_threshold", content_dedup_threshold) or 0.0
         )
+        active_diversity = float(state.get("rerank_diversity", diversity) or 0.0)
+
+        # The node owns reranker-outage semantics (the shared helper does NOT
+        # swallow exceptions -- the MCP path falls back to pre-rerank order
+        # instead). Wrap the reranker so an outage yields a NEUTRAL mid-band
+        # score that DECOUPLES the two things a reranker score drives:
+        #   * bypass the weak-retrieval gate (>= floor) -- an outage must not
+        #     fake a spurious "insufficient information", AND
+        #   * do NOT signal max confidence (< trust) to the grader's
+        #     trust-rerank-over-CRAG floor -- an outage is when retrieval is
+        #     LEAST verifiable, so it must not suppress CRAG correction.
+        outage_flag = {"hit": False}
+        _neutral = (rerank_floor + rerank_trust) / 2.0
+
+        class _OutageGuardedReranker:
+            async def rerank(self, q, results, top_k=5):  # noqa: ANN001
+                try:
+                    return await reranker.rerank(q, results, top_k=top_k)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("reranker failed (%s) -- falling back to vector order", exc)
+                    from opsrag.interfaces.reranker import RerankResult
+                    outage_flag["hit"] = True
+                    return [
+                        RerankResult(chunk=r.chunk, relevance_score=_neutral)
+                        for r in results
+                    ]
+
+        kept, best_base_score, anchors_in_kept = await apply_rerank_enrichments(
+            query,
+            chunks,
+            _OutageGuardedReranker(),
+            anchors=anchors,
+            top_k=effective_top_k,
+            diversity=active_diversity,
+            content_dedup=bool(active_dedup),
+            content_dedup_threshold=dedup_threshold,
+            skip_near_dup=synthesis,
+        )
+        reranker_outage = outage_flag["hit"]
 
         if anchors and not anchors_in_kept:
             _log.info(

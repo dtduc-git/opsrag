@@ -81,6 +81,27 @@ class NerStats:
 _stats = NerStats()
 
 
+# Config-driven default for the NER discriminator. `cfg.qa_ner_guard`
+# (QACacheConfig, default True) populates this at boot via
+# `configure(qa_ner_guard=...)`; the `OPSRAG_QA_NER_SPACY` env var, when
+# set, always wins (config-overridable latency pattern, matches the judge
+# + pricing overrides). The guard is ON by default now: graceful-degrade
+# means a deployment without the spaCy model installed simply gets an
+# empty token set (regex discriminators still run), so flipping the
+# default on never hard-fails a non-container install.
+_default_enabled: bool = True
+
+
+def configure(*, qa_ner_guard: bool | None = None) -> None:
+    """Apply the resolved `cfg.qa_ner_guard` as the module default.
+
+    Called once at boot by the config wiring. The env var still overrides
+    this when present (see `is_enabled`)."""
+    global _default_enabled
+    if qa_ner_guard is not None:
+        _default_enabled = bool(qa_ner_guard)
+
+
 def stats() -> dict:
     return {
         "calls": _stats.calls,
@@ -92,7 +113,17 @@ def stats() -> dict:
 
 
 def is_enabled() -> bool:
-    return os.environ.get("OPSRAG_QA_NER_SPACY", "0").lower() in ("1", "true", "yes", "on")
+    """True when the spaCy NER discriminator should run.
+
+    Resolution order (env wins -- config-overridable latency pattern):
+      1. `OPSRAG_QA_NER_SPACY` env var, if set (1/true/yes/on -> on).
+      2. otherwise the config-derived `_default_enabled` (cfg.qa_ner_guard,
+         default True).
+    """
+    env = os.environ.get("OPSRAG_QA_NER_SPACY")
+    if env is not None:
+        return env.lower() in ("1", "true", "yes", "on")
+    return _default_enabled
 
 
 # Module-level singleton. The first call to `extract_entities` triggers

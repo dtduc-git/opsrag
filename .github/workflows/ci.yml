@@ -174,10 +174,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # Offline retrieval eval. Always-on, NO-SECRETS proof that opsrag retrieval
   # works: indexes the shipped `samples/` corpus into an in-process Qdrant with
-  # a local FastEmbed ONNX embedder, scores the public golden set, and asserts
-  # aggregate Recall@5 stays above threshold. The only network it needs is the
-  # one-time FastEmbed model fetch (allowed -- CI has network). No API keys.
-  # The judge-based eval-regression job below stays the live-server tier.
+  # a local FastEmbed ONNX embedder, then scores the public golden set through
+  # the app's default core path -- Dense + BM25 RRF fusion (hybrid_search) plus
+  # a local FastEmbed cross-encoder rerank (no MMR, no live judge) -- and
+  # asserts the aggregate ranking floors stay above threshold. The only network
+  # it needs is the one-time FastEmbed model fetch (allowed -- CI has network).
+  # No API keys. The judge-based eval-regression job below is the live tier.
   # ---------------------------------------------------------------------------
   eval-offline:
     name: eval-offline (retrieval, no secrets)
@@ -250,9 +252,11 @@ jobs:
               color = "red"
           badge = {
               "schemaVersion": 1,
-              # Label names the synthetic-corpus scope so the badge isn't read
-              # as a production retrieval-quality claim.
-              "label": "eval recall@5 (samples)",
+              # Label names BOTH the recipe (hybrid = Dense+BM25 RRF + local
+              # rerank, NOT the full pipeline -- no MMR, no live judge) and the
+              # synthetic-corpus scope, so the badge isn't read as a production
+              # full-pipeline retrieval-quality claim.
+              "label": "hybrid recall@5 (samples)",
               "message": f"{recall:.2f}",
               "color": color,
           }

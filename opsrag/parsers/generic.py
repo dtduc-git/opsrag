@@ -14,11 +14,15 @@ from __future__ import annotations
 import json
 import logging
 
-import yaml
-
 from opsrag.interfaces.parser import DocSection, DocType, ParsedDocument
 from opsrag.interfaces.scm import RepoFile
 from opsrag.parsers.code_structure import split_by_def
+
+# Round-trip YAML load/dump shared with k8s.py: comments + anchors on a
+# top-level key survive into the chunk text (PyYAML's safe_load/dump dropped
+# them, losing ops rationale comments). Only the YAML path uses these; JSON /
+# code splitting is untouched.
+from opsrag.parsers.k8s import _YAML, _dump_key_slice
 
 # Source-code DocTypes that benefit from per-function/per-class section
 # splitting. Keep aligned with code_structure._REGEX_DISPATCH + the
@@ -186,27 +190,24 @@ class GenericConfigParser:
 
     def _split_yaml(self, file: RepoFile) -> list[DocSection] | None:
         try:
-            docs = list(yaml.safe_load_all(file.content))
+            docs = list(_YAML.load_all(file.content))
         except Exception:
             return None
 
         sections: list[DocSection] = []
         for doc_idx, doc in enumerate(docs):
             # Only mapping-shaped docs split by key. List/scalar/null -> skip.
+            # ruamel returns CommentedMap (dict subclass) -- iteration/.items()
+            # work unchanged.
             if not isinstance(doc, dict) or not doc:
                 continue
             prefix = f"doc[{doc_idx}]." if len(docs) > 1 else ""
             for key, value in doc.items():
                 heading = f"{prefix}{key}"
-                try:
-                    body = yaml.safe_dump(
-                        {key: value},
-                        default_flow_style=False,
-                        sort_keys=False,
-                        allow_unicode=True,
-                    ).rstrip()
-                except Exception:
-                    body = f"{key}: <unrepresentable>"
+                # Round-trip slice: re-dump {key: value} with the key's
+                # attached comment (stored on the parent map) so ops rationale
+                # comments survive into the chunk text.
+                body = _dump_key_slice(doc, key, value)
                 if len(body) > _OVERSIZE_CHARS:
                     _log.warning(
                         "yaml key %s in %s is %d chars -- chunker will char-split",

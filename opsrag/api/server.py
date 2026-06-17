@@ -112,6 +112,16 @@ def _build_agent_graph(cfg, providers, checkpointer, known_repos, model_router):
     built from programmatically-constructed configs / future mode additions.
     """
     if cfg.agent.mode == "multi_agent":
+        # When the NLI groundedness gate is OFF but the artifact verifier is
+        # ON, warn once so operators know the default path still has a
+        # fail-closed safety net (just not the entailment check). Both off is a
+        # deliberate latency/cost trade and not warned here.
+        if not cfg.agent.verify_grounding_default and cfg.agent.verify_artifacts_default:
+            _log.warning(
+                "groundedness check disabled on multi_agent "
+                "(agent.verify_grounding_default=false); artifact verifier "
+                "still runs (agent.verify_artifacts_default=true)"
+            )
         return build_multi_agent_graph(
             llm=providers.llm,
             vector_store=providers.vector_store,
@@ -130,6 +140,7 @@ def _build_agent_graph(cfg, providers, checkpointer, known_repos, model_router):
             code_store=providers.code_vector_store,
             light_graph=providers.light_graph,
             verify_grounding=cfg.agent.verify_grounding_default,
+            verify_artifacts=cfg.agent.verify_artifacts_default,
         )
     elif cfg.agent.mode == "tool_calling":
         return build_tool_calling_graph(
@@ -168,9 +179,9 @@ def _build_agent_graph(cfg, providers, checkpointer, known_repos, model_router):
             code_store=providers.code_vector_store,
         )
     elif cfg.agent.mode in ("full", "hybrid"):
-        # NB: the legacy `hybrid` mode (graph-anchored retrieval) was
-        # removed with the Neo4j lane; `agent.mode: hybrid` now degrades to
-        # the full graph rather than crashing (build_hybrid_graph raises).
+        # NB: the legacy `hybrid` mode (graph-anchored retrieval) was removed
+        # with the Neo4j lane (its build_hybrid_graph stub is now deleted too);
+        # `agent.mode: hybrid` degrades to the full graph rather than failing.
         # Make the mismatch EXPLICIT (don't silently map unknown modes here):
         # `full` is the real target; `hybrid` is a removed legacy alias kept
         # building the full graph, but loudly, so operators migrate the knob.
@@ -987,6 +998,16 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         # OPSRAG_QA_CACHE env var (default on).
         app.state.qa_cache = None
         if qa_cache_enabled() and hasattr(providers.vector_store, "_client"):
+            # Thread the QA-cache precision knobs (M4): widen the LLM-judge band
+            # and enable the spaCy NER entity-swap guard by default. configure()
+            # sets the module defaults that the env vars still override.
+            from opsrag import qa_cache_judge as _qa_judge
+            from opsrag import qa_cache_ner as _qa_ner
+            _qa_judge.configure(
+                qa_judge_upper=cfg.qa_cache.qa_judge_upper,
+                qa_judge_fail_open=cfg.qa_cache.qa_judge_fail_open,
+            )
+            _qa_ner.configure(qa_ner_guard=cfg.qa_cache.qa_ner_guard)
             app.state.qa_cache = QAVectorCache(
                 client=providers.vector_store._client,
                 dimension=providers.embedder.dimension,
@@ -1060,6 +1081,12 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 llm=providers.llm,
                 # Rerank the tool path too (was raw bi-encoder order before).
                 reranker=providers.reranker,
+                # Forward the SAME rerank-enrichment config the LangGraph
+                # rerank_node gets (path-anchor boost / MMR / content-dedup),
+                # so the tool path can't re-diverge from the graph path (M1).
+                rerank_diversity=cfg.agent.rerank_diversity,
+                rerank_content_dedup=cfg.agent.rerank_content_dedup,
+                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
             )
             _log.info("knowledge_search MCP tool bound to corpus")
         except Exception as exc:  # noqa: BLE001

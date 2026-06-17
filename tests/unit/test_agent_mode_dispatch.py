@@ -84,6 +84,62 @@ def test_hybrid_still_builds_full_and_warns(monkeypatch, caplog):
     assert any("hybrid" in m and "legacy alias" in m for m in warnings), warnings
 
 
+def test_multi_agent_passes_verify_artifacts_flag(monkeypatch):
+    """R4: cfg.agent.verify_artifacts_default must reach
+    build_multi_agent_graph(verify_artifacts=...) -- otherwise the artifact
+    verifier knob is dead."""
+    captured: dict = {}
+
+    def _capture(*a, **k):  # noqa: ANN002, ANN003
+        captured.update(k)
+        return "graph::multi_agent"
+
+    monkeypatch.setattr(server, "build_multi_agent_graph", _capture)
+    cfg = Settings()
+    cfg.agent.mode = "multi_agent"
+    cfg.agent.verify_artifacts_default = False
+    server._build_agent_graph(
+        cfg, _Fake(), checkpointer=None, known_repos=[], model_router=_Fake(),
+    )
+    assert captured.get("verify_artifacts") is False
+
+
+def test_multi_agent_warns_when_grounding_off_but_artifacts_on(monkeypatch, caplog):
+    """R4: when the NLI groundedness gate is OFF but the artifact verifier is
+    ON, _build_agent_graph emits a one-time warning so operators know the
+    default path still has a fail-closed safety net."""
+    _spy_builders(monkeypatch)
+    cfg = Settings()
+    cfg.agent.mode = "multi_agent"
+    cfg.agent.verify_grounding_default = False
+    cfg.agent.verify_artifacts_default = True
+    with caplog.at_level(logging.WARNING, logger="opsrag.server"):
+        server._build_agent_graph(
+            cfg, _Fake(), checkpointer=None, known_repos=[], model_router=_Fake(),
+        )
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "groundedness check disabled on multi_agent" in m and "artifact verifier" in m
+        for m in warnings
+    ), warnings
+
+
+def test_multi_agent_no_warning_when_both_grounding_and_artifacts_on(monkeypatch, caplog):
+    """The warning fires ONLY when grounding is off while artifacts is on --
+    with both on (the default) there's nothing to warn about."""
+    _spy_builders(monkeypatch)
+    cfg = Settings()
+    cfg.agent.mode = "multi_agent"
+    cfg.agent.verify_grounding_default = True
+    cfg.agent.verify_artifacts_default = True
+    with caplog.at_level(logging.WARNING, logger="opsrag.server"):
+        server._build_agent_graph(
+            cfg, _Fake(), checkpointer=None, known_repos=[], model_router=_Fake(),
+        )
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert not any("groundedness check disabled on multi_agent" in m for m in warnings)
+
+
 def test_unknown_mode_raises_at_build(monkeypatch):
     """A typo'd / unknown mode must fail fast (ValueError) rather than silently
     falling through to the full graph. (Settings.agent.mode is a pydantic

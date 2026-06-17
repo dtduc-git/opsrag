@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,15 +44,38 @@ _RESULT_TRUNCATE_CHARS = 32000
 
 _TOKEN_ENV_KEYS = ("OPSRAG_PAGERDUTY_TOKEN", "PAGERDUTY_API_TOKEN")
 
+# Redact secrets from error bodies before they reach the LLM -- incident
+# notes / log entries can contain pasted credentials, and a failing
+# request can echo that content back. Same pattern set as the other
+# log-bearing integrations.
+_REDACT_PATTERNS = [
+    (re.compile(r"\bxoxb-[A-Za-z0-9-]{20,}"), "[REDACTED:slack_bot_token]"),
+    (re.compile(r"\bxoxp-[A-Za-z0-9-]{20,}"), "[REDACTED:slack_user_token]"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{30,}"), "[REDACTED:github_token]"),
+    (re.compile(r"\bglpat-[A-Za-z0-9_]{20,}"), "[REDACTED:gitlab_token]"),
+    (re.compile(r"\bAKIA[A-Z0-9]{16}\b"), "[REDACTED:aws_access_key]"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{35}"), "[REDACTED:google_api_key]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+"), "[REDACTED:jwt]"),
+    (re.compile(r"\brootly_[A-Za-z0-9_]{30,}"), "[REDACTED:rootly_token]"),
+    (re.compile(r"\bddapp_[A-Za-z0-9_]{30,}"), "[REDACTED:dd_app_key]"),
+]
+
+
+def _redact(text: str) -> str:
+    for pat, repl in _REDACT_PATTERNS:
+        text = pat.sub(repl, text)
+    return text
+
 
 class PagerDutyMCPError(Exception):
-    """Raised on PagerDuty API errors. Wraps the upstream status + body."""
+    """Raised on PagerDuty API errors. Wraps upstream status + body, with
+    any secrets redacted from both the stored body and the message text."""
 
     def __init__(self, status: int, body: str, *, tool: str | None = None):
         self.status = status
-        self.body = body
+        self.body = _redact(body or "")
         self.tool = tool
-        super().__init__(f"[{tool or 'pagerduty'}] {status}: {body[:300]}")
+        super().__init__(f"[{tool or 'pagerduty'}] {status}: {self.body[:300]}")
 
 
 def _resolve_token() -> str | None:

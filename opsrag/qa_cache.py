@@ -119,6 +119,38 @@ def _env_discriminator_regex() -> re.Pattern[str]:
     alternation = "|".join(re.escape(t) for t in ordered)
     return re.compile(rf"\b({alternation})\b", re.IGNORECASE)
 
+
+def _service_discriminator_regex() -> re.Pattern[str] | None:
+    """Compile a service-name discriminator regex from the active
+    deployment's service inventory. Mirrors ``_env_discriminator_regex``.
+
+    The kebab-case extractor (``_DISCRIMINATOR_KEBAB``, >= 2 segments)
+    already separates multi-segment service names (``api-gateway`` vs
+    ``kafka-broker``). It MISSES single-token service names (``auth``,
+    ``billing``, ``redis``) because they have no hyphen and fall below the
+    length / structure floor -- so "auth logs" and "billing logs" yield
+    identical discriminator sets and wrong-service cache hits leak.
+
+    This regex closes that gap by matching the operator's declared service
+    names verbatim (whole-word, case-insensitive). Built per call because
+    ``active_deployment()`` can change after startup (same rationale as the
+    env regex). Returns ``None`` when the inventory is empty so the caller
+    skips the layer entirely (no regression for org-free deployments)."""
+    from opsrag.agent.prompt_render import active_deployment
+
+    tokens = {
+        n.strip().lower()
+        for n in active_deployment().services
+        if n and n.strip()
+    }
+    if not tokens:
+        return None
+    # Longest-first so alternation prefers the most specific match (a
+    # multi-word / hyphenated service wins over a contained prefix).
+    ordered = sorted(tokens, key=lambda t: (-len(t), t))
+    alternation = "|".join(re.escape(t) for t in ordered)
+    return re.compile(rf"\b({alternation})\b", re.IGNORECASE)
+
 # Commit SHA fragment (>= 7 hex chars).
 _DISCRIMINATOR_SHA = re.compile(r"\b([0-9a-f]{7,40})\b")
 
@@ -219,6 +251,15 @@ def _discriminator_tokens(query: str) -> frozenset[str]:
     for m in _DISCRIMINATOR_KEBAB.findall(q):
         if m not in _KEBAB_NOISE and len(m) >= 5:  # length floor cuts noise
             tokens.add(f"kebab:{m}")
+    # Declared service names -- catches SINGLE-TOKEN services (auth,
+    # billing, redis) the kebab extractor structurally misses, so
+    # "auth logs" vs "billing logs" no longer collide into a wrong-service
+    # cache hit. Built per call (inventory can change post-startup); empty
+    # inventory -> regex is None -> skip the layer (no regression).
+    _svc_re = _service_discriminator_regex()
+    if _svc_re is not None:
+        for m in _svc_re.findall(q):
+            tokens.add(f"svc:{m.lower()}")
     # GitLab-path leaf IDs.
     for m in _DISCRIMINATOR_GL_PATH.findall(q):
         tokens.add(f"glpath:{m.lower()}")
@@ -373,7 +414,7 @@ class QAVectorCache:
                     size=self._dimension, distance=qm.Distance.COSINE,
                 ),
             )
-            for field in ("source_repos", "quality_flag", "user_scope"):
+            for field in ("repos", "source_repos", "quality_flag", "user_scope"):
                 try:
                     await self._client.create_payload_index(
                         collection_name=self._collection,
@@ -392,12 +433,20 @@ class QAVectorCache:
         user_id: str | None = None,
         serve_stale: bool = False,
         max_stale_seconds: int = 7 * 24 * 3600,
+        min_score: float | None = None,
     ) -> CacheHit | None:
         """Find the closest cached question. None if no good match.
 
         If `current_query` is provided, the discriminator-token set of the
         cached question must match exactly -- protects against year/ID/version
         leaks where cosine alone passes but the query semantically differs.
+
+        `min_score` overrides the per-instance cosine floor (`self._threshold`)
+        for this single call. The caller threads the per-category
+        `policy_for(category)['qa_threshold']` here so tighter categories
+        (MIXED 0.96, INFRA_GRAPH 0.94, FORENSIC 0.92, ...) get their own floor
+        instead of the one global threshold. None falls back to
+        `self._threshold` (legacy behaviour).
 
         `user_id` scopes the search: the caller is eligible only for SHARED
         entries (no `user_scope`) plus entries scoped to this same user. A
@@ -443,7 +492,8 @@ class QAVectorCache:
         hit = result.points[0]
         payload = hit.payload or {}
         score = float(hit.score)
-        if score < self._threshold:
+        floor = self._threshold if min_score is None else float(min_score)
+        if score < floor:
             return None
         if payload.get("quality_flag") == "low":
             return None
@@ -532,7 +582,15 @@ class QAVectorCache:
             )
             return
         await self.ensure_collection()
-        repos = source_repos or _derive_repos(sources)
+        # R10: record the REAL repos at write time. ``source_repos`` is the
+        # authoritative set the caller derived from the actual retrieved
+        # chunks; ``_derive_repos(sources)`` is only a best-effort path
+        # heuristic. We store the real set under ``repos`` so invalidation
+        # matches on ground truth, and keep ``source_repos`` (heuristic when
+        # nothing real was passed) for backward-compat / fallback matching.
+        real_repos = list(source_repos) if source_repos else []
+        heuristic_repos = _derive_repos(sources)
+        repos = real_repos or heuristic_repos
         # Cap stored content per source to keep cache rows small.
         capped_content = [
             {"source": c.get("source", ""), "content": (c.get("content", "") or "")[:2500]}
@@ -545,6 +603,9 @@ class QAVectorCache:
             "sources": sources,
             "source_urls": list(source_urls) if source_urls else [],
             "sources_content": capped_content,
+            # ``repos`` = ground-truth repos (caller-provided) when available,
+            # else the heuristic. ``source_repos`` kept for legacy readers.
+            "repos": repos,
             "source_repos": repos,
             "ttl_seconds": int(ttl_seconds or self._default_ttl),
             "created_at": time.time(),
@@ -587,16 +648,29 @@ class QAVectorCache:
 
     async def invalidate_repo(self, repo: str) -> int:
         """Delete cache entries whose answer was sourced from `repo`.
-        Hooked into /index/repo so reindex flushes affected cache."""
+        Hooked into /index/repo so reindex flushes affected cache.
+
+        R10: match primarily on the stored ground-truth ``repos`` field
+        (set from the caller's real source repos in ``store``); keep the
+        heuristic-derived ``source_repos`` field as a fallback so legacy
+        entries written before ``repos`` existed still get flushed. The
+        two-key ``should`` is OR semantics -- an entry tagged on either
+        field is dropped."""
         await self.ensure_collection()
         try:
             await self._client.delete(
                 collection_name=self._collection,
                 points_selector=qm.FilterSelector(filter=qm.Filter(
-                    must=[qm.FieldCondition(
-                        key="source_repos",
-                        match=qm.MatchValue(value=repo),
-                    )]
+                    should=[
+                        qm.FieldCondition(
+                            key="repos",
+                            match=qm.MatchValue(value=repo),
+                        ),
+                        qm.FieldCondition(
+                            key="source_repos",
+                            match=qm.MatchValue(value=repo),
+                        ),
+                    ]
                 )),
                 wait=False,
             )
