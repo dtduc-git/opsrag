@@ -3,7 +3,13 @@
 These pin the F12 (MMR-on + content-dedup) and F6 (default-path grounding)
 config defaults so a silent regression of the shipped behaviour fails fast.
 """
-from opsrag.config import AgentConfig, ElasticsearchConfig, K8sConfig, Settings
+from opsrag.config import (
+    AgentConfig,
+    ElasticsearchConfig,
+    K8sConfig,
+    LLMConfig,
+    Settings,
+)
 
 
 def test_mmr_diversity_on_by_default():
@@ -22,6 +28,46 @@ def test_content_dedup_defaults():
 def test_verify_grounding_default_on():
     # F6: the fail-closed groundedness gate runs on the default path.
     assert AgentConfig().verify_grounding_default is True
+
+
+def test_agent_mode_default_is_full():
+    # config-spine L15: schema default matches the bundled config.yaml
+    # (mode: full), so an env/YAML-less load picks the shipped path. This is a
+    # deploy-footgun fix, not a behaviour change for configured deployments
+    # (config.yaml already sets mode: full).
+    assert AgentConfig().mode == "full"
+    assert Settings().agent.mode == "full"
+
+
+def test_agent_mode_hybrid_still_accepted_for_back_compat():
+    # "hybrid" stays valid in the Literal for back-compat; server.py warns and
+    # maps hybrid->full (a different track). Construction must not raise.
+    assert AgentConfig(mode="hybrid").mode == "hybrid"
+
+
+def test_llm_client_timeout_and_retry_defaults():
+    # config-spine: bounded provider client tail latency. These are robustness
+    # knobs (timeout/retry), not answer-shaping params -- defaults pinned so a
+    # silent regression of the shipped values fails fast.
+    c = LLMConfig()
+    assert c.request_timeout == 120.0
+    assert c.connect_timeout == 10.0
+    assert c.max_retries == 2
+    # And the same through the Settings spine.
+    sc = Settings().llm
+    assert sc.request_timeout == 120.0
+    assert sc.connect_timeout == 10.0
+    assert sc.max_retries == 2
+
+
+def test_llm_timeout_fields_are_floats_and_overridable():
+    # Overridable via construction (env/YAML) without a rebuild; types coerce.
+    c = LLMConfig(request_timeout=30, connect_timeout=5, max_retries=4)
+    assert c.request_timeout == 30.0
+    assert isinstance(c.request_timeout, float)
+    assert c.connect_timeout == 5.0
+    assert isinstance(c.connect_timeout, float)
+    assert c.max_retries == 4
 
 
 def test_legacy_live_tool_blocks_marked_deprecated():

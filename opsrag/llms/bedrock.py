@@ -41,13 +41,39 @@ class BedrockLLM:
         region: str | None = None,
         profile: str | None = None,
         default_max_tokens: int = 4096,
+        *,
+        request_timeout: float | None = None,
+        connect_timeout: float | None = None,
+        max_retries: int | None = None,
     ):
         import boto3
         session = boto3.Session(
             region_name=region,
             profile_name=profile,
         )
-        self._client = session.client("bedrock-runtime")
+        # Optional botocore-level robustness knobs. Left unset, boto3 keeps its
+        # own native defaults so existing callers see identical behavior. When
+        # any is provided, build a botocore Config -- mirrors the precedent in
+        # opsrag/embedders/bedrock.py (adaptive retries + explicit timeouts).
+        client_kwargs: dict[str, Any] = {}
+        if (
+            request_timeout is not None
+            or connect_timeout is not None
+            or max_retries is not None
+        ):
+            from botocore.config import Config as _BotoConfig
+            cfg_kwargs: dict[str, Any] = {}
+            if request_timeout is not None:
+                cfg_kwargs["read_timeout"] = request_timeout
+            if connect_timeout is not None:
+                cfg_kwargs["connect_timeout"] = connect_timeout
+            if max_retries is not None:
+                cfg_kwargs["retries"] = {
+                    "max_attempts": max_retries,
+                    "mode": "adaptive",
+                }
+            client_kwargs["config"] = _BotoConfig(**cfg_kwargs)
+        self._client = session.client("bedrock-runtime", **client_kwargs)
         self._model = model
         self._default_max_tokens = default_max_tokens
 
@@ -140,6 +166,8 @@ class BedrockLLM:
         schema: type,
         system_prompt: str | None = None,
         purpose: str | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> Any:
         if not (isinstance(schema, type) and issubclass(schema, BaseModel)):
             raise TypeError("schema must be a pydantic.BaseModel subclass")
@@ -152,12 +180,17 @@ class BedrockLLM:
         )
         system = f"{system_prompt}\n\n{instruction}" if system_prompt else instruction
 
-        resp = await self.generate(
-            messages=messages,
-            system_prompt=system,
-            temperature=0.0,
-            purpose=purpose,
-        )
+        # max_tokens caps output; left None it preserves generate's default-4096
+        # behavior so existing callers are unchanged.
+        gen_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "system_prompt": system,
+            "temperature": 0.0,
+            "purpose": purpose,
+        }
+        if max_tokens is not None:
+            gen_kwargs["max_tokens"] = max_tokens
+        resp = await self.generate(**gen_kwargs)
 
         text = resp.content.strip()
         if text.startswith("```"):

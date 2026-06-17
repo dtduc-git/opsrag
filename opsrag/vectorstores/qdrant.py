@@ -15,6 +15,7 @@ indices.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -503,11 +504,28 @@ class QdrantVectorStore:
         # over comparable depth and the reranker sees similar pools.
         candidate_k = max(top_k * 8, 50)
 
+        # The three independent lanes (dense, sparse/BM25, code) each issue
+        # ONE network round-trip to Qdrant. They have no data dependency on
+        # one another, so we fire them CONCURRENTLY via asyncio.gather and let
+        # the RRF fusion loop below stitch the results together exactly as
+        # before. Each lane keeps its original GUARD logic (zero-vec skip,
+        # empty-query skip, code_store presence check) -- a skipped lane
+        # returns [] immediately without touching the network.
+        #
+        # Per-lane error semantics MATCH the prior serial code bit-for-bit:
+        # the BM25 and code lanes keep their own try/except -> [] fallbacks
+        # (with a _log.warning), while the DENSE lane has NO fallback -- a
+        # dense failure must PROPAGATE (the query errors), exactly as it did
+        # serially. We use return_exceptions=True only so a BM25/code failure
+        # can't tear down the still-running dense lane; the dense exception is
+        # then RE-RAISED below (see the post-gather block).
+
         # Dense (semantic) results -- skipped if caller passed zero-vec
         # (keyword_retriever's BM25-only intent, signalled today via alpha=0
         # but here we detect the zero-vec directly so RRF stays parameter-free).
-        dense_hits: list = []
-        if embedding and any(abs(x) > 1e-9 for x in embedding):
+        async def _dense() -> list:
+            if not (embedding and any(abs(x) > 1e-9 for x in embedding)):
+                return []
             dense_result = await self._client.query_points(
                 collection_name=self._collection,
                 query=embedding,
@@ -517,11 +535,12 @@ class QdrantVectorStore:
                 limit=candidate_k,
                 with_payload=True,
             )
-            dense_hits = list(dense_result.points)
+            return list(dense_result.points)
 
         # BM25 (lexical) results -- only if query text is non-empty.
-        sparse_hits: list = []
-        if query_text and query_text.strip():
+        async def _sparse() -> list:
+            if not (query_text and query_text.strip()):
+                return []
             try:
                 sparse_query = bm25_sparse.encode_query(query_text)
                 if sparse_query.indices:
@@ -533,17 +552,10 @@ class QdrantVectorStore:
                         limit=candidate_k,
                         with_payload=True,
                     )
-                    sparse_hits = list(sparse_result.points)
+                    return list(sparse_result.points)
             except Exception as exc:
                 _log.warning("bm25 sparse query failed; falling back to dense-only: %s", exc)
-
-        # Graph-anchored Neo4j lane removed. The
-        # `graph_anchored_paths` kwarg is still accepted for backwards
-        # compat with older callers but does nothing -- entity-extractor
-        # wiring is gone and the Neo4j driver is reserved for the new
-        # Cartography integration.
-        _ = graph_anchored_paths  # silence unused-var lint
-        graph_hits: list = []
+            return []
 
         # Code lane: when caller passes a code-specific query
         # embedding AND a code vector store (the `opsrag_code` collection
@@ -551,8 +563,13 @@ class QdrantVectorStore:
         # from that store. Skipped silently when either is None or when
         # the code embedding is zero-vec -- keeps behavior identical when
         # the code lane is unused.
-        code_hits: list = []
-        if code_embedding and code_store is not None and any(abs(x) > 1e-9 for x in code_embedding):
+        async def _code() -> list:
+            if not (
+                code_embedding
+                and code_store is not None
+                and any(abs(x) > 1e-9 for x in code_embedding)
+            ):
+                return []
             try:
                 code_qfilter = code_store._search_filter(filters) if hasattr(code_store, "_search_filter") else None
                 code_result = await code_store._client.query_points(
@@ -564,10 +581,43 @@ class QdrantVectorStore:
                     limit=candidate_k,
                     with_payload=True,
                 )
-                code_hits = list(code_result.points)
+                return list(code_result.points)
             except Exception as exc:
                 _log.warning("code-collection query failed (%s) -- proceeding without code lane", exc)
-                code_hits = []
+                return []
+
+        dense_res, sparse_res, code_res = await asyncio.gather(
+            _dense(), _sparse(), _code(), return_exceptions=True,
+        )
+        # Restore the PRE-parallelization per-lane error semantics exactly:
+        #
+        #   * Dense had NO try/except in the serial code -- a dense failure
+        #     PROPAGATED and the whole query errored. We must NOT let gather's
+        #     return_exceptions=True silently swallow that into []: doing so
+        #     would degrade a hard dense failure into a quietly-degraded
+        #     BM25/code-only result (a retrieval-quality regression). So we
+        #     RE-RAISE the dense exception here.
+        #   * BM25 and the code lane each had their OWN try/except -> [] (with a
+        #     _log.warning) in the serial code; that fallback already lives
+        #     inside `_sparse()` / `_code()`, so gather should only ever see a
+        #     successful list from them. We still coerce-to-[] defensively to
+        #     mirror that bit-for-bit if anything unexpected escapes.
+        #
+        # On the success path (all lanes return lists) this is a no-op, so the
+        # fused result sets/ordering are identical to before.
+        if isinstance(dense_res, BaseException):
+            raise dense_res
+        dense_hits: list = dense_res
+        sparse_hits: list = sparse_res if not isinstance(sparse_res, BaseException) else []
+        code_hits: list = code_res if not isinstance(code_res, BaseException) else []
+
+        # Graph-anchored Neo4j lane removed. The
+        # `graph_anchored_paths` kwarg is still accepted for backwards
+        # compat with older callers but does nothing -- entity-extractor
+        # wiring is gone and the Neo4j driver is reserved for the new
+        # Cartography integration.
+        _ = graph_anchored_paths  # silence unused-var lint
+        graph_hits: list = []
 
         # RRF fusion over all active lanes.
         # rrf_score[point_id] = sum(lane_weight / (k + rank))

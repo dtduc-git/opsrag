@@ -67,7 +67,12 @@ class FixedSizeChunker:
 
     @staticmethod
     def _make_id(doc: ParsedDocument, idx: int, content: str) -> str:
+        # Hash the FULL content, not a 64-char prefix: two distinct windows
+        # that share the first 64 chars (boilerplate headers, license blocks,
+        # an edit past char 64) would otherwise collide onto the same id and
+        # silently overwrite each other / leave a stale vector behind.
+        # NOTE: changing this scheme re-keys every chunk -> requires a reindex.
         h = hashlib.sha1(
-            f"{doc.source.repo}:{doc.source.path}:{idx}:{content[:64]}".encode()
+            f"{doc.source.repo}:{doc.source.path}:{idx}:{content}".encode()
         ).hexdigest()[:16]
         return f"{doc.source.repo}:{doc.source.path}:{idx}:{h}"

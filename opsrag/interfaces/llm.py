@@ -36,4 +36,6 @@ class LLMProvider(Protocol):
         schema: type,
         system_prompt: str | None = None,
         purpose: str | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> Any: ...

@@ -973,8 +973,9 @@ class IngestionPipeline:
                 )
 
         # Orphan sweep -- delete prior (repo, source_path) chunks/entities
-        # before upserting. Chunk IDs hash `content[:64]` (parent_child.py),
-        # so any edit to the first 64 chars of a chunk creates a new ID; the
+        # before upserting. Chunk IDs hash the FULL chunk content (see
+        # _make_id in parent_child.py / fixed_size.py), so any edit to a
+        # chunk's content creates a new ID; the
         # old vector stays in Qdrant forever, still matching queries. The
         # webhook path (handle_webhook above) already does this delete-sweep;
         # the daily-reindex / `_process_file` path didn't, so stale chunks
