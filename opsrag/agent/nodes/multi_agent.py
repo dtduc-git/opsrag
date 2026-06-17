@@ -2590,6 +2590,17 @@ def generator_node(
         # same convention as the tool_synthesize path.
         generation_grounded = False
         grounding_checked = False
+        # H5: an answer is only trustworthy if it rests on EVIDENCE -- either
+        # retrieved doc chunks (verifiable here) or live tool output (the audit
+        # IS the grounding for a true tool turn). A tool-path turn that emitted
+        # NO tools and pulled NO chunks is answering from parametric memory:
+        # there is nothing to check, so pre-fix it slipped past the
+        # `retrieved_chunks` guard below and shipped as clean (grounded=False,
+        # grounding_checked=False -> cache-eligible, unflagged). Treat that
+        # no-evidence case as a fail-closed grounding failure.
+        had_evidence = bool(retrieved_chunks) or bool(
+            state.get("tool_call_audit")
+        )
         if verify_grounding and answer_text and retrieved_chunks:
             generation_grounded = await verify_groundedness(
                 chosen_llm, answer_text, retrieved_chunks
@@ -2609,6 +2620,27 @@ def generator_node(
                     "the default multi_agent path -- answer marked not grounded "
                     "and a caution was appended.",
                 )
+        elif verify_grounding and answer_text and not had_evidence:
+            # No chunks AND no tool calls -- a pure parametric-memory answer on
+            # the tool path. Nothing grounds it. Flag it fail-closed so it is
+            # never cache-eligible (graph.py gates on grounding_checked + not
+            # generation_grounded) and the engineer is warned. Live-tool answers
+            # (tool_call_audit non-empty) are EXEMPT: they're grounded in the
+            # tool output even when no doc chunks were retrieved.
+            generation_grounded = False
+            grounding_checked = True
+            answer_text = (
+                answer_text
+                + "\n\n_Note: this answer was produced without retrieving any "
+                "sources or calling any tools, so its claims could not be "
+                "verified. Double-check anything load-bearing before acting on "
+                "it._"
+            )
+            _log.warning(
+                "generator: NO evidence (0 chunks, 0 tool calls) on the default "
+                "multi_agent path -- answer marked not grounded and a caution "
+                "was appended.",
+            )
 
         out = {
             "generation": answer_text,
@@ -2646,9 +2678,17 @@ def generator_node(
 
 
 def triage_route(state: dict) -> str:
-    """After triage: tool_caller / vector_retrieve."""
+    """After triage: tool_caller / vector_retrieve.
+
+    H5: when triage flagged the tool path but emitted NO tool calls, send the
+    turn through `retrieval` (vector_retrieve) rather than straight to the
+    generator. A 0-tool tool-path turn otherwise has no evidence at all, so the
+    generator would either confabulate from parametric memory (now caught
+    fail-closed in `_generate`) or, better, get real corpus grounding first.
+    Routing to retrieval gives it that grounding instead of a flagged guess.
+    """
     if state.get("tool_path_active"):
-        return "tool_caller" if state.get("tool_calls") else "generator"
+        return "tool_caller" if state.get("tool_calls") else "retrieval"
     return "retrieval"
 
 

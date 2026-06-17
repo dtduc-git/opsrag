@@ -32,7 +32,7 @@ class _QdrantLikeStore:
         self.calls: list[dict] = []
 
     async def hybrid_search(
-        self, embedding, query_text, top_k=10, alpha=0.7,
+        self, embedding, query_text, top_k=10,
         filters=None, code_embedding=None, code_store=None,
     ):
         self.calls.append({

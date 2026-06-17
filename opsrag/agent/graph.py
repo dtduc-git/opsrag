@@ -3,11 +3,6 @@
 ``build_minimal_graph``  -- Phase 1: vector_retrieve -> generate.
 ``build_full_graph``     -- Phase 2: route -> retrieve -> rerank -> grade ->
                            (rewrite | generate) -> hallucination_check.
-``build_hybrid_graph``   -- Phase 3 hybrid (vector + Neo4j + keyword fan-out).
-                           REMOVED 2026-05-23; the Neo4j graph lane was
-                           dead in prod for ~3 months. Stub kept so
-                           imports don't break until api/server.py is
-                           rewired.
 """
 from __future__ import annotations
 
@@ -165,7 +160,6 @@ from opsrag.agent.nodes.multi_agent import MULTI_AGENT_RECURSION_LIMIT
 from opsrag.agent.nodes.reranker import rerank_decision
 from opsrag.agent.state import OpsRAGState
 from opsrag.interfaces.embedder import EmbeddingProvider
-from opsrag.interfaces.graphstore import KnowledgeGraphStore
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.memory import MemoryStore
 from opsrag.interfaces.observability import ObservabilityProvider
@@ -277,7 +271,13 @@ def build_full_graph(
     _answer_llm = getattr(model_router, "pro_llm", None) if model_router else None
     graph.add_node(
         "generate",
-        generate_node(llm, observability, vector_store=vector_store, answer_llm=_answer_llm),
+        # verify_grounding=False: this graph runs a dedicated
+        # check_hallucination_node after generate (see below), so gating inside
+        # generate_node too would DOUBLE-call the groundedness LLM every turn.
+        generate_node(
+            llm, observability, vector_store=vector_store,
+            answer_llm=_answer_llm, verify_grounding=False,
+        ),
     )
     graph.add_node("verify_answer", verify_answer_node(llm, vector_store, observability))
     graph.add_node("check_hallucination", check_hallucination_node(llm, observability))
@@ -380,38 +380,6 @@ def build_full_graph(
     return graph.compile(checkpointer=checkpointer)
 
 
-def build_hybrid_graph(
-    llm: LLMProvider,
-    vector_store: VectorStore,
-    embedder: EmbeddingProvider,
-    graph_store: KnowledgeGraphStore,
-    reranker: Reranker,
-    observability: ObservabilityProvider,
-    memory_store: MemoryStore | None = None,
-    checkpointer=None,
-    top_k: int = 10,
-    rerank_top_k: int = 5,
-    known_repos: list[str] | None = None,
-):
-    """Hybrid graph (vector + Neo4j graph + keyword fan-out) -- REMOVED 2026-05-23.
-
-    The Neo4j graph-anchored retrieval lane was dead in prod for ~3
-    months (Community edition without APOC plugin -> silent failure).
-    Effort was redirected to a Cartography-pointed graph backend.
-
-    Callers should use `build_full_graph` instead (same retrieval
-    pipeline minus the graph fan-out). Kept as a stub so existing
-    `from opsrag.agent import build_hybrid_graph` imports keep working
-    until the sibling Cartography agent rewires api/server.py.
-    """
-    raise NotImplementedError(
-        "build_hybrid_graph was removed 2026-05-23 along with the Neo4j "
-        "graph-anchored retrieval lane. Configure agent.mode='full' "
-        "(or 'minimal') in config-local.yaml; a Cartography-backed "
-        "hybrid mode may return in a future revision."
-    )
-
-
 def build_tool_calling_graph(
     llm: LLMProvider,
     vector_store: VectorStore,
@@ -459,6 +427,13 @@ def build_tool_calling_graph(
     )
     if reranker:
         graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity, content_dedup=rerank_content_dedup, content_dedup_threshold=rerank_content_dedup_threshold))
+        # R1: zero-cost weak-retrieval gate (only when a reranker is wired, so
+        # best_rerank_score exists). When the query named anchors but none
+        # matched any kept chunk AND the cross-encoder's best score is below
+        # the noise floor, emit a clean "insufficient info" instead of
+        # fabricating from adjacent chunks (mirrors build_full_graph).
+        graph.add_node("insufficient_info", insufficient_info_node(observability))
+        graph.add_edge("insufficient_info", END)
     graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
     if light_graph is not None:
         from opsrag.agent.nodes.entity_expand import entity_expand_node
@@ -494,7 +469,14 @@ def build_tool_calling_graph(
         graph.add_edge("vector_retrieve", "entity_expand")
     if reranker:
         graph.add_edge(_post_retrieve or "vector_retrieve", "rerank")
-        graph.add_edge("rerank", "generate")
+        # R1: gate rerank -> generate on the weak-retrieval check. Only here
+        # (reranker branch) -- the no-reranker branch has no best_rerank_score
+        # to gate, so it keeps the direct edge to generate.
+        graph.add_conditional_edges(
+            "rerank",
+            rerank_decision,
+            {"ok": "generate", "weak_retrieval": "insufficient_info"},
+        )
     else:
         graph.add_edge(_post_retrieve or "vector_retrieve", "generate")
     graph.add_edge("generate", END)
@@ -520,6 +502,7 @@ def build_multi_agent_graph(
     code_store: VectorStore | None = None,
     light_graph=None,
     verify_grounding: bool = True,
+    verify_artifacts: bool = True,
 ):
     """Sub-sprint 1 -- multi-agent graph: triage -> tool_caller <-> reasoner -> generator,
     with retrieval fall-through.
@@ -529,15 +512,26 @@ def build_multi_agent_graph(
     default path -- the same check build_full_graph runs. Set False to trade
     safety for ~1 fewer LLM call/turn.
 
+    ``verify_artifacts`` (cfg.agent.verify_artifacts_default, default True) wires
+    the precise artifact/citation verifier (verify_answer_node) AFTER both
+    terminal generators -- it extracts the file paths / YAML keys / CRD names /
+    tool names the answer claims and asserts each appears in the cited evidence
+    (doc chunks AND live-tool results), hedging or fail-closing otherwise. This
+    is distinct from ``verify_grounding`` (an NLI-style entailment gate inside
+    generate): the verifier is a surgical extract-and-match on concrete
+    artifacts. Set False to drop the +1 verification LLM call/turn.
+
         START -> entry_route
                   |
                   +-- CASUAL -> friendly_generator -> END        (third lane, <=2s)
                   |
                   +-- everything else -> triage
                                           |
-                                          +-- tool_path -> tool_caller <-> reasoner -> generator -> END
+                                          +-- tool_path -> tool_caller <-> reasoner -> generator -> [verify_answer] -> END
                                           |
-                                          +-- retrieval -> vector_retrieve -> [rerank] -> generate -> END
+                                          +-- retrieval -> vector_retrieve -> [rerank] -> generate -> [verify_answer] -> END
+                                                                                  |
+                                                                                  +-- weak_retrieval -> insufficient_info -> END
     """
     graph = StateGraph(OpsRAGState)
     graph.add_node("friendly_generator", friendly_generator_node(llm, observability, model_router=model_router))
@@ -555,7 +549,34 @@ def build_multi_agent_graph(
     )
     if reranker:
         graph.add_node("rerank", rerank_node(reranker, observability, top_k=rerank_top_k, diversity=rerank_diversity, content_dedup=rerank_content_dedup, content_dedup_threshold=rerank_content_dedup_threshold))
-    graph.add_node("generate", generate_node(llm, observability, vector_store=vector_store))
+        # R1: zero-cost weak-retrieval gate (only when a reranker is wired, so
+        # best_rerank_score exists). Anchors named but unmatched + best score
+        # below the noise floor -> insufficient_info instead of fabricating
+        # from adjacent chunks (mirrors build_full_graph / build_tool_calling).
+        graph.add_node("insufficient_info", insufficient_info_node(observability))
+        graph.add_edge("insufficient_info", END)
+    # Retrieval branch is terminal here (generate -> END, no downstream
+    # check_hallucination_node), so the shared groundedness gate must run
+    # INSIDE generate_node. Plumb the same cfg.agent.verify_grounding_default
+    # value F6 uses for the tool-path generator_node above.
+    graph.add_node(
+        "generate",
+        generate_node(
+            llm, observability, vector_store=vector_store,
+            verify_grounding=verify_grounding,
+        ),
+    )
+    # R4: precise artifact/citation verifier after BOTH terminal generators
+    # (the tool-path `generator` and the retrieval-path `generate`). Reads
+    # final_chunks (both branches populate it) plus live-tool evidence from
+    # tool_call_audit / tool_message_history. Gated by verify_artifacts so an
+    # operator can drop the +1 verification LLM call/turn. When off, both
+    # generators route straight to END (unchanged legacy behaviour).
+    if verify_artifacts:
+        graph.add_node(
+            "verify_answer",
+            verify_answer_node(llm, vector_store, observability),
+        )
     # Light-graph 1-hop entity augmentation on the retrieval branch -- was wired
     # ONLY into build_full_graph, so in multi_agent mode (config-local default)
     # the lane was dead: edges still computed at index time + entity_ids still
@@ -582,7 +603,11 @@ def build_multi_agent_graph(
         triage_route,
         {
             "tool_caller": "tool_caller",
-            "generator": "generator",   # triage emitted no tools but flagged tool path
+            # H5: a no-tools tool-path turn now routes to `retrieval` (see
+            # triage_route) so it gets real corpus grounding instead of an
+            # ungrounded parametric guess. Kept as a defensive target in case
+            # any caller still emits it.
+            "generator": "generator",
             "retrieval": "vector_retrieve",
         },
     )
@@ -592,7 +617,10 @@ def build_multi_agent_graph(
         reasoner_route,
         {"tool_caller": "tool_caller", "generator": "generator"},
     )
-    graph.add_edge("generator", END)
+    # R4: route both terminal generators through verify_answer when enabled.
+    _tool_terminus = "verify_answer" if verify_artifacts else END
+    _retrieval_terminus = "verify_answer" if verify_artifacts else END
+    graph.add_edge("generator", _tool_terminus)
 
     # Retrieval branch, with optional entity_expand between retrieve and rerank.
     _post_retrieve = "entity_expand" if light_graph is not None else None
@@ -600,10 +628,19 @@ def build_multi_agent_graph(
         graph.add_edge("vector_retrieve", "entity_expand")
     if reranker:
         graph.add_edge(_post_retrieve or "vector_retrieve", "rerank")
-        graph.add_edge("rerank", "generate")
+        # R1: gate rerank -> generate on the weak-retrieval check. Only on the
+        # reranker branch -- the no-reranker branch has no best_rerank_score to
+        # gate, so it keeps the direct edge to generate.
+        graph.add_conditional_edges(
+            "rerank",
+            rerank_decision,
+            {"ok": "generate", "weak_retrieval": "insufficient_info"},
+        )
     else:
         graph.add_edge(_post_retrieve or "vector_retrieve", "generate")
-    graph.add_edge("generate", END)
+    graph.add_edge("generate", _retrieval_terminus)
+    if verify_artifacts:
+        graph.add_edge("verify_answer", END)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -856,10 +893,18 @@ async def query_with_session(
                 # SWR: serve a recently-expired entry tagged stale so the user
                 # gets an instant response; a background task revalidates.
                 swr_enabled = _swr_env_default() if serve_stale is None else serve_stale
+                # Per-category cosine floor: tighter categories (MIXED 0.96,
+                # INFRA_GRAPH 0.94, ...) get their own qa_threshold instead of
+                # the one global cache threshold. None -> cache default.
+                _min_score = (
+                    policy_for(_classification.category)["qa_threshold"]
+                    if _classification is not None else None
+                )
                 hit = await qa_cache.lookup(
                     cached_embedding, current_query=query,
                     user_id=user_id,
                     serve_stale=swr_enabled,
+                    min_score=_min_score,
                 )
                 # Flash judge for borderline cosine band [0.93, 0.97].
                 if hit is not None:
@@ -869,6 +914,7 @@ async def query_with_session(
                         cached_question=hit.question,
                         cosine=float(hit.similarity),
                         llm=llm,
+                        min_score=_min_score,
                     ):
                         hit = None
             except Exception:
@@ -1148,11 +1194,17 @@ async def query_with_session(
             pass
 
     # Sub-sprint 3 V1 -- store the investigation outcome for tool-path answers.
+    # H5: mirror the qa_cache store gate -- never persist an answer the grounding
+    # node explicitly failed (grounding_checked True, generation_grounded False),
+    # e.g. a 0-tool tool-path turn flagged in generator._generate. Otherwise a
+    # known-ungrounded answer would seed the forensic investigation cache and be
+    # re-served on a near-cosine match.
     investigation_id: str | None = None
     if (
         investigation_cache is not None
         and tool_path_answer
         and answer
+        and not grounded_explicitly_failed
         and cached_embedding is not None
     ):
         try:
@@ -1284,10 +1336,18 @@ async def query_with_session_events(
         if not _skip_cache:
             try:
                 swr_enabled = _swr_env_default() if serve_stale is None else serve_stale
+                # Per-category cosine floor: tighter categories (MIXED 0.96,
+                # INFRA_GRAPH 0.94, ...) get their own qa_threshold instead of
+                # the one global cache threshold. None -> cache default.
+                _min_score = (
+                    policy_for(_classification.category)["qa_threshold"]
+                    if _classification is not None else None
+                )
                 hit = await qa_cache.lookup(
                     cached_embedding, current_query=query,
                     user_id=user_id,
                     serve_stale=swr_enabled,
+                    min_score=_min_score,
                 )
                 if hit is not None:
                     from opsrag.qa_cache_judge import judge_match
@@ -1296,6 +1356,7 @@ async def query_with_session_events(
                         cached_question=hit.question,
                         cosine=float(hit.similarity),
                         llm=llm,
+                        min_score=_min_score,
                     ):
                         hit = None
             except Exception:
@@ -1576,11 +1637,15 @@ async def query_with_session_events(
             pass
 
     # Sub-sprint 3 V1 -- store tool-path investigation outcome
+    # H5: mirror the qa_cache store gate -- never persist an answer the grounding
+    # node explicitly failed (grounding_checked True, generation_grounded False).
+    # Keeps a known-ungrounded 0-tool tool-path turn out of the forensic cache.
     investigation_id: str | None = None
     if (
         investigation_cache is not None
         and tool_path_answer
         and answer
+        and not grounded_explicitly_failed
         and cached_embedding is not None
     ):
         try:

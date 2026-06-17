@@ -78,6 +78,10 @@ def _reason_for(detail: str) -> str:
     return _DETAIL_TO_REASON.get(detail, "invalid_signature")
 
 
+# Read-only methods never mutate state, so they don't need a CSRF token.
+_SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+
 class OIDCAuthMiddleware(BaseHTTPMiddleware):
     """Enforce OIDC Bearer auth on every non-allowlisted request."""
 
@@ -113,6 +117,18 @@ class OIDCAuthMiddleware(BaseHTTPMiddleware):
             cookie = request.cookies.get(sm.SESSION_COOKIE)
             if sm.verify_session(cookie) is None:
                 return self._reject(rid, "missing_session")
+            # CSRF double-submit on state-changing methods (H1): the session
+            # cookie is SameSite=Lax, which does NOT protect top-level cross-site
+            # POSTs, so require the SPA to echo the non-HttpOnly opsrag_csrf
+            # cookie in the X-CSRF-Token header. Read-only methods are exempt;
+            # /auth/* + MCP wire + health are allowlisted above; bearer/oidc mode
+            # never reaches this branch.
+            if request.method not in _SAFE_METHODS:
+                if not sm.verify_csrf(
+                    request.cookies.get(sm.CSRF_COOKIE),
+                    request.headers.get(sm.CSRF_HEADER),
+                ):
+                    return self._reject(rid, "csrf_failed")
             return await call_next(request)
 
         verifier = getattr(request.app.state, "oidc_verifier", None)

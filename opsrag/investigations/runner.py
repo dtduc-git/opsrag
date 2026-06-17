@@ -51,6 +51,13 @@ from opsrag.investigations.store import (
 
 _log = logging.getLogger("opsrag.investigations.runner")
 
+# Generic, client-safe error string for every SSE payload. The real
+# exception (with traceback) is logged server-side via _log.exception/
+# _log.warning; only this opaque message ever enters the investigation
+# event stream. Mirrors the #110 query-path sanitization (graph.py) so a
+# raw str(exc)/traceback can't reach a browser through the SSE response.
+_GENERIC_INVESTIGATION_ERROR = "internal error during investigation"
+
 
 # -- Per-investigation hard budget --------------------------------------
 # Engine B previously had NO cost/latency ceiling beyond a 3-round cap, so a
@@ -663,13 +670,15 @@ class InvestigationRunner:
         emit INVESTIGATION_FAILED instead)."""
         try:
             await self._run_pipeline(inv_id, alert_text)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            # Full detail (with traceback) stays server-side; the SSE
+            # payload carries only the generic string -- never str(exc).
             _log.exception("investigation %s failed", inv_id)
             await emit_event(
                 self.deps.event_store,
                 investigation_id=inv_id,
                 event_type=EventType.INVESTIGATION_FAILED,
-                payload={"error": str(exc)},
+                payload={"error": _GENERIC_INVESTIGATION_ERROR},
             )
             try:
                 await self.deps.event_store.mark_status(
@@ -1051,9 +1060,11 @@ class InvestigationRunner:
                 "culled": culled,
             }
         except Exception as exc:  # noqa: BLE001
+            # Full detail server-side; this dict is emitted verbatim as the
+            # LANE_A_COMPLETED SSE payload, so "error" must stay generic.
             _log.warning("lane_a failed: %s", exc)
             return {"hits": [], "elapsed_ms": int((time.perf_counter() - t0) * 1000),
-                    "error": str(exc)}
+                    "error": _GENERIC_INVESTIGATION_ERROR}
 
     async def _lane_b(self, alert_text: str) -> dict[str, Any]:
         """Search investigation_cache for similar past investigations."""
@@ -1084,9 +1095,11 @@ class InvestigationRunner:
             elapsed = int((time.perf_counter() - t0) * 1000)
             return {"hits": hit_dicts, "elapsed_ms": elapsed}
         except Exception as exc:  # noqa: BLE001
+            # Full detail server-side; this dict is emitted verbatim as the
+            # LANE_B_COMPLETED SSE payload, so "error" must stay generic.
             _log.warning("lane_b failed: %s", exc)
             return {"hits": [], "elapsed_ms": int((time.perf_counter() - t0) * 1000),
-                    "error": str(exc)}
+                    "error": _GENERIC_INVESTIGATION_ERROR}
 
     async def _lane_c(self, alert_text: str = "") -> dict[str, Any]:
         """Live probe -- if the alert text is a Rootly URL we fetch the
@@ -1116,9 +1129,13 @@ class InvestigationRunner:
             # Rootly tool accepts `short_id` (or `url`) -- not `id`.
             result = await tool.call(None, {"short_id": alert_id})
         except Exception as exc:  # noqa: BLE001
+            # Full detail server-side; this dict is emitted verbatim as the
+            # LANE_C_COMPLETED SSE payload, so neither "summary" nor "error"
+            # may interpolate str(exc) -- both stay generic.
             elapsed = int((time.perf_counter() - t0) * 1000)
             _log.warning("lane_c rootly fetch failed: %s", exc)
-            return {"summary": f"Rootly fetch failed: {exc}", "elapsed_ms": elapsed, "error": str(exc)}
+            return {"summary": "Rootly fetch failed.", "elapsed_ms": elapsed,
+                    "error": _GENERIC_INVESTIGATION_ERROR}
 
         elapsed = int((time.perf_counter() - t0) * 1000)
         as_text = result if isinstance(result, str) else json.dumps(result)
@@ -1172,6 +1189,8 @@ class InvestigationRunner:
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             return {**card.model_dump(), "elapsed_ms": elapsed_ms}
         except Exception as exc:  # noqa: BLE001
+            # Full detail server-side; this dict rides the INSIGHT_READY SSE
+            # payload (insight_card), so "error" must stay generic.
             _log.warning("insight synth failed: %s -- using fallback", exc)
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             return {
@@ -1180,7 +1199,7 @@ class InvestigationRunner:
                 "what_runbook_says": lane_a_block[:300],
                 "open_questions": "What is the failing service? What tool result would confirm the symptom?",
                 "elapsed_ms": elapsed_ms,
-                "error": str(exc),
+                "error": _GENERIC_INVESTIGATION_ERROR,
             }
 
     # -- Hypothesizer (Pro structured output) ----------------------
@@ -1672,13 +1691,19 @@ class InvestigationRunner:
                     payload={"name": name, "summary": summary, "latency_ms": latency_ms},
                 )
             except Exception as exc:  # noqa: BLE001
+                # Keep the real str(exc) in the IN-PROCESS history so the
+                # evaluator/reasoner can reason over the failure -- it never
+                # leaves the process. The SSE payload gets a generic string
+                # so the raw exception text can't reach a browser client.
                 err = str(exc)
                 latency_ms = int((time.perf_counter() - t0) * 1000)
+                _log.warning("tool %s failed: %s", name, exc)
                 history.append({"name": name, "args": args, "error": err, "result": "", "latency_ms": latency_ms})
                 await emit_event(
                     self.deps.event_store, investigation_id=inv_id,
                     event_type=EventType.TOOL_RESULT,
-                    payload={"name": name, "error": err, "latency_ms": latency_ms},
+                    payload={"name": name, "error": "tool execution failed",
+                             "latency_ms": latency_ms},
                 )
         # Release the lazy GitLab client if we opened one.
         if gitlab_ctx is not None:
@@ -1733,8 +1758,11 @@ class InvestigationRunner:
             )
             return resp.content or "(empty answer)"
         except Exception as exc:  # noqa: BLE001
+            # The return value rides the CONCLUSION_READY SSE payload (and
+            # _extract_root_cause -> INVESTIGATION_COMPLETED), so the fallback
+            # must NOT interpolate str(exc). Full detail stays server-side.
             _log.warning("generator failed: %s", exc)
-            return f"### Root cause\nGenerator failed: {exc}"
+            return f"### Root cause\n{_GENERIC_INVESTIGATION_ERROR}"
 
 
 # -- Module helpers -----------------------------------------------------

@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import re
 
-import yaml
-
 from opsrag.interfaces.parser import DocSection, DocType, ParsedDocument
 from opsrag.interfaces.scm import RepoFile
+
+# Round-trip YAML load/dump shared with k8s.py: comments + anchors on a
+# monitor / rule node survive into the chunk text (PyYAML dropped them).
+from opsrag.parsers.k8s import _YAML, _dump_node
 
 # Actual alert SHAPE markers. A PATH hint alone ("alert"/"monitor" substring)
 # hijacked ordinary k8s/helm manifests -- apps/monitoring-service/deployment.yaml,
@@ -44,7 +46,7 @@ class AlertParser:
 
     def parse(self, file: RepoFile) -> ParsedDocument:
         try:
-            data = yaml.safe_load(file.content) or {}
+            data = _YAML.load(file.content) or {}
         except Exception:
             data = {}
 
@@ -145,10 +147,9 @@ class AlertParser:
             if not isinstance(mon, dict):
                 continue
             name = mon.get("name", "unnamed")
-            mtype = mon.get("type", "")
-            query = mon.get("query", "")
-            msg = mon.get("message", "")
-            body = yaml.dump(mon, default_flow_style=False, sort_keys=False).strip()
+            # Round-trip dump keeps the monitor's authored order + any inline
+            # comments/anchors attached to this node (ops rationale survives).
+            body = _dump_node(mon)
             sections.append(DocSection(
                 heading=f"monitor: {name}",
                 content=body,
@@ -162,7 +163,7 @@ class AlertParser:
         sections: list[DocSection] = []
         if "alert" in data:
             name = data["alert"]
-            body = yaml.dump(data, default_flow_style=False, sort_keys=False).strip()
+            body = _dump_node(data)
             sections.append(DocSection(
                 heading=f"alert: {name}",
                 content=body,

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "label": "eval recall@5 (samples)",
+  "label": "hybrid recall@5 (samples)",
   "message": "1.00",
   "color": "brightgreen"
 }

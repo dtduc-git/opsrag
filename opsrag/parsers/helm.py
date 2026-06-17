@@ -5,11 +5,14 @@ structure as sections for chunking.
 """
 from __future__ import annotations
 
-import yaml
-
 from opsrag.ingestion.metadata import apply_provenance
 from opsrag.interfaces.parser import DocSection, DocType, ParsedDocument
 from opsrag.interfaces.scm import RepoFile
+
+# Round-trip YAML load/dump shared with k8s.py: comments + anchors attached to
+# a values key survive into the chunk text (PyYAML's safe_load/dump dropped
+# them, losing ops rationale like `# bumped after incident X`).
+from opsrag.parsers.k8s import _YAML, _dump_key_slice
 
 _HELM_FILES = ("chart.yaml", "chart.yml", "values.yaml", "values.yml")
 _HELM_PATH_HINTS = ("charts/", "helm/", "/templates/")
@@ -33,7 +36,7 @@ class HelmParser:
         is_chart = basename in ("chart.yaml", "chart.yml")
 
         try:
-            data = yaml.safe_load(file.content) or {}
+            data = _YAML.load(file.content) or {}
         except Exception:
             data = {}
 
@@ -121,12 +124,11 @@ class HelmParser:
             # content, only in metadata, so "resource limits for X" loses both
             # the BM25 anchor and the semantic anchor. generic.py already does
             # this; Helm (the most common file type) silently didn't.
-            if isinstance(value, (dict, list)):
-                content = yaml.dump(
-                    {key: value}, default_flow_style=False, sort_keys=False
-                ).strip()
-            else:
-                content = f"{key}: {value}"
+            #
+            # Round-trip: slice this key (with its attached comment + the
+            # value sub-node's comments/anchors) into a single-key map and
+            # re-dump it so the ops rationale next to the key survives.
+            content = _dump_key_slice(data, key, value)
 
             section_type = "values_section"
             low = key.lower()

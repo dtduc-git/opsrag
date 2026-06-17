@@ -1,10 +1,68 @@
 const BASE = "/api";
 
+// ── CSRF (double-submit) ────────────────────────────────────────────────
+// In login/cookie mode the backend (oidc_enforcement.py) requires every
+// state-changing request to echo the non-HttpOnly `opsrag_csrf` cookie in the
+// `X-CSRF-Token` header. The session cookie is SameSite=Lax, which does NOT
+// cover top-level cross-site POSTs, so this header is the actual protection.
+// We wrap window.fetch ONCE here (api.ts is imported at app boot) so every
+// fetch path -- apiFetch, the raw fetch helpers, and the SSE/query stream --
+// carries the token on unsafe methods, without touching each call site. Scoped
+// to SAME-ORIGIN requests so the token is never leaked to a third-party origin.
+// Bearer/oidc mode has no opsrag_csrf cookie, so this is a transparent no-op.
+const _CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+
+function _csrfCookie(): string | null {
+  const m = document.cookie.match(/(?:^|;\s*)opsrag_csrf=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function _isSameOrigin(input: RequestInfo | URL): boolean {
+  try {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+    if (/^https?:\/\//i.test(url)) return new URL(url).origin === window.location.origin;
+    return true; // relative URL (e.g. "/api/...") -> same-origin
+  } catch {
+    return true;
+  }
+}
+
+if (typeof window !== "undefined" && !(window as unknown as { __opsragCsrf?: boolean }).__opsragCsrf) {
+  (window as unknown as { __opsragCsrf?: boolean }).__opsragCsrf = true;
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const method = (
+      init?.method ??
+      (typeof input !== "string" && !(input instanceof URL) ? (input as Request).method : undefined) ??
+      "GET"
+    ).toUpperCase();
+    if (!_CSRF_SAFE_METHODS.has(method) && _isSameOrigin(input)) {
+      const tok = _csrfCookie();
+      if (tok) {
+        const headers = new Headers(
+          init?.headers ??
+            (typeof input !== "string" && !(input instanceof URL)
+              ? (input as Request).headers
+              : undefined),
+        );
+        if (!headers.has("X-CSRF-Token")) headers.set("X-CSRF-Token", tok);
+        init = { ...init, headers };
+      }
+    }
+    return _origFetch(input, init);
+  };
+}
+
 // ── Auth scopes ─────────────────────────────────────────────────────────
 // The backend's scope vocabulary (mirrors opsrag/auth/scopes.py). The UI
 // uses these for nav gating only — server-side `require_scope` stays
-// authoritative. In OPEN mode the backend grants every scope (or returns
-// anonymous-with-all-access), so nav gating is transparent.
+// authoritative. Auth is always required (login or oidc); there is no open/
+// anonymous mode, so an unauthenticated user is sent to the login screen.
 export type Scope = "chat" | "investigate" | "mcp" | "admin";
 
 // ── Login-required signal ───────────────────────────────────────────────
@@ -46,9 +104,8 @@ function is401(resp: Response): boolean {
 
 /**
  * Central fetch wrapper. On a 401 it flips the app into login mode (sets the
- * login hash + clears stale auth) and throws so callers stop. In OPEN mode
- * the backend never returns 401, so this is fully transparent — behaves like
- * a bare `fetch`.
+ * login hash + clears stale auth) and throws so callers stop. (The global
+ * fetch wrapper above adds the CSRF header to unsafe same-origin requests.)
  *
  * NOTE: this does NOT read the body on success, so streaming/SSE callers can
  * pass `{ stream: true }` to skip the 401 short-circuit's body handling and
