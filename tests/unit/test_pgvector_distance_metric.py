@@ -22,6 +22,8 @@ import inspect
 
 import pytest
 
+pytest.importorskip("asyncpg")  # pgvector extra; skip in the minimal unit job
+
 from opsrag.interfaces.parser import DocType
 from opsrag.vectorstores.pgvector import (
     _DISTANCE_OPS,

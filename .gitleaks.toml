@@ -19,3 +19,9 @@ regexes = [
   # assert the MCP scrubs leaked keys from error messages) -- not a credential.
   '''AKIAABCDEFGHIJKLMNOP''',
 ]
+paths = [
+  # The connector-redaction test plants fabricated secrets (glpat-/rootly_/
+  # ghp_/AKIA/xoxb-) to PROVE the MCP error path scrubs them -- a fixture file
+  # of fakes by design, never real credentials.
+  '''tests/unit/mcp/test_connector_error_redaction\.py''',
+]

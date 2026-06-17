@@ -18,6 +18,8 @@ import logging
 
 import pytest
 
+pytest.importorskip("asyncpg")  # pgvector extra; skip in the minimal unit job
+
 from opsrag.vectorstores import pgvector as pgmod
 from opsrag.vectorstores.pgvector import (
     _FILTER_KEY_ALLOWLIST,
