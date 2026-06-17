@@ -60,6 +60,10 @@ def _build_llm(
             api_key=_env(slot.api_key_env),
             model=model,
             default_max_tokens=slot.max_tokens,
+            # Bound provider tail latency on the cheap lanes too -- read the
+            # same timeout/retry knobs as the factory's classic llm slot.
+            timeout=slot.request_timeout,
+            max_retries=slot.max_retries,
         )
     if provider == "openai":
         from opsrag.llms.openai import OpenAILLM
@@ -83,6 +87,9 @@ def _build_llm(
             region=slot.aws_region,
             profile=slot.aws_profile,
             default_max_tokens=slot.max_tokens,
+            request_timeout=slot.request_timeout,
+            connect_timeout=slot.connect_timeout,
+            max_retries=slot.max_retries,
         )
     raise NotImplementedError(f"PurposeRouter: LLM provider {provider!r} not available")
 

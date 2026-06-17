@@ -257,6 +257,11 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             api_key=_env(config.llm.api_key_env),
             model=config.llm.model,
             default_max_tokens=config.llm.max_tokens,
+            # Bound provider tail latency: thread the configured timeout/retry
+            # so no path keeps a bare client (Anthropic SDK takes timeout +
+            # max_retries directly).
+            timeout=config.llm.request_timeout,
+            max_retries=config.llm.max_retries,
         )
     elif config.llm.provider == "openai":
         from opsrag.llms.openai import OpenAILLM
@@ -288,6 +293,11 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             region=config.llm.aws_region,
             profile=config.llm.aws_profile,
             default_max_tokens=config.llm.max_tokens,
+            # Bound provider tail latency: Bedrock applies these via a botocore
+            # Config (read/connect timeouts + adaptive retries).
+            request_timeout=config.llm.request_timeout,
+            connect_timeout=config.llm.connect_timeout,
+            max_retries=config.llm.max_retries,
         )
     elif config.llm.provider == "litellm":
         from opsrag.llms.litellm_provider import LiteLLMLLM
@@ -316,6 +326,8 @@ def build_providers(config: OpsRAGConfig) -> Providers:
                 api_key=_env(config.llm.api_key_env),
                 model=v_model,
                 default_max_tokens=config.llm.max_tokens,
+                timeout=config.llm.request_timeout,
+                max_retries=config.llm.max_retries,
             )
         elif v_provider == "bedrock":
             from opsrag.llms.bedrock import BedrockLLM
@@ -324,6 +336,9 @@ def build_providers(config: OpsRAGConfig) -> Providers:
                 region=config.llm.aws_region,
                 profile=config.llm.aws_profile,
                 default_max_tokens=config.llm.max_tokens,
+                request_timeout=config.llm.request_timeout,
+                connect_timeout=config.llm.connect_timeout,
+                max_retries=config.llm.max_retries,
             )
         elif v_provider == "vertex":
             from opsrag.llms.vertex import VertexAILLM

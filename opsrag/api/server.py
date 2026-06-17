@@ -93,6 +93,122 @@ def _build_rate_limit_backend(cfg: OpsRAGConfig):
     return RedisRateLimitBackend(client=client)
 
 
+def _build_agent_graph(cfg, providers, checkpointer, known_repos, model_router):
+    """Select + build the agent graph for ``cfg.agent.mode``.
+
+    Pure dispatch (no I/O of its own) extracted from the lifespan so the
+    mode->builder mapping is unit-testable. Behaviour is byte-for-byte the
+    same as the inline chain it replaces:
+
+      - multi_agent / tool_calling / minimal -> their dedicated builders
+      - full / hybrid                         -> build_full_graph (hybrid is a
+        REMOVED legacy alias: it still builds the full graph but emits a
+        one-time warning so operators migrate the knob)
+      - anything else                         -> ValueError (fail fast; a
+        typo'd mode is a startup error, not a silent default)
+
+    The pydantic ``Literal`` on ``agent.mode`` already rejects true typos at
+    config-load, so the final ``raise`` is a defensive backstop for graphs
+    built from programmatically-constructed configs / future mode additions.
+    """
+    if cfg.agent.mode == "multi_agent":
+        return build_multi_agent_graph(
+            llm=providers.llm,
+            vector_store=providers.vector_store,
+            embedder=providers.embedder,
+            observability=providers.observability,
+            reranker=providers.reranker,
+            checkpointer=checkpointer,
+            top_k=cfg.agent.top_k,
+            rerank_top_k=cfg.agent.rerank_top_k,
+            rerank_diversity=cfg.agent.rerank_diversity,
+            rerank_content_dedup=cfg.agent.rerank_content_dedup,
+            rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
+            known_repos=known_repos,
+            model_router=model_router,
+            code_embedder=providers.code_embedder,
+            code_store=providers.code_vector_store,
+            light_graph=providers.light_graph,
+            verify_grounding=cfg.agent.verify_grounding_default,
+        )
+    elif cfg.agent.mode == "tool_calling":
+        return build_tool_calling_graph(
+            llm=providers.llm,
+            vector_store=providers.vector_store,
+            embedder=providers.embedder,
+            observability=providers.observability,
+            reranker=providers.reranker,
+            checkpointer=checkpointer,
+            top_k=cfg.agent.top_k,
+            rerank_top_k=cfg.agent.rerank_top_k,
+            rerank_diversity=cfg.agent.rerank_diversity,
+            rerank_content_dedup=cfg.agent.rerank_content_dedup,
+            rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
+            known_repos=known_repos,
+            model_router=model_router,
+            code_embedder=providers.code_embedder,
+            code_store=providers.code_vector_store,
+            light_graph=providers.light_graph,
+        )
+    elif cfg.agent.mode == "minimal":
+        return build_minimal_graph(
+            llm=providers.llm,
+            vector_store=providers.vector_store,
+            embedder=providers.embedder,
+            observability=providers.observability,
+            reranker=providers.reranker,
+            checkpointer=checkpointer,
+            top_k=cfg.agent.top_k,
+            rerank_top_k=cfg.agent.rerank_top_k,
+            rerank_diversity=cfg.agent.rerank_diversity,
+            rerank_content_dedup=cfg.agent.rerank_content_dedup,
+            rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
+            known_repos=known_repos,
+            code_embedder=providers.code_embedder,
+            code_store=providers.code_vector_store,
+        )
+    elif cfg.agent.mode in ("full", "hybrid"):
+        # NB: the legacy `hybrid` mode (graph-anchored retrieval) was
+        # removed with the Neo4j lane; `agent.mode: hybrid` now degrades to
+        # the full graph rather than crashing (build_hybrid_graph raises).
+        # Make the mismatch EXPLICIT (don't silently map unknown modes here):
+        # `full` is the real target; `hybrid` is a removed legacy alias kept
+        # building the full graph, but loudly, so operators migrate the knob.
+        if cfg.agent.mode == "hybrid":
+            _log.warning(
+                "agent.mode='hybrid' is a removed legacy alias; running "
+                "build_full_graph -- set mode to "
+                "full/minimal/tool_calling/multi_agent"
+            )
+        return build_full_graph(
+            llm=providers.llm,
+            vector_store=providers.vector_store,
+            embedder=providers.embedder,
+            reranker=providers.reranker,
+            observability=providers.observability,
+            memory_store=providers.memory_store,
+            checkpointer=checkpointer,
+            top_k=cfg.agent.top_k,
+            rerank_top_k=cfg.agent.rerank_top_k,
+            rerank_diversity=cfg.agent.rerank_diversity,
+            rerank_content_dedup=cfg.agent.rerank_content_dedup,
+            rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
+            known_repos=known_repos,
+            light_graph=providers.light_graph,
+            # Pro/answer model (Sonnet 4.6) for the final generation; cheap
+            # nodes stay on the base llm. Without this the full graph
+            # generated with the base llm (Haiku) and pro_model was unused.
+            model_router=model_router,
+            code_embedder=providers.code_embedder,
+            code_store=providers.code_vector_store,
+        )
+    else:
+        # Fail fast on an unknown/typo'd mode rather than silently building
+        # the full graph for everything -- a misconfigured knob is a startup
+        # error, not a quiet default.
+        raise ValueError(f"unknown agent.mode={cfg.agent.mode!r}")
+
+
 def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
     cfg = config or OpsRAGConfig.load()
 
@@ -384,6 +500,11 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                         model=cfg.agent.pro_model,
                         region=cfg.llm.aws_region,
                         profile=cfg.llm.aws_profile,
+                        # Bound the escalation client's tail latency with the
+                        # same timeout/retry knobs as the main llm slot.
+                        request_timeout=cfg.llm.request_timeout,
+                        connect_timeout=cfg.llm.connect_timeout,
+                        max_retries=cfg.llm.max_retries,
                     )
                 else:
                     pro_llm = VertexAILLM(model=cfg.agent.pro_model)
@@ -802,88 +923,9 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                 "are still computed at index time but nothing reads them). Use "
                 "mode=full/multi_agent/tool_calling, or disable light_graph."
             )
-        if cfg.agent.mode == "multi_agent":
-            agent_graph = build_multi_agent_graph(
-                llm=providers.llm,
-                vector_store=providers.vector_store,
-                embedder=providers.embedder,
-                observability=providers.observability,
-                reranker=providers.reranker,
-                checkpointer=checkpointer,
-                top_k=cfg.agent.top_k,
-                rerank_top_k=cfg.agent.rerank_top_k,
-                rerank_diversity=cfg.agent.rerank_diversity,
-                rerank_content_dedup=cfg.agent.rerank_content_dedup,
-                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
-                known_repos=known_repos,
-                model_router=model_router,
-                code_embedder=providers.code_embedder,
-                code_store=providers.code_vector_store,
-                light_graph=providers.light_graph,
-                verify_grounding=cfg.agent.verify_grounding_default,
-            )
-        elif cfg.agent.mode == "tool_calling":
-            agent_graph = build_tool_calling_graph(
-                llm=providers.llm,
-                vector_store=providers.vector_store,
-                embedder=providers.embedder,
-                observability=providers.observability,
-                reranker=providers.reranker,
-                checkpointer=checkpointer,
-                top_k=cfg.agent.top_k,
-                rerank_top_k=cfg.agent.rerank_top_k,
-                rerank_diversity=cfg.agent.rerank_diversity,
-                rerank_content_dedup=cfg.agent.rerank_content_dedup,
-                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
-                known_repos=known_repos,
-                model_router=model_router,
-                code_embedder=providers.code_embedder,
-                code_store=providers.code_vector_store,
-                light_graph=providers.light_graph,
-            )
-        elif cfg.agent.mode == "minimal":
-            agent_graph = build_minimal_graph(
-                llm=providers.llm,
-                vector_store=providers.vector_store,
-                embedder=providers.embedder,
-                observability=providers.observability,
-                reranker=providers.reranker,
-                checkpointer=checkpointer,
-                top_k=cfg.agent.top_k,
-                rerank_top_k=cfg.agent.rerank_top_k,
-                rerank_diversity=cfg.agent.rerank_diversity,
-                rerank_content_dedup=cfg.agent.rerank_content_dedup,
-                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
-                known_repos=known_repos,
-                code_embedder=providers.code_embedder,
-                code_store=providers.code_vector_store,
-            )
-        else:
-            # NB: the legacy `hybrid` mode (graph-anchored retrieval) was
-            # removed with the Neo4j lane; `agent.mode: hybrid` now degrades to
-            # the full graph rather than crashing (build_hybrid_graph raises).
-            agent_graph = build_full_graph(
-                llm=providers.llm,
-                vector_store=providers.vector_store,
-                embedder=providers.embedder,
-                reranker=providers.reranker,
-                observability=providers.observability,
-                memory_store=providers.memory_store,
-                checkpointer=checkpointer,
-                top_k=cfg.agent.top_k,
-                rerank_top_k=cfg.agent.rerank_top_k,
-                rerank_diversity=cfg.agent.rerank_diversity,
-                rerank_content_dedup=cfg.agent.rerank_content_dedup,
-                rerank_content_dedup_threshold=cfg.agent.rerank_content_dedup_threshold,
-                known_repos=known_repos,
-                light_graph=providers.light_graph,
-                # Pro/answer model (Sonnet 4.6) for the final generation; cheap
-                # nodes stay on the base llm. Without this the full graph
-                # generated with the base llm (Haiku) and pro_model was unused.
-                model_router=model_router,
-                code_embedder=providers.code_embedder,
-                code_store=providers.code_vector_store,
-            )
+        agent_graph = _build_agent_graph(
+            cfg, providers, checkpointer, known_repos, model_router,
+        )
 
         app.state.config = cfg
         app.state.providers = providers

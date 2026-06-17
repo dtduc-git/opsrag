@@ -182,6 +182,91 @@ class Mem0ServiceMemory:
             # in slim images). NEVER let memory break the agent.  # best-effort: never raise into the agent
             _log.warning("mem0 put failed for %s/%s", user_id, key, exc_info=True)
 
+    async def _linear_scan_rows(self, user_id: str, key: str) -> list[dict]:
+        """Original O(N) path: pull ALL rows for the user, scan for ``_key``.
+
+        Returns the rows in the SAME order the unfiltered ``get_all`` yields
+        them -- i.e. the exact iteration order the pre-optimisation ``get()``
+        and ``delete()`` saw. This is the canonical, order-defining behaviour;
+        the fast path must agree with it (or defer to it -- see ``get()``).
+        """
+        res = await asyncio.to_thread(
+            lambda: self._memory.get_all(filters={"user_id": user_id})
+        )
+        return [
+            item
+            for item in _extract_results(res)
+            if str((item.get("metadata") or {}).get("_key")) == str(key)
+        ]
+
+    async def _rows_for_key(
+        self, user_id: str, key: str, *, order_sensitive: bool = False
+    ) -> list[dict]:
+        """Fetch mem0 rows for ``(user_id, key)``, server-side-filtered.
+
+        Optimisation: ask mem0 to filter by the logical ``_key`` in the vector
+        store instead of pulling EVERY row for the user and scanning in Python
+        (the old O(N) path). When the server-side metadata filter is supported
+        (newer mem0 + a vector store that honours arbitrary payload filters)
+        this turns an O(N) transfer+scan into an O(matches) one.
+
+        The mem0 metadata-filter shape is version-fragile, so this is strictly
+        a fast PATH, not a replacement: if the filtered call raises or returns
+        no rows, we fall back to the original unfiltered ``get_all`` + Python
+        ``_key`` scan (``_linear_scan_rows``). That fallback yields the IDENTICAL
+        rows the old code did, so callers see no behavioural change -- only
+        (when supported) less work. Caller owns the best-effort envelope.
+
+        ORDER CAVEAT (``order_sensitive``): the *filtered* ``get_all`` is NOT
+        guaranteed to return rows in the same order as the *unfiltered*
+        ``get_all`` -- a vector store may order payload-filtered hits by point
+        id, score, or arbitrarily. So when MULTIPLE rows share one logical
+        ``_key``, the fast path's first row may differ from the old linear
+        scan's first row. ``get()`` (which returns ``rows[0]``) is therefore
+        order-sensitive: it passes ``order_sensitive=True`` so that on a
+        multi-row hit we DEFER to ``_linear_scan_rows`` and reproduce the old
+        first-match exactly. ``delete()`` sweeps ALL matching rows (a set, not a
+        sequence) so order is irrelevant and it leaves the default ``False``.
+        """
+        # Fast path: server-side _key filter on top of the user_id filter.
+        try:
+            res = await asyncio.to_thread(
+                lambda: self._memory.get_all(
+                    filters={"user_id": user_id, "_key": str(key)}
+                )
+            )
+            rows = [
+                item
+                for item in _extract_results(res)
+                # Re-verify in Python: a backend that silently ignores the
+                # unknown ``_key`` filter would return ALL rows, so we must
+                # still match here to stay correct.
+                if str((item.get("metadata") or {}).get("_key")) == str(key)
+            ]
+            if rows:
+                # Multi-row + order matters: the filtered call's order may not
+                # equal the unfiltered iteration order, so picking rows[0] here
+                # could select a DIFFERENT row than the pre-change linear scan.
+                # Defer to the canonical linear scan to preserve the exact old
+                # first-match selection. (Single-row hits are unambiguous.)
+                if order_sensitive and len(rows) > 1:
+                    return await self._linear_scan_rows(user_id, key)
+                return rows
+        except asyncio.CancelledError:
+            raise
+        except BaseException:  # noqa: BLE001 -- filter shape is version-fragile;
+            # any failure just means we use the linear-scan fallback below.
+            _log.debug(
+                "mem0 server-side _key filter unsupported for %s/%s; "
+                "falling back to linear scan",
+                user_id,
+                key,
+                exc_info=True,
+            )
+
+        # Fallback: original O(N) behaviour -- identical result to the old code.
+        return await self._linear_scan_rows(user_id, key)
+
     async def get(
         self, namespace: tuple[str, ...], key: str
     ) -> Memory | None:
@@ -189,14 +274,13 @@ class Mem0ServiceMemory:
             return None
         user_id = _namespace_to_user_id(namespace)
         try:
-            res = await asyncio.to_thread(
-                lambda: self._memory.get_all(filters={"user_id": user_id})
-            )
-            rows = _extract_results(res)
+            # order_sensitive: get() returns the FIRST matching row, so when
+            # several rows share this logical key it must reproduce the exact
+            # selection the old unfiltered linear scan made (first in
+            # get_all() iteration order). See _rows_for_key's ORDER CAVEAT.
+            rows = await self._rows_for_key(user_id, key, order_sensitive=True)
             for item in rows:
-                meta = item.get("metadata") or {}
-                if str(meta.get("_key")) == str(key):
-                    return self._result_to_memory(namespace, item)
+                return self._result_to_memory(namespace, item)
             return None
         except asyncio.CancelledError:
             raise
@@ -243,14 +327,16 @@ class Mem0ServiceMemory:
             return False
         user_id = _namespace_to_user_id(namespace)
         try:
-            res = await asyncio.to_thread(
-                lambda: self._memory.get_all(filters={"user_id": user_id})
-            )
-            rows = _extract_results(res)
+            # Same server-side-filter-first / linear-scan-fallback strategy as
+            # get(): avoid pulling every row for the user just to find the few
+            # carrying this logical key. delete() then sweeps ALL matching rows,
+            # so row ORDER is irrelevant here -- the SET of ids deleted is
+            # identical to the old unfiltered scan. Hence order_sensitive stays
+            # at its default False (no need to defer to the linear scan).
+            rows = await self._rows_for_key(user_id, key, order_sensitive=False)
             deleted = False
             for item in rows:
-                meta = item.get("metadata") or {}
-                if str(meta.get("_key")) == str(key) and item.get("id"):
+                if item.get("id"):
                     await asyncio.to_thread(
                         lambda mid=item["id"]: self._memory.delete(memory_id=mid)
                     )

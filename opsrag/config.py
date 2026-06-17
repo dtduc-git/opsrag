@@ -145,6 +145,15 @@ class LLMConfig(BaseModel):
     # LiteLLM: optional base URL for self-hosted / OpenAI-compatible
     # endpoints (e.g. a vLLM/TGI Qwen server). Ignored by other providers.
     api_base: str | None = None
+    # Bound provider client tail latency so a hung/slow upstream can't stall
+    # a turn indefinitely. Anthropic uses max_retries directly; Bedrock applies
+    # these via a botocore Config in adaptive mode.
+    # 120s is generous enough never to cut a valid generation -- the generator
+    # already self-budgets ~45s -- while still bounding upstream hangs/retry-storms
+    # vs the SDK 600s default.
+    request_timeout: float = 120.0
+    connect_timeout: float = 10.0
+    max_retries: int = 2
 
 
 class VisionConfig(BaseModel):
@@ -245,7 +254,11 @@ class APIConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    mode: Literal["minimal", "full", "hybrid", "tool_calling", "multi_agent"] = "hybrid"
+    # Default to "full" -- the value the bundled config.yaml ships -- so the
+    # schema default matches the shipped deploy and an env/YAML-less load picks
+    # the same path. "hybrid" stays in the Literal for back-compat (server.py
+    # warns and maps hybrid->full).
+    mode: Literal["minimal", "full", "hybrid", "tool_calling", "multi_agent"] = "full"
     top_k: int = 10
     rerank_top_k: int = 5
     max_retries: int = 3

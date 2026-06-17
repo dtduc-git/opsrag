@@ -25,6 +25,18 @@ _TRUST_RERANK_SCORE = 0.65
 # `grader_concurrency` overrides it for tuning without a code change.
 _GRADE_CONCURRENCY = 6
 
+# Output token cap for the binary relevance gate. The structured payload is the
+# one-field ``_GradeResult`` ({"relevant": true/false}) -- ~10-20 tokens including
+# JSON punctuation -- so a 128-token ceiling lets the tiny answer schedule faster
+# (shorter max_tokens reservation) WITHOUT any chance of truncating a valid
+# verdict. Quality-neutral: the cap is HONORED on non-thinking providers
+# (Anthropic/Bedrock-Claude/OpenAI), while Vertex and LiteLLM-Gemini IGNORE it
+# (floor it at their default) to avoid truncating Gemini thinking tokens -- which
+# count against max_output_tokens unless a response_schema is set, and the
+# in-prompt-schema structured path sets none. So the boolean the grader returns
+# is identical on every provider, with or without the cap.
+_GATE_MAX_TOKENS = 128
+
 from opsrag.agent.prompts import GRADER_SYSTEM
 from opsrag.interfaces.chunker import Chunk
 from opsrag.interfaces.llm import LLMProvider
@@ -47,6 +59,7 @@ async def _grade_one(llm: LLMProvider, query: str, chunk: Chunk) -> bool:
             messages=[{"role": "user", "content": prompt}],
             schema=_GradeResult,
             system_prompt=GRADER_SYSTEM,
+            max_tokens=_GATE_MAX_TOKENS,
         )
         return result.relevant
     except Exception as exc:

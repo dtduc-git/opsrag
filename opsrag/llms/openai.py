@@ -110,6 +110,8 @@ class OpenAILLM:
         schema: type,
         system_prompt: str | None = None,
         purpose: str | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> Any:
         """Force JSON output that matches a Pydantic v2 model, using OpenAI's
         native ``json_object`` response mode plus an in-prompt schema."""
@@ -124,13 +126,18 @@ class OpenAILLM:
         )
         system = f"{system_prompt}\n\n{instruction}" if system_prompt else instruction
 
-        resp = await self.generate(
-            messages=messages,
-            system_prompt=system,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            purpose=purpose,
-        )
+        # max_tokens caps output; left None it preserves generate's default-4096
+        # behavior so existing callers are unchanged.
+        gen_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "system_prompt": system,
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+            "purpose": purpose,
+        }
+        if max_tokens is not None:
+            gen_kwargs["max_tokens"] = max_tokens
+        resp = await self.generate(**gen_kwargs)
 
         text = resp.content.strip()
         if text.startswith("```"):

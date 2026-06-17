@@ -25,7 +25,10 @@ def stub_bedrock(monkeypatch):
     """Replace BedrockLLM with a no-network stub for the router build path."""
     import opsrag.llms.bedrock as bedrock_mod
 
-    def _factory(model="m", region=None, profile=None, default_max_tokens=4096):
+    def _factory(model="m", region=None, profile=None, default_max_tokens=4096, **kwargs):
+        # **kwargs tolerates the timeout/retry robustness knobs the router now
+        # threads in (request_timeout / connect_timeout / max_retries); the
+        # real BedrockLLM accepts them, so the stub must too.
         return _StubLLM(model)
 
     monkeypatch.setattr(bedrock_mod, "BedrockLLM", _factory)

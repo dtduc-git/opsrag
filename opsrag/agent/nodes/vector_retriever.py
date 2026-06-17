@@ -448,19 +448,27 @@ def vector_retrieve_node(
         # heuristics, and listing intent above -- HyDE only changes
         # the embedding fed to the vector index.
         hyde_text = state.get("hyde_text")
-        if hyde_text:
-            # HyDE's hypothetical is a DOCUMENT (a fake answer), so embed it in
-            # DOCUMENT space -- not query space. On asymmetric embedders (Cohere
-            # v4 / Vertex / Voyage, incl. this deployment's gemini-embedding-001)
-            # query and document subspaces differ; embedding the hypothetical via
-            # embed_query (search_query) lands it in the wrong space, so HyDE goes
-            # neutral-to-harmful on exactly the prod models. embed_texts uses the
-            # document input_type AND bypasses the query-only cache (cached.py
-            # warns that cache must never see document text). Doc-space hypo vs
-            # doc-space corpus is the apples-to-apples comparison HyDE intends.
-            embedding = (await embedder.embed_texts([hyde_text]))[0]
-        else:
-            embedding = await embedder.embed_query(query)
+
+        # The main-query embedding and the (optional) code-lane embedding are
+        # two independent network calls to (possibly distinct) embedding
+        # backends with no data dependency, so we issue them CONCURRENTLY and
+        # await both with asyncio.gather. The branch selection (HyDE doc-space
+        # vs raw query-space) and the code-lane best-effort fallback are
+        # preserved EXACTLY -- gather only overlaps the two awaits; the values
+        # fed downstream are identical to the prior serial path.
+        async def _main_embed() -> list[float]:
+            if hyde_text:
+                # HyDE's hypothetical is a DOCUMENT (a fake answer), so embed it in
+                # DOCUMENT space -- not query space. On asymmetric embedders (Cohere
+                # v4 / Vertex / Voyage, incl. this deployment's gemini-embedding-001)
+                # query and document subspaces differ; embedding the hypothetical via
+                # embed_query (search_query) lands it in the wrong space, so HyDE goes
+                # neutral-to-harmful on exactly the prod models. embed_texts uses the
+                # document input_type AND bypasses the query-only cache (cached.py
+                # warns that cache must never see document text). Doc-space hypo vs
+                # doc-space corpus is the apples-to-apples comparison HyDE intends.
+                return (await embedder.embed_texts([hyde_text]))[0]
+            return await embedder.embed_query(query)
 
         # Code lane: embed the query with the code-specific embedder so
         # hybrid_search can fuse a 4th RRF lane over the `opsrag_code`
@@ -471,16 +479,30 @@ def vector_retrieve_node(
         # dilutes exactly the symbol queries the code lane exists to win.
         # Best-effort -- a code-embedder hiccup must never sink the main
         # retrieval, so fall back to dense+BM25 on error.
-        code_embedding = None
-        if _code_lane_on:
+        async def _code_embed() -> list[float] | None:
+            if not _code_lane_on:
+                return None
             try:
-                code_embedding = await code_embedder.embed_query(query)
+                return await code_embedder.embed_query(query)
             except Exception:
                 _log.warning(
                     "code-lane query embed failed; proceeding dense+BM25 only",
                     exc_info=True,
                 )
-                code_embedding = None
+                return None
+
+        embedding, code_embedding = await asyncio.gather(
+            _main_embed(), _code_embed(), return_exceptions=True,
+        )
+        # The main embedding has no best-effort fallback (a failure must still
+        # propagate, as in the prior serial path), so re-raise if it errored.
+        if isinstance(embedding, BaseException):
+            raise embedding
+        # Code embedding keeps its best-effort contract: an Exception result
+        # (e.g. a gather-surfaced error not caught inside _code_embed) coerces
+        # to None, identical to the inner except->None fallback.
+        if isinstance(code_embedding, BaseException):
+            code_embedding = None
 
         # Main retrieval lane: hybrid (dense + BM25 RRF). Dense is fed the
         # HyDE-expanded embedding (bridges user-phrasing vs corpus vocabulary);

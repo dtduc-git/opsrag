@@ -22,6 +22,7 @@ named-agent timeline. Loop bound: MAX_TOOL_CALLS=3 across reasoner+caller.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -1732,9 +1733,42 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
         # GitLab client once and pass it to gitlab_* tools only.
         gitlab_client_ctx = GitLabClient()
         gitlab_client = await gitlab_client_ctx.__aenter__()
+        # Names of the REAL tool calls actually dispatched, in original pending
+        # order -- rebuilt below for the agent_event `tools=` metadata (no
+        # pending slicing, since concurrent dispatch decouples the loop index).
+        executed_real_names: list[str] = []
         try:
+            # L7 -- PARALLELIZE TOOL DISPATCH.
+            #
+            # The per-call loop was strictly serial: each `await tool.call(...)`
+            # blocked on network IO before the next call started. Independent
+            # MCP reads in a single hop have no ordering dependency on each
+            # other, so we fan the REAL `tool.call` dispatches out concurrently
+            # and re-apply their results IN ORIGINAL pending ORDER afterwards.
+            # This changes ONLY when the network IO runs -- history/audit
+            # content + order, budget accounting (F7), and the dedupe result
+            # are reproduced byte-for-byte vs. the serial path.
+            #
+            # `update_plan` (state-mutation) and unknown-tool (registry-miss,
+            # F7) calls stay on the SERIAL path: they mutate shared
+            # plan_state / append ordered audit+history rows and must keep the
+            # EXACT F7 budget semantics (unknown does NOT consume
+            # executed_count; update_plan does). We classify every pending call
+            # FIRST, assigning budget slots in pending order applying the
+            # MAX_TOOL_CALLS cap exactly as the serial `break` did, THEN
+            # dispatch the surviving real calls concurrently, THEN re-apply all
+            # results serially in pending order.
+            tool_cache = get_default_cache()
+
+            # (1) Pre-walk: classify each pending call + assign budget slots,
+            #     simulating how the serial loop advanced `executed_count` and
+            #     broke at the cap. `kind` in {"update_plan","unknown","real"};
+            #     entries past the cap are dropped exactly as the serial
+            #     `break` dropped them (and logged identically).
+            classified: list[dict] = []
+            sim_count = executed_count  # mirrors the serial `executed_count`
             for call in pending:
-                if executed_count >= MAX_TOOL_CALLS:
+                if sim_count >= MAX_TOOL_CALLS:
                     _log.warning(
                         "tool_caller dropping name=%s -- loop cap (%d) reached",
                         call.get("name"), MAX_TOOL_CALLS,
@@ -1742,11 +1776,85 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                     break
                 name = call.get("name", "")
                 args = call.get("args") or {}
-
-                # Rec #3 -- `update_plan` is a state-mutation tool, not an MCP
-                # handler. Intercept BEFORE the MCP registry lookup so the
-                # "unknown tool" path doesn't fire for it.
                 if name == "update_plan":
+                    classified.append({"kind": "update_plan", "name": name, "args": args})
+                    sim_count += 1  # update_plan consumes the real budget
+                    continue
+                tool = registry.get(name)
+                if tool is None:
+                    classified.append({"kind": "unknown", "name": name, "args": args})
+                    # unknown does NOT consume executed_count (F7) -- sim_count
+                    # stays put, exactly mirroring the serial loop.
+                    continue
+                classified.append({
+                    "kind": "real", "name": name, "args": args, "tool": tool,
+                })
+                sim_count += 1  # a real call consumes the real budget
+
+            # (2) Build coroutines for the REAL calls only and fan them out.
+            #     The shared `gitlab_client` httpx.AsyncClient is safe for
+            #     concurrent GETs; non-gitlab tools manage their own
+            #     connections inside the handler. Each coroutine goes through
+            #     the same per-tool TTL micro-cache so cache + raise semantics
+            #     are unchanged.
+            def _make_coro(entry: dict):
+                name = entry["name"]
+                args = entry["args"]
+                tool = entry["tool"]
+                client_for_tool = gitlab_client if name.startswith("gitlab_") else None
+
+                async def _do_call():
+                    return await tool.call(client_for_tool, args)
+
+                return tool_cache.get_or_compute(name, args, _do_call)
+
+            real_entries = [c for c in classified if c["kind"] == "real"]
+            # Per-call start markers for latency. Captured just before gather so
+            # the measured wall-clock spans the concurrent dispatch window;
+            # latency is telemetry-only (audit row), never answer-affecting.
+            for entry in real_entries:
+                entry["start"] = time.perf_counter()
+            if real_entries:
+                # (3) gather with return_exceptions so one failing call does
+                #     not cancel its siblings; exceptions are classified into
+                #     the EXACT existing except-branch payloads below.
+                gathered = await asyncio.gather(
+                    *(_make_coro(e) for e in real_entries),
+                    return_exceptions=True,
+                )
+                # BaseException-but-not-Exception fidelity (cancellation
+                # semantics). `return_exceptions=True` CAPTURES BaseException
+                # subclasses -- asyncio.CancelledError, KeyboardInterrupt,
+                # SystemExit -- as ordinary results. The ORIGINAL serial loop
+                # caught only `except Exception`, so those propagated out
+                # untouched (correct cancellation / interrupt behaviour: a
+                # cancelled hop must NOT be silently turned into a tool_result
+                # error row and swallowed). Re-raise any such result BEFORE
+                # classifying, so cancellation/interrupt propagate exactly as
+                # the serial loop did. Only Exception-subclass results fall
+                # through to the GitLabMCPError/generic branches below. The
+                # `finally` (gitlab client aexit) still runs on the way out.
+                for res in gathered:
+                    if isinstance(res, BaseException) and not isinstance(res, Exception):
+                        raise res
+                for entry, res in zip(real_entries, gathered, strict=True):
+                    entry["result"] = res
+
+            # (4) Re-apply ALL results serially in ORIGINAL pending order:
+            #     append history + audit rows, run the retrieval extractors,
+            #     bump budget counters. Identical to the serial loop except the
+            #     network IO already happened above. `_dedupe_chunks` runs ONCE
+            #     at the very end (vs. per-real-call before) -- it is
+            #     order-independent + idempotent, so the final list is the same.
+            for entry in classified:
+                kind = entry["kind"]
+                name = entry["name"]
+                args = entry["args"]
+
+                if kind == "update_plan":
+                    # Rec #3 -- `update_plan` is a state-mutation tool, not an
+                    # MCP handler. Merged here (serial) so plan_state ordering
+                    # is deterministic.
                     try:
                         from opsrag.agent.services.plan_tool import update_plan as _merge_plan
                         plan_state, stats = _merge_plan(plan_state, args.get("updates") or [])
@@ -1766,9 +1874,7 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                     executed_now += 1
                     continue
 
-                tool = registry.get(name)
-                start = time.perf_counter()
-                if tool is None:
+                if kind == "unknown":
                     # Loud, prescriptive error -- the previous silent
                     # `unknown tool 'X'` was ignored by the LLM in a
                     # secret-value hallucination incident: the
@@ -1830,22 +1936,53 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                     # the per-turn wall-clock breaker.
                     executed_now += 1
                     continue
-                try:
-                    # Tools whose name starts with `gitlab_` get the GitLab
-                    # client. Others (k8s_*, future MCPs) ignore the client
-                    # arg and manage their own connections inside the handler.
-                    client_for_tool = gitlab_client if name.startswith("gitlab_") else None
 
-                    # Wrap dispatch with the per-tool TTL micro-cache so
-                    # repeated identical calls inside a session -- and
-                    # across concurrent sessions in the live-data window --
-                    # share results. Errors are negative-cached briefly
-                    # (~30s) to absorb retry storms without changing the
-                    # raise semantics.
-                    tool_cache = get_default_cache()
-                    async def _do_call():
-                        return await tool.call(client_for_tool, args)
-                    result = await tool_cache.get_or_compute(name, args, _do_call)
+                # kind == "real" -- re-apply the gathered dispatch result. The
+                # except-branch payloads below reproduce the serial loop's
+                # GitLabMCPError vs. generic handling EXACTLY.
+                start = entry["start"]
+                result = entry.get("result")
+                if isinstance(result, GitLabMCPError):
+                    exc = result
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    history.append({
+                        "role": "tool_result", "name": name,
+                        "response": {"error": str(exc), "status": exc.status},
+                    })
+                    audit.append({
+                        "name": name, "args": args,
+                        "latency_ms": round(latency_ms, 1),
+                        "error": str(exc), "ts": time.time(),
+                    })
+                    _log.warning("tool_caller %s failed: %s", name, exc)
+                elif isinstance(result, Exception):
+                    # Mirrors the serial loop's `except Exception` branch
+                    # EXACTLY. BaseException-but-not-Exception (CancelledError,
+                    # KeyboardInterrupt, SystemExit) was already re-raised
+                    # right after the gather, so it can never reach here and be
+                    # swallowed -- preserving the serial cancellation semantics.
+                    exc = result
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    history.append({
+                        "role": "tool_result", "name": name,
+                        "response": {"error": f"unhandled: {exc}"},
+                    })
+                    audit.append({
+                        "name": name, "args": args,
+                        "latency_ms": round(latency_ms, 1),
+                        "error": f"unhandled: {exc}", "ts": time.time(),
+                    })
+                    # Logging fidelity: the serial generic branch used
+                    # `_log.exception(...)`, which records the traceback. The
+                    # gathered path has no *active* exception context here (the
+                    # exception was captured, not in-flight), so we pass the
+                    # captured exception via `exc_info=exc` to reproduce the
+                    # same traceback-bearing error visibility.
+                    _log.error(
+                        "tool_caller %s unhandled error: %s",
+                        name, exc, exc_info=exc,
+                    )
+                else:
                     latency_ms = (time.perf_counter() - start) * 1000
                     truncated = _safe_json(result, _RESULT_TRUNCATE_CHARS)
                     history.append({
@@ -1862,7 +1999,8 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                             new_chunks = extractor(result)
                             if new_chunks:
                                 retrieved_chunks.extend(new_chunks)
-                                retrieved_chunks = _dedupe_chunks(retrieved_chunks)
+                                # NOTE: dedupe deferred to a single pass after
+                                # the loop (F12-equivalent: order-independent).
                         except Exception as exc:  # noqa: BLE001
                             # Extractor failures must not block the tool flow.
                             _log.warning(
@@ -1880,32 +2018,15 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                         "tool_caller name=%s latency=%.0fms result_chars=%d chunks_lifted=%d",
                         name, latency_ms, len(truncated), len(new_chunks),
                     )
-                except GitLabMCPError as exc:
-                    latency_ms = (time.perf_counter() - start) * 1000
-                    history.append({
-                        "role": "tool_result", "name": name,
-                        "response": {"error": str(exc), "status": exc.status},
-                    })
-                    audit.append({
-                        "name": name, "args": args,
-                        "latency_ms": round(latency_ms, 1),
-                        "error": str(exc), "ts": time.time(),
-                    })
-                    _log.warning("tool_caller %s failed: %s", name, exc)
-                except Exception as exc:
-                    latency_ms = (time.perf_counter() - start) * 1000
-                    history.append({
-                        "role": "tool_result", "name": name,
-                        "response": {"error": f"unhandled: {exc}"},
-                    })
-                    audit.append({
-                        "name": name, "args": args,
-                        "latency_ms": round(latency_ms, 1),
-                        "error": f"unhandled: {exc}", "ts": time.time(),
-                    })
-                    _log.exception("tool_caller %s unhandled error", name)
                 executed_count += 1
                 executed_now += 1
+                executed_real_names.append(name)
+
+            # Single dedupe pass over the accumulated chunks -- equivalent to
+            # the serial loop's per-real-call dedupe (idempotent +
+            # order-independent), so the final `retrieved_chunks` is identical.
+            if retrieved_chunks:
+                retrieved_chunks = _dedupe_chunks(retrieved_chunks)
         finally:
             await gitlab_client_ctx.__aexit__(None, None, None)
 
@@ -1946,7 +2067,11 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
             "agent_event": _agent_event(
                 "tool_caller", "completed",
                 f"Executed {executed_now} call(s)", calls=executed_now,
-                tools=[c.get("name") for c in pending[:executed_now]],
+                # Built from the REAL calls actually dispatched, in pending
+                # order -- concurrent dispatch decouples the loop index from
+                # `executed_now`, so the old `pending[:executed_now]` slice is
+                # no longer a valid stand-in. Telemetry-only field.
+                tools=executed_real_names,
                 plan_items=len(plan_state),
                 plan_stats=plan_stats_total,
                 chunks_lifted=len(retrieved_chunks),
