@@ -50,6 +50,20 @@ GEMINI_2_5_PRO_OUTPUT = 1_000_000_000
 GEMINI_2_0_FLASH_INPUT = 7_500_000
 GEMINI_2_0_FLASH_OUTPUT = 30_000_000
 
+# Gemini 3 (public list, per 1M tokens):
+#   3 Flash preview:   $0.50 in / $3.00 out.
+#   3.5 Flash:         $1.50 in / $9.00 out.
+#   3 / 3.1 Pro (<=200k ctx): $2.00 in / $12.00 out  -- ESTIMATE; correct via
+#       llm.model_prices if your contract/sheet differs (the table is overridable).
+GEMINI_3_FLASH_INPUT = 50_000_000
+GEMINI_3_FLASH_OUTPUT = 300_000_000
+GEMINI_3_5_FLASH_INPUT = 150_000_000
+GEMINI_3_5_FLASH_OUTPUT = 900_000_000
+GEMINI_3_PRO_INPUT = 200_000_000
+GEMINI_3_PRO_OUTPUT = 1_200_000_000
+# gemini-embedding-001 (Vertex): ~$0.15 / 1M input, no output (ESTIMATE).
+GEMINI_EMBED_001_INPUT = 15_000_000
+
 # --- Claude (via Anthropic API or AnthropicVertex) --------------------------
 # Sonnet 4: ~$3 input / $15 output per 1M tokens (rounded from public sheet).
 CLAUDE_SONNET_4_INPUT = 300_000_000
@@ -102,6 +116,11 @@ _RATES: dict[str, tuple[int, int]] = {
     "gemini-2.5-flash-lite": (GEMINI_2_5_FLASH_INPUT, GEMINI_2_5_FLASH_OUTPUT),
     "gemini-2.5-pro": (GEMINI_2_5_PRO_INPUT, GEMINI_2_5_PRO_OUTPUT),
     "gemini-2.0-flash": (GEMINI_2_0_FLASH_INPUT, GEMINI_2_0_FLASH_OUTPUT),
+    # Gemini 3 (suffix-match also maps the litellm "vertex_ai/" prefix).
+    "gemini-3-flash-preview": (GEMINI_3_FLASH_INPUT, GEMINI_3_FLASH_OUTPUT),
+    "gemini-3.5-flash": (GEMINI_3_5_FLASH_INPUT, GEMINI_3_5_FLASH_OUTPUT),
+    "gemini-3-pro-preview": (GEMINI_3_PRO_INPUT, GEMINI_3_PRO_OUTPUT),
+    "gemini-3.1-pro-preview": (GEMINI_3_PRO_INPUT, GEMINI_3_PRO_OUTPUT),
     # Claude (Anthropic native + Vertex spellings + Bedrock spellings)
     "claude-sonnet-4-20250514": (CLAUDE_SONNET_4_INPUT, CLAUDE_SONNET_4_OUTPUT),
     "claude-sonnet-4@20250514": (CLAUDE_SONNET_4_INPUT, CLAUDE_SONNET_4_OUTPUT),
@@ -123,6 +142,7 @@ _RATES: dict[str, tuple[int, int]] = {
     "text-embedding-3-large": (OPENAI_EMBED_3_LARGE_INPUT, 0),
     "text-embedding-3-small": (OPENAI_EMBED_3_SMALL_INPUT, 0),
     "text-embedding-005": (VERTEX_EMBED_005_INPUT, 0),
+    "gemini-embedding-001": (GEMINI_EMBED_001_INPUT, 0),
 }
 
 
@@ -142,21 +162,73 @@ _PER_CALL_RATES: dict[str, int] = {
 }
 
 
+# --- Runtime price overrides ------------------------------------------------
+# Populated from config at boot via set_overrides(). Consulted BEFORE the
+# built-in tables so operators can price preview / MaaS / custom models (or
+# correct a built-in rate) via YAML/env -- no code change. Key matching is the
+# same exact-then-suffix rule as the built-in tables.
+_OVERRIDES: dict[str, tuple[int, int]] = {}
+_PER_CALL_OVERRIDES: dict[str, int] = {}
+
+
+def set_overrides(
+    token_rates: dict[str, tuple[int, int]] | None = None,
+    per_call_rates: dict[str, int] | None = None,
+) -> None:
+    """Install operator price overrides (replaces any prior set).
+
+    ``token_rates``: model id -> (input, output) in micro-cents per 1M tokens.
+    ``per_call_rates``: model id -> micro-cents per call (rerankers).
+    """
+    global _OVERRIDES, _PER_CALL_OVERRIDES
+    _OVERRIDES = dict(token_rates or {})
+    _PER_CALL_OVERRIDES = dict(per_call_rates or {})
+
+
+def _match(model: str, *tables):
+    """Exact-then-suffix lookup across tables in priority order; first hit wins.
+
+    Suffix-match resolves region/provider-prefixed ids (e.g. Bedrock
+    "us.anthropic.claude-..." or litellm "vertex_ai/gemini-...") to the base id.
+    """
+    for table in tables:
+        val = table.get(model)
+        if val is not None:
+            return val
+        for key, v in table.items():
+            if model.endswith(key):
+                return v
+    return None
+
+
 def per_call_cost_micros(model: str) -> int:
     """Per-call cost in micro-cents for per-request-priced models (rerankers).
 
-    Returns 0 for token-priced models (the common case). Mirrors the
-    exact + suffix-match lookup used by :func:`cost_usd_micros` so
-    region-prefixed inference profiles (e.g. "us.cohere.rerank-v3-5:0")
-    resolve to the base id.
+    Overrides win over the built-in table. Returns 0 for token-priced models.
     """
-    rate = _PER_CALL_RATES.get(model)
-    if rate is None:
-        for key, val in _PER_CALL_RATES.items():
-            if model.endswith(key):
-                rate = val
-                break
-    return rate or 0
+    return _match(model, _PER_CALL_OVERRIDES, _PER_CALL_RATES) or 0
+
+
+def token_rate_micros(model: str) -> tuple[int, int] | None:
+    """(input, output) micro-cents per 1M tokens for ``model``, OVERRIDE-AWARE.
+
+    Single source for both the persisted cost path (``cost_usd_micros``) and the
+    in-memory ``/usage`` summary (``usage._pricing_for``) so the two can never
+    diverge -- and so config overrides reach BOTH. ``None`` when unknown.
+    """
+    return _match(model, _OVERRIDES, _RATES)
+
+
+def has_price(model: str) -> bool:
+    """True if ``model`` has ANY known price (token OR per-call, incl. overrides).
+
+    Non-logging -- for deploy-time coverage checks. A per-call-priced reranker
+    has no token rate (and vice-versa), so check both tables.
+    """
+    return (
+        _match(model, _OVERRIDES, _RATES) is not None
+        or _match(model, _PER_CALL_OVERRIDES, _PER_CALL_RATES) is not None
+    )
 
 
 # Models we've already warned about -- keep the logger noise bounded.
@@ -170,15 +242,9 @@ def cost_usd_micros(model: str, prompt_tokens: int, completion_tokens: int) -> i
     token counts are clamped to 0 -- callers shouldn't pass them but if
     they do we don't want a negative cost in the DB.
     """
-    rates = _RATES.get(model)
-    if rates is None:
-        # Suffix match for cross-region Bedrock profiles, e.g.
-        # `apac.anthropic.claude-sonnet-4-...` falls back to
-        # `anthropic.claude-sonnet-4-...`.
-        for key, val in _RATES.items():
-            if model.endswith(key):
-                rates = val
-                break
+    # Operator overrides win; then the built-in table. Exact-then-suffix match
+    # resolves cross-region Bedrock profiles and litellm "vertex_ai/" prefixes.
+    rates = token_rate_micros(model)
     if rates is None:
         if model not in _unknown_warned:
             _log.warning("no pricing for model=%s; cost will be 0", model)

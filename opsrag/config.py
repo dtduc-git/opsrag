@@ -154,6 +154,13 @@ class LLMConfig(BaseModel):
     request_timeout: float = 120.0
     connect_timeout: float = 10.0
     max_retries: int = 2
+    # Per-model cost-telemetry price overrides (USD). Key = model id, matched
+    # exact-then-suffix (e.g. "gemini-3.1-pro-preview" also matches the litellm
+    # "vertex_ai/gemini-3.1-pro-preview" spelling). Value is either token rates
+    # {"input_per_1m": 0.5, "output_per_1m": 3.0} or a per-call rate
+    # {"per_call": 0.001} for rerankers. Lets you price preview / MaaS / custom
+    # models without code changes; overrides win over the built-in pricing table.
+    model_prices: dict[str, dict[str, float]] = Field(default_factory=dict)
 
 
 class VisionConfig(BaseModel):

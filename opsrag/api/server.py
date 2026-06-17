@@ -212,6 +212,40 @@ def _build_agent_graph(cfg, providers, checkpointer, known_repos, model_router):
 def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
     cfg = config or OpsRAGConfig.load()
 
+    # Cost-telemetry pricing: install operator overrides (USD -> micro-cents)
+    # then warn loudly about any CONFIGURED model with no price -- so an
+    # unpriced model surfaces at deploy time, not later as a "$0" row in /usage.
+    from opsrag.llms import pricing as _pricing
+    _tok_over: dict[str, tuple[int, int]] = {}
+    _pc_over: dict[str, int] = {}
+    for _mid, _spec in (cfg.llm.model_prices or {}).items():
+        if "per_call" in _spec:
+            _pc_over[_mid] = int(round(float(_spec["per_call"]) * 1e8))
+        if "input_per_1m" in _spec or "output_per_1m" in _spec:
+            _tok_over[_mid] = (
+                int(round(float(_spec.get("input_per_1m", 0)) * 1e8)),
+                int(round(float(_spec.get("output_per_1m", 0)) * 1e8)),
+            )
+    _pricing.set_overrides(_tok_over, _pc_over)
+    _configured_models = [
+        cfg.llm.model,
+        getattr(cfg.agent, "pro_model", None),
+        getattr(cfg.embedding, "model", None),
+        getattr(cfg.reranker, "model", None),
+        getattr(cfg.memory, "mem0_embed_model", None),
+    ]
+    _unpriced = [
+        m for m in dict.fromkeys(filter(None, _configured_models))
+        if not _pricing.has_price(m)
+    ]
+    if _unpriced:
+        _log.warning(
+            "no pricing for configured model(s) %s -> their usage cost will be "
+            "recorded as $0. Set llm.model_prices['<model>'] = "
+            "{input_per_1m: .., output_per_1m: ..} (or {per_call: ..}) to fix.",
+            _unpriced,
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Expand the asyncio default ThreadPoolExecutor before any work
