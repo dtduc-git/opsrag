@@ -17,6 +17,7 @@ falls back to the original chunks transparently.
 """
 from __future__ import annotations
 
+from opsrag.agent.nodes.hallucination import verify_groundedness
 from opsrag.agent.path_tree import (
     build_path_tree_summary_async,
     detect_target_repo,
@@ -107,11 +108,22 @@ def generate_node(
     observability: ObservabilityProvider,
     vector_store: VectorStore | None = None,
     answer_llm: LLMProvider | None = None,
+    verify_grounding: bool = True,
 ):
     # The final answer is the user-facing voice -- use the stronger "answer"
     # model (Sonnet 4.6) when provided so replies feel like Claude; the cheap
     # nodes (route/HyDE/grade) stay on the base llm. Falls back to base llm.
     gen_llm = answer_llm or llm
+
+    # ``verify_grounding`` gates the shared, fail-closed groundedness check
+    # (the same `verify_groundedness` build_full_graph's check_hallucination
+    # node uses). On the multi_agent RETRIEVAL branch this node is terminal --
+    # there is NO downstream hallucination gate -- so without this the answer
+    # ships (and gets cached) unverified. F6 fixed only the tool-path
+    # generator_node; this closes the retrieval branch.
+    # CRITICAL: build_full_graph passes verify_grounding=False because that
+    # graph runs a separate check_hallucination_node after generate -- gating
+    # here too would DOUBLE-call the groundedness LLM every turn.
 
     async def _generate(state: dict, config: dict | None = None) -> dict:
         query = state["query"]
@@ -265,8 +277,41 @@ def generate_node(
             purpose="answer_generation",
         )
 
+        # Shared, FAIL-CLOSED groundedness gate on the multi_agent retrieval
+        # branch -- this node is terminal there (generate -> END), so without a
+        # check the answer ships unverified and the qa_cache write gate (keyed
+        # on grounding_checked) caches it as clean. Run the SAME
+        # `verify_groundedness` helper build_full_graph's hallucination node
+        # uses so the two paths never diverge (F6 covered only the tool path).
+        # We can only ground against retrieved chunks; with none there is
+        # nothing to verify, so grounding stays unchecked (mirrors the
+        # generator_node / tool_synthesize convention). Skipped entirely when
+        # verify_grounding is False (e.g. build_full_graph, which runs its own
+        # check_hallucination_node) to avoid double-gating.
+        answer_text = response.content + vision_note
+        generation_grounded = False
+        grounding_checked = False
+        if verify_grounding and response.content and chunks:
+            # verify_groundedness fails CLOSED internally: any LLM/parse error
+            # returns False, so an unverifiable answer is treated as not
+            # grounded (grounded=False, grounding_checked=True) -- never
+            # silently shipped as clean.
+            generation_grounded = await verify_groundedness(
+                gen_llm, response.content, chunks
+            )
+            grounding_checked = True
+            if not generation_grounded:
+                answer_text = (
+                    answer_text
+                    + "\n\n_Note: some claims in this answer could not be "
+                    "verified against the retrieved sources. Double-check "
+                    "anything load-bearing before acting on it._"
+                )
+
         return {
-            "generation": response.content + vision_note,
+            "generation": answer_text,
+            "generation_grounded": generation_grounded,
+            "grounding_checked": grounding_checked,
             "current_step": "generated",
             # Surface what the LLM actually saw -- graph.py prefers this over
             # graded_chunks when emitting sources_content for the API response.

@@ -1,9 +1,12 @@
 """Flash-based cache-hit validator.
 
 Sits in front of the Q&A cache lookup: when raw cosine lands in the
-borderline band [0.93, 0.97], call Vertex Flash with a 1-shot judge
-prompt to check semantic equivalence between the current query and
-the cached question. If Flash says NO, treat as cache miss.
+borderline band [0.93, 0.99) (lower bound widens to the per-category
+floor that `lookup` accepted the hit at, e.g. FORENSIC 0.92, when the
+caller passes `min_score`; upper bound is `cfg.qa_judge_upper`), call
+Vertex Flash with a 1-shot judge prompt to check semantic equivalence
+between the current query and the cached question. If Flash says NO,
+treat as cache miss.
 
 Why this exists
 ---------------
@@ -27,14 +30,17 @@ Result: <$0.01/month at SRE-team scale.
 
 Skip rules
 ----------
-- cosine >= HIGH_CONFIDENCE_SKIP_JUDGE (default 0.97) -> skip judge,
-  trust the threshold.
-- cosine < band lower bound -> already a miss; never reaches judge.
+- cosine >= upper band (cfg.qa_judge_upper, default 0.99; env
+  OPSRAG_QA_JUDGE_UPPER wins) -> skip judge, trust the threshold.
+- cosine < band lower bound (max(min_score, 0.93)) -> already a miss;
+  never reaches judge.
 - env var OPSRAG_QA_JUDGE=0 -> bypass judge entirely (graceful disable).
 - LLM not provided -> bypass (graceful degrade).
-- LLM throws -> return True (default-allow); cache hit served per
-  legacy behaviour. We choose default-allow over default-deny so a
-  Vertex outage doesn't lock all hits.
+- LLM throws -> fail-CLOSED (return False, force miss): a borderline hit
+  re-queries the corpus rather than serving a wrong-but-close cached
+  answer (QUALITY > latency). Set cfg.qa_judge_fail_open=True (env
+  OPSRAG_QA_JUDGE_FAIL_OPEN wins) to prefer availability and serve the
+  cached candidate when the judge is down.
 
 Stats are exposed via the module-level counter dict so /cache/summary
 can report judge_calls, judge_yes, judge_no.
@@ -50,7 +56,66 @@ _log = logging.getLogger("opsrag.qa_cache.judge")
 # Cosine band where the judge runs. Below: regular miss. Above: trust
 # the high score and skip the judge call.
 JUDGE_LOWER = 0.93
-JUDGE_UPPER = 0.97
+# Auto-accept upper band. Config-overridable via `cfg.qa_judge_upper`
+# (QACacheConfig, default 0.99) so operators can widen the band the LLM
+# judge runs across without a rebuild -- raising the upper bound means MORE
+# borderline hits get the judge instead of being auto-accepted on cosine
+# alone (quality > latency). `OPSRAG_QA_JUDGE_UPPER` env still wins.
+JUDGE_UPPER_DEFAULT = 0.99
+_judge_upper: float = JUDGE_UPPER_DEFAULT
+# Back-compat module constant: kept so existing imports/tests still see a
+# value. The live band is resolved through `_get_judge_upper()`.
+JUDGE_UPPER = JUDGE_UPPER_DEFAULT
+
+# R14 -- fail mode when the borderline-band judge LLM itself errors. Default
+# fail-CLOSED (False): an in-band judge error returns False so the hit falls
+# through to a fresh corpus query rather than serving a wrong-but-close cached
+# answer (QUALITY > latency). Set via `configure(qa_judge_fail_open=...)` from
+# `cfg.qa_cache.qa_judge_fail_open`; the `OPSRAG_QA_JUDGE_FAIL_OPEN` env wins.
+JUDGE_FAIL_OPEN_DEFAULT = False
+_judge_fail_open: bool = JUDGE_FAIL_OPEN_DEFAULT
+
+
+def configure(
+    *,
+    qa_judge_upper: float | None = None,
+    qa_judge_fail_open: bool | None = None,
+) -> None:
+    """Apply the resolved `cfg.qa_judge_*` values as the module defaults.
+
+    Called once at boot by the config wiring. The `OPSRAG_QA_JUDGE_UPPER` /
+    `OPSRAG_QA_JUDGE_FAIL_OPEN` env vars still override these when present
+    (see `_get_judge_upper` / `_get_judge_fail_open`)."""
+    global _judge_upper, JUDGE_UPPER, _judge_fail_open
+    if qa_judge_upper is not None:
+        _judge_upper = float(qa_judge_upper)
+        JUDGE_UPPER = _judge_upper
+    if qa_judge_fail_open is not None:
+        _judge_fail_open = bool(qa_judge_fail_open)
+
+
+def _get_judge_upper() -> float:
+    """Resolve the auto-accept upper band. Env wins (config-overridable
+    latency pattern), else the config-derived default (default 0.99)."""
+    env = os.environ.get("OPSRAG_QA_JUDGE_UPPER")
+    if env is not None:
+        try:
+            return float(env)
+        except ValueError:
+            _log.warning(
+                "OPSRAG_QA_JUDGE_UPPER=%r is not a float; using %.3f",
+                env, _judge_upper,
+            )
+    return _judge_upper
+
+
+def _get_judge_fail_open() -> bool:
+    """Resolve the judge-error fail mode. Env wins (config-overridable
+    pattern), else the config-derived default (default False = fail-closed)."""
+    env = os.environ.get("OPSRAG_QA_JUDGE_FAIL_OPEN")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    return _judge_fail_open
 
 
 @dataclass
@@ -110,17 +175,31 @@ async def judge_match(
     cached_question: str,
     cosine: float,
     llm,
+    min_score: float | None = None,
 ) -> bool:
     """Return True if the cached entry is OK to serve, False to force miss.
 
-    Behaviour summary:
-      - cosine >= JUDGE_UPPER     -> True (skip judge, high confidence)
-      - JUDGE_LOWER <= cosine < JUDGE_UPPER -> call Flash judge
-      - cosine < JUDGE_LOWER      -> caller shouldn't have asked us; default True
+    ``min_score`` is the per-category cosine floor that ``lookup`` actually
+    accepted this hit at (the qacache track threads it through). Per-category
+    floors can sit *below* ``JUDGE_LOWER`` (e.g. FORENSIC 0.92) -- so a 0.925
+    FORENSIC hit passes ``lookup`` yet, under a hardcoded ``JUDGE_LOWER`` lower
+    bound, would default-allow WITHOUT being judged. We resolve the effective
+    judge lower bound to ``max(min_score, JUDGE_LOWER)`` so the judge runs
+    across ``[lower, upper)`` and that 0.925 FORENSIC hit IS judged. When
+    ``min_score`` is None we fall back to ``JUDGE_LOWER`` (legacy behaviour).
+
+    Behaviour summary (upper band = `_get_judge_upper()`,
+    lower band = `max(min_score, JUDGE_LOWER)` when min_score given else
+    `JUDGE_LOWER`):
+      - cosine >= upper band      -> True (skip judge, high confidence)
+      - lower <= cosine < upper band -> call Flash judge
+      - cosine < lower            -> caller shouldn't have asked us; default True
                                     (cosine threshold filter is the source of
                                     truth at the lower bound)
       - judge disabled (env / no LLM) -> True (graceful degrade)
-      - judge errors                  -> True (default-allow)
+      - judge errors              -> fail-CLOSED (False) so a borderline hit
+                                    re-queries the corpus; fail-OPEN (True) only
+                                    when `qa_judge_fail_open` is set.
 
     Identical strings short-circuit to True without calling the LLM.
     """
@@ -130,10 +209,11 @@ async def judge_match(
         return True
     if current_query.strip().lower() == cached_question.strip().lower():
         return True  # exact-match short-circuit
-    if cosine >= JUDGE_UPPER:
+    if cosine >= _get_judge_upper():
         _stats.skipped_high_conf += 1
         return True
-    if cosine < JUDGE_LOWER:
+    lower = max(min_score, JUDGE_LOWER) if min_score is not None else JUDGE_LOWER
+    if cosine < lower:
         return True  # caller already past threshold; defensive
 
     _stats.calls += 1
@@ -163,5 +243,14 @@ async def judge_match(
         return True
     except Exception as exc:
         _stats.errors += 1
-        _log.warning("judge call failed (cosine=%.3f): %s", cosine, exc)
-        return True  # default-allow on error
+        fail_open = _get_judge_fail_open()
+        _log.warning(
+            "judge call failed (cosine=%.3f): %s -- %s",
+            cosine, exc,
+            "serving cached hit (fail-open)" if fail_open
+            else "forcing cache miss (fail-closed)",
+        )
+        # R14 -- fail-CLOSED by default: a borderline hit falls through to a
+        # fresh corpus query when the safeguard is down (QUALITY > latency).
+        # Only serve the cached candidate when explicitly fail-open.
+        return fail_open

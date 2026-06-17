@@ -237,6 +237,7 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             api_key=_env(config.vector_store.api_key_env) if config.vector_store.api_key_env else None,
             collection_name=config.vector_store.collection,
             dimension=embedder.dimension,
+            distance=config.vector_store.distance,
             allow_dimension_change=config.vector_store.allow_dimension_change,
         )
     elif config.vector_store.provider == "pgvector":
@@ -247,6 +248,7 @@ def build_providers(config: OpsRAGConfig) -> Providers:
         vector_store = PgVectorStore(
             dsn=dsn,
             dimension=embedder.dimension,
+            distance=config.vector_store.distance,
             allow_dimension_change=config.vector_store.allow_dimension_change,
         )
     else:
@@ -645,6 +647,7 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             api_key=_env(cv_cfg.api_key_env) if cv_cfg.api_key_env else None,
             collection_name=cv_cfg.collection,
             dimension=code_embedder_provider.dimension,
+            distance=cv_cfg.distance,
             allow_dimension_change=cv_cfg.allow_dimension_change,
         )
 

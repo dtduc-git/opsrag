@@ -68,11 +68,14 @@ def _redact(text: str) -> str:
 
 
 class DatadogMCPError(Exception):
+    """Raised on Datadog API errors. Wraps upstream status + body, with
+    any secrets redacted from both the stored body and the message text."""
+
     def __init__(self, status: int, body: str, *, tool: str | None = None):
         self.status = status
-        self.body = body
+        self.body = _redact(body or "")
         self.tool = tool
-        super().__init__(f"[{tool or 'datadog'}] {status}: {body[:300]}")
+        super().__init__(f"[{tool or 'datadog'}] {status}: {self.body[:300]}")
 
 
 @dataclass

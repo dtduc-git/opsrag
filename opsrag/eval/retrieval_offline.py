@@ -6,6 +6,14 @@ No API keys, no running services: a local FastEmbed ONNX embedder
 the public golden set with pure-arithmetic ranking metrics (Recall@K, MRR,
 Precision@K, NDCG@K).
 
+Retrieval exercises the SAME core pipeline the live app uses by default --
+**Dense + BM25 RRF fusion** (``hybrid_search``) followed by a **local
+FastEmbed cross-encoder rerank** over the fused candidates -- all of which
+run locally (the Qdrant ``Qdrant/bm25`` sparse model and the
+``Xenova/ms-marco-MiniLM-L-6-v2`` cross-encoder are ONNX models cached on
+disk, no network at score time). It does NOT exercise MMR diversification or
+the live LLM faithfulness judge -- those stay in the live-server tier.
+
 The only network the harness needs is the one-time FastEmbed model fetch
 (cached after the first run). This is the always-on, secret-free proof that
 retrieval actually works -- the answer-quality tier (LLM + judge) lives in
@@ -19,6 +27,10 @@ Public API
 ``retrieval_scores`` returns aggregate ``mean_recall_at_k``, ``mean_mrr``,
 ``mean_precision_at_k`` and ``mean_ndcg_at_k`` (all computed inline with
 binary relevance -- no deepeval/vertexai import).
+
+``retrieval_scores`` runs ``hybrid_search`` (Dense+BM25 RRF) then a local
+cross-encoder rerank for each golden; pass ``reranker=`` to inject one,
+otherwise the app's default local ``FastEmbedReranker`` is built once.
 
 Both reuse the production ingestion pipeline and the shared ``match_path`` /
 ``_expected_hits_in_topk`` logic so the eval grades against the same matching
@@ -131,13 +143,44 @@ def _scored(g: GoldenQuery) -> bool:
     return bool(g.expected_sources or g.acceptable_sources)
 
 
+# Depth of the fused candidate pool handed to the cross-encoder reranker. The
+# pool must be deep enough that, after the per-chunk -> per-document dedupe,
+# there are still >= K distinct docs to rank -- so the rerank actually decides
+# the top-K rather than rubber-stamping whatever fusion surfaced. Matches the
+# spirit of the live app, which reranks a multiples-of-top_k pool.
+_RERANK_POOL = 50
+
+
+def _build_default_reranker():
+    """Construct the SAME local cross-encoder reranker the app uses by default.
+
+    The shipped default ``reranker.provider`` is ``fastembed`` ->
+    ``FastEmbedReranker`` (``Xenova/ms-marco-MiniLM-L-6-v2``), a local ONNX
+    cross-encoder -- no API key, no network at score time (only the one-time
+    model fetch, like the embedder). Constructed lazily so module import stays
+    cheap and the stub-driven unit tests can inject their own reranker.
+    """
+    from opsrag.rerankers.fastembed_reranker import FastEmbedReranker
+
+    return FastEmbedReranker()
+
+
 async def retrieval_scores(
     embedder,
     vector_store,
     goldens: list[GoldenQuery],
     k: int = 5,
+    reranker=None,
 ) -> dict:
     """Run retrieval for every scored golden; return per-golden + aggregate.
+
+    Retrieval mirrors the app's default core path: ``hybrid_search`` (Dense +
+    BM25 RRF fusion, both local) returns a deep fused candidate pool, which a
+    local FastEmbed cross-encoder reranker re-orders; the reranked order is the
+    scored ``retrieved`` list. MMR diversification and the live LLM judge are
+    intentionally NOT exercised here (they live in the live-server tier). When
+    ``reranker`` is ``None`` the default local cross-encoder is constructed once
+    and reused across all goldens.
 
     Recall@K (per golden):
       - ``expected_sources`` non-empty -> AND-recall: fraction of expected
@@ -179,14 +222,27 @@ async def retrieval_scores(
     scored = 0
     skipped = 0
 
+    if reranker is None:
+        reranker = _build_default_reranker()
+
     for g in goldens:
         if not _scored(g):
             skipped += 1
             continue
         scored += 1
         embedding = await embedder.embed_query(g.query)
-        results = await vector_store.search(embedding=embedding, top_k=k)
-        retrieved = [r.chunk.source_path for r in results]
+        # Dense + BM25 RRF fusion (both local) -> a deep fused candidate pool.
+        candidates = await vector_store.hybrid_search(
+            embedding=embedding, query_text=g.query, top_k=_RERANK_POOL
+        )
+        # Local FastEmbed cross-encoder rerank over the fused pool. Keep the
+        # whole pool (top_k=len) so the per-chunk -> per-document dedupe below
+        # still has depth; the reranked order IS the scored retrieved list, so
+        # the gate exercises Dense+BM25+RRF+rerank end to end (no MMR, no judge).
+        reranked = await reranker.rerank(
+            g.query, candidates, top_k=len(candidates)
+        )
+        retrieved = [r.chunk.source_path for r in reranked]
 
         if g.expected_sources:
             hits = _expected_hits_in_topk(g.expected_sources, retrieved, k)

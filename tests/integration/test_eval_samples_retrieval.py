@@ -3,11 +3,16 @@
 This is the always-on, NO-SECRETS proof that opsrag retrieval works: it
 indexes `samples/` into an in-process Qdrant with a local FastEmbed ONNX
 embedder, loads the public golden set, runs retrieval for every scored
-golden, and asserts aggregate Recall@5, MRR, Precision@5 and NDCG@5 all
-stay above their thresholds.
+golden through the app's default core path -- **Dense + BM25 RRF fusion
+(`hybrid_search`) followed by a local FastEmbed cross-encoder rerank** -- and
+asserts aggregate Recall@5, MRR, Precision@5 and NDCG@5 all stay above their
+thresholds. MMR diversification and the live LLM judge are intentionally NOT
+exercised here (they live in the live-server answer-quality tier).
 
 The only network it needs is the one-time FastEmbed model fetch (cached
-thereafter). No API keys, no running services.
+thereafter) -- for the embedder, the `Qdrant/bm25` sparse model, and the
+`Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder. No API keys, no running
+services.
 
 The full answer-quality eval (LLM + judge) lives in
 `python -m opsrag.eval run` and needs credentials -- that's the other tier.
@@ -31,29 +36,31 @@ from opsrag.eval.retrieval_offline import (  # noqa: E402
 
 _SAMPLES_DIR = Path(__file__).resolve().parents[2] / "samples"
 
-# Observed aggregate Recall@5 over the public golden set was 1.0 on the
-# validated recipe (BAAI/bge-small-en-v1.5 @384, in-process Qdrant). Threshold
-# set well below that so embedder/chunker noise can't flake the gate while a
-# real retrieval regression (a golden's doc dropping out of top-5) still trips.
-_RECALL_THRESHOLD = 0.85
+# Thresholds re-observed for the HYBRID + LOCAL-RERANK recipe (Dense + BM25 RRF
+# fusion via hybrid_search, then the FastEmbed Xenova/ms-marco-MiniLM-L-6-v2
+# cross-encoder over the fused pool). Adding the cross-encoder shifts the rank
+# distribution: the relevant doc is pulled to rank ~1, so MRR/NDCG rose sharply,
+# while Precision@5 fell -- the deeper reranked pool surfaces more DISTINCT docs
+# in the top-5 and most goldens have a single relevant doc, so document-level
+# precision is structurally ~1/(distinct docs in top-5).
+#
+# Observed aggregate (deterministic, re-run identical) over the public goldens:
+#   Recall@5 = 1.0000   MRR = 0.9123   Precision@5 = 0.2421   NDCG@5 = 0.9348
+# Each floor sits conservatively below its observed value so embedder/chunker/
+# cross-encoder noise can't flake the gate while a real retrieval regression
+# (a golden's doc dropping out of, or sinking within, the reranked top-5) still
+# trips it.
+_RECALL_THRESHOLD = 0.85  # observed 1.0000
 
-# Additional ranking-quality floors, all set conservatively below observed
-# values so embedder/chunker noise can't flake the gate while a real regression
-# (relevant docs sinking down the ranking) still trips. MRR/Precision/NDCG are
-# rank-sensitive, so they sit lower than Recall@5: a golden's doc can be in the
-# top-5 (recall stays high) yet ranked 3rd-5th (MRR/NDCG drop). Precision@5 and
-# NDCG@5 are graded at DOCUMENT granularity (the per-chunk retrieved list is
-# deduped to distinct docs first, like Recall@5), so Precision@5 is inherently
-# <= (relevant docs in top-5) / (distinct docs in top-5) -- with most goldens
-# having a single relevant doc, that lands well under 1.0, so its floor is the
-# lowest of the three.
-# Precision@5 is the structurally-capped metric (dominated by 1/(distinct docs
-# in top-5) for the many single-relevant-doc goldens), so its floor sits well
-# below the observed mean (~0.43) -- a real "relevant docs fall out of top-5"
-# regression craters Recall/MRR/NDCG first, which carry the protective signal.
-_MRR_THRESHOLD = 0.5
-_PRECISION_THRESHOLD = 0.3
-_NDCG_THRESHOLD = 0.5
+# MRR/NDCG are now rerank-lifted (relevant doc at rank ~1), so they sit HIGH --
+# well above the prior dense-only 0.5 floors. Precision@5 is the structurally-
+# capped metric (dominated by 1/(distinct docs in top-5) for the many single-
+# relevant-doc goldens), so its floor is the lowest of the three -- a real
+# "relevant docs fall out of top-5" regression craters Recall/MRR/NDCG first,
+# which carry the protective signal.
+_MRR_THRESHOLD = 0.75  # observed 0.9123
+_PRECISION_THRESHOLD = 0.15  # observed 0.2421 (document-granularity, structurally capped)
+_NDCG_THRESHOLD = 0.75  # observed 0.9348
 
 
 @pytest.mark.asyncio
@@ -122,6 +129,7 @@ from opsrag.eval.retrieval_offline import _dedupe_to_documents  # noqa: E402
 @dataclass
 class _StubChunk:
     source_path: str
+    content: str = ""
 
 
 @dataclass
@@ -135,13 +143,36 @@ class _StubEmbedder:
 
 
 class _StubStore:
-    """Returns a fixed retrieved list regardless of the query embedding."""
+    """Returns a fixed candidate list regardless of the query embedding.
+
+    Mirrors the production ``hybrid_search`` signature so these stubs drive the
+    SAME retrieval path the real harness now uses (Dense+BM25 RRF + rerank); the
+    fixed list lets us assert the chunk->document dedupe deterministically.
+    """
 
     def __init__(self, paths: list[str]):
         self._paths = paths
 
-    async def search(self, embedding, top_k: int):  # noqa: ARG002
+    async def hybrid_search(  # noqa: ARG002
+        self, embedding, query_text: str, top_k: int
+    ):
         return [_StubResult(_StubChunk(p)) for p in self._paths[:top_k]]
+
+
+class _IdentityReranker:
+    """Rank-preserving reranker so the dedupe guard stays deterministic.
+
+    The real FastEmbed cross-encoder would reorder by relevance; here we keep
+    fusion order so the document-granularity assertions test the dedupe logic in
+    isolation (not the model's scoring)."""
+
+    async def rerank(self, _query: str, results, top_k: int):
+        from opsrag.interfaces.reranker import RerankResult
+
+        return [
+            RerankResult(chunk=r.chunk, relevance_score=1.0)
+            for r in results[:top_k]
+        ]
 
 
 def test_dedupe_to_documents_keeps_first_per_canonical_path():
@@ -176,7 +207,11 @@ async def test_precision_ndcg_are_document_level_not_chunk_inflated():
     # 5 chunks of the SAME relevant doc -> 1 distinct doc, all relevant.
     same_doc = ["runbooks/db-failover.md"] * 5
     agg = await retrieval_scores(
-        _StubEmbedder(), _StubStore(same_doc), [golden], k=5
+        _StubEmbedder(),
+        _StubStore(same_doc),
+        [golden],
+        k=5,
+        reranker=_IdentityReranker(),
     )
     p = agg["per_golden"][0]
     # Recall is 1.0 (the expected doc is present) and -- because there is only
@@ -195,7 +230,11 @@ async def test_precision_ndcg_are_document_level_not_chunk_inflated():
         "terraform/main.tf",
     ]
     agg2 = await retrieval_scores(
-        _StubEmbedder(), _StubStore(mixed), [golden], k=5
+        _StubEmbedder(),
+        _StubStore(mixed),
+        [golden],
+        k=5,
+        reranker=_IdentityReranker(),
     )
     p2 = agg2["per_golden"][0]
     assert p2["recall_at_k"] == 1.0

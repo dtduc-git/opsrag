@@ -46,6 +46,7 @@ from opsrag.interfaces.graphstore import Entity, KnowledgeGraphStore, Relationsh
 from opsrag.interfaces.indexed_files import IndexedFilesTracker
 from opsrag.interfaces.llm import LLMProvider
 from opsrag.interfaces.parser import DocType, DocumentParser
+from opsrag.parsers.generic import GenericConfigParser
 
 
 def _graph_source_id(repo: str, path: str) -> str:
@@ -74,6 +75,14 @@ from opsrag.interfaces.vectorstore import VectorStore
 
 _log = logging.getLogger("opsrag.ingestion")
 _DEFAULT_FILE_PARALLEL = 4
+
+# Parser-output schema version. Folded into the index fingerprint (and thus
+# every file's dedup content_hash) so a change to what the parsers EMIT
+# auto-invalidates existing corpora on the next index run. Bump this whenever
+# parser chunk text changes shape. "ruamel-1": YAML parsers (k8s/helm/alert/
+# generic) switched from PyYAML safe_load/dump to ruamel.yaml round-trip, so
+# comments + anchors now appear in chunk text -> chunks re-key, reindex needed.
+PARSER_VERSION = "ruamel-1"
 
 # Path-substring blacklist applied AFTER scm.list_files. Catches noise that
 # slips past glob whitelists: lockfiles, generated code, build artifacts,
@@ -164,6 +173,19 @@ class IngestionPipeline:
         # lane (works with knowledge_graph.provider=none). None -> no-op.
         self.light_graph = light_graph
         self.parsers = parsers
+        # R8: parser-chain ordering invariant. `_process_file` picks the FIRST
+        # parser whose `supports()` is True, and `GenericConfigParser` is the
+        # last-resort catch-all -- it claims `.py/.ts/.go/...` (and most text
+        # config) so that code-aware AST splitting runs. It is therefore only
+        # correct as the TERMINAL entry: if anything is appended after it,
+        # those later parsers can never win for the extensions Generic already
+        # claims, so code files would silently lose AST splitting (or be
+        # dropped entirely if the trailing parser is narrower). The invariant
+        # is owned by the chain-assembly sites (factory.py / eval offline), but
+        # we re-check it here -- the single point every assembled chain flows
+        # through -- so a future reorder fails loudly instead of degrading
+        # retrieval silently. Defensive only; behaviour is otherwise unchanged.
+        self._assert_generic_parser_terminal(parsers)
         self.chunker = chunker
         self.embedder = embedder
         self.vector_store = vector_store
@@ -204,6 +226,67 @@ class IngestionPipeline:
         # auto-invalidates dedup. Built once on first use; the config is fixed
         # for the lifetime of a pipeline instance.
         self._index_fingerprint_cache: str | None = None
+
+    @staticmethod
+    def _assert_generic_parser_terminal(
+        parsers: list[DocumentParser],
+    ) -> None:
+        """R8: verify the catch-all `GenericConfigParser` is LAST in the chain.
+
+        `_process_file` resolves a file to the FIRST parser whose `supports()`
+        returns True. `GenericConfigParser` is the last-resort parser that
+        claims source code (`.py/.ts/.go/...`) so code-aware AST splitting can
+        run; it is also broad enough to swallow most text config. It is only
+        safe as the terminal entry. If a `GenericConfigParser` appears anywhere
+        but the end, every parser after it is unreachable for the extensions
+        Generic claims -> code files silently lose AST splitting (or, for a
+        narrower trailing parser, get dropped). This guards against a future
+        reorder of the assembly sites (factory.py / eval offline).
+
+        Defensive: logs a loud WARNING rather than raising, so a
+        misconfiguration degrades gracefully (indexing still runs) while being
+        impossible to miss in logs. No reordering is performed.
+        """
+        if not parsers:
+            _log.warning(
+                "parser chain is EMPTY -- no files will be parsed/indexed"
+            )
+            return
+        # The catch-all must be the final entry, and there must be exactly one
+        # (a stray earlier Generic would shadow every specific parser after it).
+        generic_positions = [
+            i
+            for i, p in enumerate(parsers)
+            if isinstance(p, GenericConfigParser)
+        ]
+        last_idx = len(parsers) - 1
+        if generic_positions == [last_idx]:
+            return  # invariant holds -- the common, correct case.
+
+        if not generic_positions:
+            _log.warning(
+                "parser chain has NO GenericConfigParser (catch-all) -- "
+                "code/config files (.py/.ts/.go/.yaml/Dockerfile/...) that no "
+                "specific parser claims will be SILENTLY DROPPED from indexing; "
+                "chain=%s",
+                [type(p).__name__ for p in parsers],
+            )
+            return
+
+        # Present but misordered (and/or duplicated): the most dangerous case
+        # because indexing keeps running while code files quietly lose AST
+        # splitting. Make it impossible to miss.
+        _log.warning(
+            "parser-chain ORDERING VIOLATION (R8): GenericConfigParser "
+            "(last-resort catch-all) must be TERMINAL but is at position(s) %s "
+            "of %d; parsers after it are unreachable for extensions Generic "
+            "claims, so .py/.ts/.go/... files will lose code-aware AST "
+            "splitting (or be dropped). Reorder the chain so "
+            "GenericConfigParser is LAST. chain=%s",
+            generic_positions,
+            len(parsers),
+            [type(p).__name__ for p in parsers],
+        )
 
     @property
     def _graph_enabled(self) -> bool:
@@ -791,6 +874,10 @@ class IngestionPipeline:
             for parent-child) -- any attr that isn't present is simply omitted.
           * chars/token ratios: ``tokenization.RATIOS_VERSION`` (the ratios
             drive chunk boundaries, so a ratio-table bump must invalidate too).
+          * parser output schema: ``PARSER_VERSION`` -- bumped when the parsers
+            change WHAT they emit (e.g. ruamel round-trip now keeps YAML
+            comments/anchors in chunk text), so the text fed to the chunker
+            differs even when boundaries/model are identical.
           * embedder: ``model_name`` + ``dimension`` -- a model swap changes the
             stored vectors even when boundaries are identical.
 
@@ -846,6 +933,7 @@ class IngestionPipeline:
                 f"chunker={chunker_name}",
                 *[p for p in chunker_parts if p],
                 f"ratios_version={ratios_version}",
+                f"parser_version={PARSER_VERSION}",
                 f"embed_model={embed_model}",
                 f"embed_dim={embed_dim}",
             ]

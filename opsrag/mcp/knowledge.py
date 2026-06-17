@@ -67,9 +67,22 @@ _llm: Any | None = None
 # only in the LangGraph vector_retrieve_node), so tool-routed queries got raw
 # bi-encoder order. Binding it here closes that divergence; None = no rerank.
 _reranker: Any | None = None
+# Rerank-enrichment config -- mirrors cfg.agent.rerank_* forwarded into the
+# LangGraph rerank_node. Without these the MCP path applied only the plain
+# cross-encoder rerank and DROPPED the node's path-anchor boost, MMR diversity,
+# content-dedup, and weak-retrieval signal (the M1 divergence). Bound via bind()
+# in server.lifespan (mirrors how graph.py forwards them). Defaults match
+# AgentConfig so an old-shape bind() (positional) still behaves sanely.
+_rerank_diversity: float = 0.3
+_rerank_content_dedup: bool = True
+_rerank_content_dedup_threshold: float = 0.0
 # Candidate pool fetched before reranking, so the cross-encoder can promote a
 # doc the bi-encoder ranked deep (mirrors the agent path's _RERANK_CANDIDATE_POOL).
 _RERANK_POOL = 40
+# Weak-retrieval floor -- min RAW rerank score considered "real signal". Mirrors
+# the rerank node's _DEFAULT_MIN_RERANK_SCORE; overridden per-reranker via the
+# provider's `score_floor` when present (FastEmbed sigmoid vs Cohere compressed).
+_DEFAULT_MIN_RERANK_SCORE = 0.05
 
 
 def bind(
@@ -79,6 +92,9 @@ def bind(
     code_vector_store: Any | None = None,
     llm: Any | None = None,
     reranker: Any | None = None,
+    rerank_diversity: float = 0.3,
+    rerank_content_dedup: bool = True,
+    rerank_content_dedup_threshold: float = 0.0,
 ) -> None:
     """Inject providers so the handler can serve queries. Called once
     from server lifespan after providers are constructed.
@@ -87,6 +103,11 @@ def bind(
       - `code_embedder` + `code_vector_store`: enable the P3 code lane
         (dual-write `opsrag_code` collection, embedded with
         gemini-embedding-001 + CODE_RETRIEVAL_QUERY)
+      - `reranker` + `rerank_*`: enable the SHARED rerank-enrichment pipeline
+        (apply_rerank_enrichments) -- path-anchor boost, MMR diversity, and
+        content-dedup -- the same logic the LangGraph rerank_node runs, so the
+        tool path can't re-diverge from it (M1). Forward cfg.agent.rerank_*
+        here exactly as graph.py forwards them into rerank_node.
 
     Missing providers degrade silently -- the handler always falls back
     to the lanes it has.
@@ -96,18 +117,26 @@ def bind(
     Cartography integration.
     """
     global _embedder, _vector_store, _code_embedder, _code_vector_store, _llm, _reranker
+    global _rerank_diversity, _rerank_content_dedup, _rerank_content_dedup_threshold
     _embedder = embedder
     _vector_store = vector_store
     _code_embedder = code_embedder
     _code_vector_store = code_vector_store
     _llm = llm
     _reranker = reranker
+    _rerank_diversity = rerank_diversity
+    _rerank_content_dedup = rerank_content_dedup
+    _rerank_content_dedup_threshold = rerank_content_dedup_threshold
     _log.info(
-        "knowledge_search bound: embedder=%s vector_store=%s code_embedder=%s code_vector_store=%s",
+        "knowledge_search bound: embedder=%s vector_store=%s code_embedder=%s "
+        "code_vector_store=%s reranker=%s rerank_diversity=%.2f content_dedup=%s",
         type(embedder).__name__,
         type(vector_store).__name__,
         type(code_embedder).__name__ if code_embedder else "None",
         type(code_vector_store).__name__ if code_vector_store else "None",
+        type(reranker).__name__ if reranker else "None",
+        rerank_diversity,
+        rerank_content_dedup,
     )
 
 
@@ -217,33 +246,80 @@ async def _h_knowledge_search(_unused, args: dict) -> Any:
     except Exception as exc:  # noqa: BLE001
         return {"error": f"retrieval failed: {exc}"}
 
-    # -- Rerank ------------------------------------------------------
-    # Cross-encoder re-scoring of the wide candidate pool, then trim to k.
-    # Closes the divergence with the LangGraph path (which always reranks);
-    # without this, tool-routed queries shipped raw bi-encoder order to the LLM.
+    # -- Rerank + enrichment ----------------------------------------
+    # Cross-encoder re-scoring of the wide candidate pool, then the SAME
+    # enrichments the LangGraph rerank_node applies (path-anchor boost, MMR
+    # diversity, pre-rerank content-dedup) via the shared
+    # apply_rerank_enrichments helper -- so the tool path can't re-diverge
+    # (M1). Before this, the tool path ran only the plain rerank and dropped
+    # the anchor boost / MMR / dedup / weak-retrieval signal.
+    weak_retrieval = False
     if rerank_on and results:
+        from opsrag.agent.anchors import extract_anchors
+        from opsrag.agent.nodes.reranker import apply_rerank_enrichments
+        from opsrag.interfaces.vectorstore import SearchResult
+
         pre_rerank = results
+        # Candidate pool -> chunks for the shared helper.
+        pool_chunks = [getattr(r, "chunk", None) or r for r in results]
+        anchors = extract_anchors(query)
+        # Per-reranker weak-retrieval floor (FastEmbed sigmoid vs Cohere
+        # compressed-low) -- mirror the rerank node's score_floor lookup.
+        rerank_floor = getattr(_reranker, "score_floor", _DEFAULT_MIN_RERANK_SCORE)
         try:
-            from opsrag.interfaces.vectorstore import SearchResult
-            reranked = await _reranker.rerank(query, results, top_k=k)
-            results = [
-                SearchResult(chunk=rr.chunk, score=float(rr.relevance_score),
-                             distance_metric="rerank")
-                for rr in reranked
-            ]
-            # A reranker that returns an EMPTY list (no exception -- e.g. the
-            # Vertex :rank API returned no records on a transient/cold call)
-            # must NOT wipe out a good bi-encoder pool. Fall back to pre-rerank
-            # order so knowledge_search never returns zero hits when candidates
-            # existed (that left the agent ungrounded -> hallucinated answers).
-            if not results:
+            kept, best_score, anchors_matched = await apply_rerank_enrichments(
+                query,
+                pool_chunks,
+                _reranker,
+                anchors=anchors,
+                top_k=k,
+                diversity=_rerank_diversity,
+                content_dedup=_rerank_content_dedup,
+                content_dedup_threshold=_rerank_content_dedup_threshold,
+            )
+            # A reranker (or full enrichment) that yields an EMPTY result (no
+            # exception -- e.g. the Vertex :rank API returned no records on a
+            # transient/cold call) must NOT wipe out a good bi-encoder pool.
+            # Fall back to pre-rerank order so knowledge_search never returns
+            # zero hits when candidates existed (that left the agent ungrounded
+            # -> hallucinated answers).
+            if not kept:
                 _log.warning(
-                    "rerank returned 0 of %d candidates -- using pre-rerank order",
+                    "rerank/enrich returned 0 of %d candidates -- using pre-rerank order",
                     len(pre_rerank),
                 )
                 results = pre_rerank[:k]
+            else:
+                # ORDER is the load-bearing signal after enrichment: the
+                # path-anchor boost + MMR re-ordering mean a raw per-position
+                # cross-encoder score no longer reflects final rank, so emitting
+                # one would mislead the LLM. Surface position rank as a
+                # monotonically-decreasing score instead (best-first), so a
+                # consumer that sorts by score preserves the enriched order.
+                n = len(kept)
+                results = [
+                    SearchResult(
+                        chunk=c,
+                        score=round(1.0 - (i / n if n else 0.0), 4),
+                        distance_metric="rerank",
+                    )
+                    for i, c in enumerate(kept)
+                ]
+                # Weak-retrieval signal -- the reasoner treats this as "not in
+                # corpus" (same semantics as the rerank node's weak_retrieval
+                # edge): the user NAMED specific entities (anchors) but NO kept
+                # chunk's path/repo matches AND the best raw rerank score is
+                # below the noise floor. Don't fabricate an answer from chunks
+                # that don't actually concern the asked-about entity.
+                if anchors and not anchors_matched and best_score < rerank_floor:
+                    weak_retrieval = True
+                    _log.info(
+                        "knowledge_search: anchors=%s present but NO path/repo match; "
+                        "best_score=%.3f < floor=%.3f -> weak_retrieval",
+                        anchors, best_score, rerank_floor,
+                    )
         except Exception as exc:  # noqa: BLE001
-            _log.warning("rerank failed (%s) -- using pre-rerank order", exc)
+            _log.warning("rerank/enrich failed (%s) -- using pre-rerank order", exc)
             results = pre_rerank[:k]
     else:
         results = results[:k]
@@ -294,6 +370,12 @@ async def _h_knowledge_search(_unused, args: dict) -> Any:
         "count": len(hits),
         "results": hits,
     }
+    # Weak-retrieval signal (M1) -- only surfaced when it actually fired, so the
+    # response shape stays stable for ordinary queries. The reasoner treats this
+    # as "the named entity is not in the corpus" and must NOT fabricate an answer
+    # from the returned chunks (which don't concern the asked-about entity).
+    if weak_retrieval:
+        out["weak_retrieval"] = True
     # T1.1 -- surface decomposition meta only when it actually fired
     # (used_llm=True). Skipping the field on no-op decomposition keeps
     # the response shape stable for the common single-target case.

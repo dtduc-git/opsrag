@@ -256,6 +256,13 @@ async def _h_code_grep(_unused, args: dict) -> Any:
     pattern = args.get("pattern")
     if not isinstance(pattern, str) or not pattern:
         return {"error": "`pattern` (regex) is required"}
+    # Defense-in-depth: even though we bind the pattern to `-e` below (so git
+    # treats it as a literal pattern, not an option), reject leading-dash
+    # patterns outright. Mirrors the identifier validation in
+    # `_h_code_find_symbol` and gives a clear error instead of a confusing
+    # no-match for the (rare, legitimate) leading-`-` regex.
+    if pattern.startswith("-"):
+        return {"error": "`pattern` must not start with '-' (avoids being parsed as a git option)"}
     if not repo:
         return {"error": "`repo` is required; call `code_list_repos` first if you don't know it"}
     path_glob = (args.get("path_glob") or "").strip()
@@ -267,12 +274,16 @@ async def _h_code_grep(_unused, args: dict) -> Any:
     if repo_dir is None:
         return {"error": clone_err or f"repo '{repo}' not in cache"}
 
+    # Bind the LLM-controlled pattern to `-e` and put `--` before any path
+    # arg so git stops option parsing -- a pattern like
+    # "--open-files-in-pager=touch /tmp/x;true" is treated as a literal grep
+    # pattern, never an option. (`--full-name` does NOT stop option parsing.)
     git_args = ["grep", "-n", "-E", "--full-name"]
     if case_insensitive:
         git_args.append("-i")
-    git_args.append(pattern)
+    git_args += ["-e", pattern, "--"]
     if path_glob:
-        git_args += ["--", path_glob]
+        git_args.append(path_glob)
 
     code, out, err = await _run_git(git_args, cwd=repo_dir, timeout=_SUBPROCESS_TIMEOUT)
     if code not in (0, 1):
@@ -429,9 +440,12 @@ async def _h_code_find_symbol(_unused, args: dict) -> Any:
         d = _repo_dir(r)
         if d is None:
             continue
-        git_args = ["grep", "-n", "-E", "--full-name", regex]
+        # Bind the regex to `-e` and emit `--` before any path globs so git
+        # never option-parses the pattern. (`name` is already constrained to
+        # an identifier above, but this keeps both grep sites uniform and
+        # fail-closed against option injection.)
+        git_args = ["grep", "-n", "-E", "--full-name", "-e", regex, "--"]
         if globs:
-            git_args.append("--")
             git_args.extend(globs)
         code, out, _ = await _run_git(git_args, cwd=d, timeout=3.0)
         if code not in (0, 1):

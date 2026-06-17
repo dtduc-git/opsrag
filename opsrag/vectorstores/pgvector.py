@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS opsrag_chunks (
     parent_chunk_id TEXT,
     chunk_type TEXT NOT NULL DEFAULT 'child',
     token_count INT NOT NULL DEFAULT 0,
-    metadata JSONB NOT NULL DEFAULT '{}',
+    metadata JSONB NOT NULL DEFAULT '{{}}',
     priority TEXT,
     embedding vector({dim})
 );
@@ -54,6 +54,43 @@ _CREATE_INDEXES = [
     "ON opsrag_chunks USING gin (to_tsvector('simple', content))",
 ]
 
+# Distance-metric wiring. config.vector_store.distance selects the pgvector
+# operator class (drives the HNSW index), the distance operator used in ORDER
+# BY, and the score expression that turns a raw distance into a "higher = more
+# similar" score. cosine is the default so all current deployments stay
+# byte-identical (same ops class, same '<=>' operator, same 1-(...) score).
+#
+#   metric  -> (ops_class,        operator, score_expr)
+#   cosine  -> (vector_cosine_ops, '<=>',    1 - (embedding <=> q))  in [0, 1]
+#   dot     -> (vector_ip_ops,     '<#>',    -(embedding <#> q))     (pgvector's
+#              inner-product operator returns the NEGATIVE inner product, so
+#              negating it recovers the raw similarity; larger = more similar)
+#   euclid  -> (vector_l2_ops,     '<->',    -(embedding <-> q))     (raw L2
+#              distance is smaller = closer; negate so larger = more similar and
+#              ORDER BY <distance> ASC still surfaces nearest first)
+_DISTANCE_OPS: dict[str, tuple[str, str]] = {
+    "cosine": ("vector_cosine_ops", "<=>"),
+    "dot": ("vector_ip_ops", "<#>"),
+    "euclid": ("vector_l2_ops", "<->"),
+}
+
+
+def _score_expr(metric: str, operator: str, lhs: str = "embedding",
+                rhs: str = "$1::vector") -> str:
+    """Map a raw pgvector distance to a "higher = more similar" score.
+
+    cosine  -> 1 - cosine_distance     (in [0, 1], byte-identical to before)
+    dot     -> -(neg_inner_product)    (pgvector <#> is the negative IP)
+    euclid  -> -(l2_distance)          (negate so larger = nearer)
+    """
+    raw = f"{lhs} {operator} {rhs}"
+    if metric == "cosine":
+        return f"1 - ({raw})"
+    # dot ('<#>' is already negative IP) and euclid (L2 distance) both become
+    # "larger = more similar" by negation.
+    return f"-({raw})"
+
+
 # HNSW, not IVFFlat: IVFFlat must be built AFTER the table has rows (and needs
 # `ivfflat.probes` tuned, else it scans a single list -> severe recall loss),
 # and the old code built it on an empty table inside a swallowed try/except so
@@ -61,10 +98,13 @@ _CREATE_INDEXES = [
 # incrementally, and gives better recall; tune recall at query time via
 # `hnsw.ef_search`.
 # Explicit build params (pgvector defaults m=16, ef_construction=64 are low for
-# a code/identifier corpus -- bake in higher recall at index time).
-_CREATE_VECTOR_INDEX = """
+# a code/identifier corpus -- bake in higher recall at index time). The ops
+# class is chosen from the configured distance metric (see _DISTANCE_OPS) so the
+# HNSW index matches the operator used at query time -- a mismatch makes the
+# planner ignore the index (full scan).
+_CREATE_VECTOR_INDEX_TMPL = """
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding
-ON opsrag_chunks USING hnsw (embedding vector_cosine_ops)
+ON opsrag_chunks USING hnsw (embedding {ops_class})
 WITH (m = 16, ef_construction = 200);
 """
 
@@ -73,6 +113,35 @@ WITH (m = 16, ef_construction = 200);
 _HNSW_EF_SEARCH = 192
 
 _log = logging.getLogger("opsrag.vectorstores.pgvector")
+
+# R5 -- key allowlist for _build_where. The filter KEY is interpolated into the
+# WHERE clause via an f-string (values use $N placeholders and are always safe;
+# keys are NOT parameterizable in SQL). Today every caller passes a hardcoded
+# key (repo / source_path), so this is not exploitable -- but delete_by_filter
+# is one refactor away from routing caller-influenced keys into a DELETE, which
+# would turn an unknown key into arbitrary SQL injection in a *destructive*
+# statement. Pin the key to the real, queryable columns of opsrag_chunks (see
+# the _CREATE_TABLE DDL above) and fail closed on anything else. entity_ids is
+# intentionally NOT here: pgvector has no entity_ids column, so the Qdrant-only
+# entity-expand lane cannot filter on it here (it would already error on the
+# missing column) -- a clear ValueError beats a cryptic "column does not exist".
+_FILTER_KEY_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "chunk_id",
+        "doc_type",
+        "source_path",
+        "repo",
+        "parent_chunk_id",
+        "chunk_type",
+        "priority",
+    }
+)
+
+# R11 -- one-time parity warning. pgvector retrieval lacks the BM25 sparse lane
+# and the code lane that Qdrant provides (it uses ts_rank_cd + a best-effort
+# trigram substring lane instead); hybrid quality is reduced relative to Qdrant.
+# Module-level so the warning fires once per process, not once per store/open.
+_parity_warned = False
 
 
 def _deterministic_uuid(chunk_id: str) -> str:
@@ -87,6 +156,7 @@ class PgVectorStore:
         table: str = "opsrag_chunks",
         min_pool: int = 2,
         max_pool: int = 10,
+        distance: str = "cosine",
         allow_dimension_change: bool = False,
     ):
         self._dsn = dsn
@@ -95,11 +165,26 @@ class PgVectorStore:
         self._min_pool = min_pool
         self._max_pool = max_pool
         self._allow_dimension_change = allow_dimension_change
+        # Distance-metric wiring (H4). The configured metric selects the HNSW
+        # ops class, the distance operator used in ORDER BY / score_threshold,
+        # and the score expression. cosine default keeps every existing SQL
+        # string byte-identical to the pre-H4 hardcoded path.
+        if distance not in _DISTANCE_OPS:
+            raise ValueError(
+                f"unknown pgvector distance metric {distance!r}; "
+                f"expected one of {sorted(_DISTANCE_OPS)}"
+            )
+        self._distance = distance
+        self._ops_class, self._distance_op = _DISTANCE_OPS[distance]
         self._pool: asyncpg.Pool | None = None
         self._ensured = False
         # Set by ensure_table: True if pg_trgm + the trgm index are available,
         # gating the substring identifier lane in hybrid_search.
         self._trgm_available = False
+
+    def _score_sql(self, lhs: str = "embedding", rhs: str = "$1::vector") -> str:
+        """Distance-aware "higher = more similar" score expression."""
+        return _score_expr(self._distance, self._distance_op, lhs, rhs)
 
     async def _assert_dimension_compatible(self, conn) -> None:
         """Fail closed if an existing table's vector dimension differs from the
@@ -147,11 +232,75 @@ class PgVectorStore:
         )
         await conn.execute(f"DROP TABLE IF EXISTS {self._table}")
 
+    async def _assert_metric_compatible(self, conn) -> None:
+        """Fail closed if an existing HNSW index was built for a DIFFERENT
+        distance metric than the one now configured (parity with the dimension
+        guard). Changing the configured metric changes the ops class
+        (vector_cosine_ops <-> vector_ip_ops <-> vector_l2_ops); `CREATE INDEX
+        IF NOT EXISTS` will NOT rebuild an existing index, so the query operator
+        ('<=>' vs '<#>' vs '<->') would silently disagree with the index --
+        every search would fall back to a full sequential scan AND the score
+        math would be wrong for the new metric. A no-op when the index is
+        absent (first boot / before the HNSW build)."""
+        existing_ops = await conn.fetchval(
+            # Resolve the ops class actually backing the embedding HNSW index.
+            "SELECT oc.opcname "
+            "FROM pg_index i "
+            "JOIN pg_class ic ON ic.oid = i.indexrelid "
+            "JOIN pg_opclass oc ON oc.oid = i.indclass[0] "
+            "WHERE ic.relname = 'idx_chunks_embedding'",
+        )
+        if not existing_ops:
+            return  # index absent -- will be created with the right ops class
+        if existing_ops == self._ops_class:
+            return  # already built for the configured metric
+        if not self._allow_dimension_change:
+            raise RuntimeError(
+                f"pgvector distance-metric mismatch: index "
+                f"'idx_chunks_embedding' on {self._table!r} was built with ops "
+                f"class {existing_ops!r} but the configured distance "
+                f"{self._distance!r} needs {self._ops_class!r}. Changing the "
+                f"metric requires dropping the index and re-indexing. Set "
+                f"allow_dimension_change=true to drop+rebuild (existing rows are "
+                f"preserved; only the index is rebuilt)."
+            )
+        # allow_dimension_change=true is a TRUTHFUL opt-in to a reindex: drop the
+        # mismatched index (loudly) so the CREATE that follows rebuilds it with
+        # the correct ops class. Rows are kept -- only the index is rebuilt.
+        _log.warning(
+            "pgvector distance-metric change: index 'idx_chunks_embedding' was "
+            "built with ops class %r but configured distance %r needs %r -- "
+            "allow_dimension_change=true: DROPPING the index so it is recreated "
+            "with the correct ops class (rows are preserved; the HNSW index is "
+            "rebuilt).",
+            existing_ops, self._distance, self._ops_class,
+        )
+        await conn.execute("DROP INDEX IF EXISTS idx_chunks_embedding")
+
     async def open(self) -> None:
+        self._warn_hybrid_parity()
         self._pool = await asyncpg.create_pool(
             self._dsn,
             min_size=self._min_pool,
             max_size=self._max_pool,
+        )
+
+    @staticmethod
+    def _warn_hybrid_parity() -> None:
+        """R11 -- emit a one-time WARNING that pgvector retrieval is NOT a
+        drop-in hybrid equivalent of Qdrant. pgvector's lexical lane is
+        ts_rank_cd + a best-effort trigram substring lane; it has NO true BM25
+        sparse lane and NO code lane (both Qdrant-only). Hybrid quality is
+        reduced -- operators who need full hybrid should run Qdrant. Module-level
+        flag so this fires once per process, not once per store/open."""
+        global _parity_warned
+        if _parity_warned:
+            return
+        _parity_warned = True
+        _log.warning(
+            "pgvector retrieval lacks the BM25 + code lanes Qdrant provides "
+            "(it uses ts_rank + trigram only) -- hybrid quality is reduced; "
+            "use Qdrant for full hybrid."
         )
 
     async def close(self) -> None:
@@ -164,15 +313,32 @@ class PgVectorStore:
         async with self._pool.acquire() as conn:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             await self._assert_dimension_compatible(conn)
+            # Fail closed (or drop+rebuild under allow_dimension_change) if an
+            # existing HNSW index was built for a different distance metric --
+            # must run BEFORE the CREATE INDEX below (which won't replace it).
+            await self._assert_metric_compatible(conn)
             await conn.execute(_CREATE_TABLE.format(dim=self._dimension))
             await conn.execute(_ALTER_ADD_PRIORITY)
             for idx in _CREATE_INDEXES:
                 await conn.execute(idx)
             try:
-                await conn.execute(_CREATE_VECTOR_INDEX)
-            except Exception:
-                pass  # best-effort; HNSW builds on an empty table but tolerate
-                      # races / older pgvector without HNSW support
+                await conn.execute(
+                    _CREATE_VECTOR_INDEX_TMPL.format(ops_class=self._ops_class)
+                )
+            except Exception as exc:
+                # Do NOT raise -- but do NOT swallow silently either. Without the
+                # HNSW index pgvector still answers searches CORRECTLY (exact)
+                # but via a full sequential scan: O(N) per query, a latency
+                # cliff that grows with the corpus. The old bare `except: pass`
+                # hid that entirely (e.g. pgvector<0.5.0 has no HNSW, or
+                # maintenance_work_mem too low to build it). Surface it so
+                # operators can fix the env instead of silently running on a
+                # seq-scan.
+                _log.warning(
+                    "pgvector HNSW index build failed (%s) -- vector search "
+                    "FALLS BACK to a full sequential scan (exact but O(N)); "
+                    "ensure pgvector>=0.5.0 + maintenance_work_mem", exc,
+                )
             # Best-effort trigram lane: pg_trgm + a GIN trgm index make the
             # substring identifier lane (in hybrid_search) fast. Skipped silently
             # if the extension isn't available (managed PG without it / no
@@ -276,18 +442,19 @@ class PgVectorStore:
     ) -> list[SearchResult]:
         await self.ensure_table()
         where, params = self._build_where(filters, start_idx=2)
+        score_sql = self._score_sql()
         if score_threshold is not None:
-            where += f" AND 1 - (embedding <=> $1::vector) >= ${len(params) + 2}"
+            where += f" AND {score_sql} >= ${len(params) + 2}"
             params.append(score_threshold)
 
         query = f"""
         SELECT chunk_id, content, doc_type, source_path, repo,
                parent_chunk_id, chunk_type, token_count, metadata, priority,
-               1 - (embedding <=> $1::vector) AS score
+               {score_sql} AS score
         FROM {self._table}
         WHERE embedding IS NOT NULL
           AND chunk_type IS DISTINCT FROM 'parent'{where}
-        ORDER BY embedding <=> $1::vector
+        ORDER BY embedding {self._distance_op} $1::vector
         LIMIT ${len(params) + 2}
         """
         params.append(top_k)
@@ -357,7 +524,6 @@ class PgVectorStore:
         embedding: list[float],
         query_text: str,
         top_k: int = 10,
-        alpha: float = 0.7,  # kept for interface compat; RRF replaces the blend
         filters: dict | None = None,
     ) -> list[SearchResult]:
         """Hybrid RRF fusion. Lanes: dense ANN (HNSW), lexical FTS (GIN,
@@ -368,7 +534,9 @@ class PgVectorStore:
         ordered on a COMPUTED column, so Postgres could not use the HNSW index
         and scanned the whole table per query. Each lane now runs as its own
         index-using query and they're fused with the same RRF the Qdrant store
-        uses; the authoritative-content priority boost is then applied.
+        uses; the authoritative-content priority boost is then applied. RRF is
+        parameter-free, so there is no `alpha` blend knob (the vestigial param
+        that no caller passed was removed).
 
         PARITY CAVEAT -- this is NOT full Qdrant parity:
           * No CODE lane. The retriever's 4th lane (code-specific embedder over
@@ -388,16 +556,17 @@ class PgVectorStore:
         candidate_k = max(top_k * 8, 50)
 
         # Lane 1 -- dense ANN. ORDER BY the raw distance (NOT a blended score)
-        # so the HNSW index is actually used.
+        # so the HNSW index is actually used. Operator + score expression follow
+        # the configured distance metric (cosine '<=>' default unchanged).
         dwhere, dparams = self._build_where(filters, start_idx=2)
         dense_sql = f"""
         SELECT chunk_id, content, doc_type, source_path, repo,
                parent_chunk_id, chunk_type, token_count, metadata, priority,
-               1 - (embedding <=> $1::vector) AS score
+               {self._score_sql()} AS score
         FROM {self._table}
         WHERE embedding IS NOT NULL
           AND chunk_type IS DISTINCT FROM 'parent'{dwhere}
-        ORDER BY embedding <=> $1::vector
+        ORDER BY embedding {self._distance_op} $1::vector
         LIMIT {candidate_k}
         """
         # Lane 2 -- lexical FTS over the GIN index. websearch_to_tsquery
@@ -654,6 +823,16 @@ class PgVectorStore:
         params: list = []
         idx = start_idx
         for key, value in filters.items():
+            # R5 -- the key is interpolated directly into SQL (it cannot be a
+            # $N placeholder), so a non-column key would be raw SQL. Pin it to
+            # the known column set and fail closed -- this is the guardrail that
+            # keeps delete_by_filter (a DESTRUCTIVE statement) from ever routing
+            # an attacker-influenced key into the WHERE clause.
+            if key not in _FILTER_KEY_ALLOWLIST:
+                raise ValueError(
+                    f"pgvector filter key {key!r} is not an allowed column; "
+                    f"expected one of {sorted(_FILTER_KEY_ALLOWLIST)}"
+                )
             if isinstance(value, (list, tuple, set)):
                 clauses.append(f" AND {key} = ANY(${idx})")
                 params.append(list(value))
@@ -688,10 +867,10 @@ class PgVectorStore:
             token_count=row["token_count"],
         )
 
-    @classmethod
-    def _row_to_result(cls, row) -> SearchResult:
+    def _row_to_result(self, row) -> SearchResult:
         return SearchResult(
-            chunk=cls._row_to_chunk(row),
+            chunk=self._row_to_chunk(row),
             score=float(row["score"]),
-            distance_metric="cosine",
+            # Label with the configured dense metric (cosine default unchanged).
+            distance_metric=self._distance,
         )

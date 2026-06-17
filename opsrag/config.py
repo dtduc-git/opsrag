@@ -121,6 +121,9 @@ class VectorStoreConfig(BaseModel):
     api_key_env: str | None = None
     dsn: str | None = None
     dsn_env: str = "PGVECTOR_DSN"
+    # Vector distance metric. cosine default keeps all current deployments
+    # byte-identical; wired into Qdrant + pgvector.
+    distance: Literal["cosine", "dot", "euclid"] = "cosine"
     # Fail-closed embedding-dimension guard (shared seam across the main
     # index, the QA cache, and investigations). When False (default), the
     # factory refuses to start if the embedder's dimension differs from an
@@ -283,6 +286,11 @@ class AgentConfig(BaseModel):
     # path (the hybrid/minimal/full paths already gate; this extends it to the
     # default).
     verify_grounding_default: bool = True   # run the shared, fail-closed groundedness gate on the default multi_agent path (adds ~1 LLM call/turn; set false to trade safety for latency/cost)
+    # R4 -- run the precise artifact/citation verify_answer check on the default
+    # multi_agent path (distinct from the groundedness gate above: this asserts
+    # cited artifacts/citations actually back the answer). Adds +1 LLM
+    # verification call/turn; set false to disable.
+    verify_artifacts_default: bool = True
     # Phase 03 Pillar 3 -- Flash/Pro hybrid routing.
     # When set (e.g. "gemini-2.5-pro"), complex queries (root-cause /
     # cross-source / multi-step) escalate to Pro for synthesis;
@@ -683,6 +691,33 @@ class CodeCacheConfig(BaseModel):
     concurrency: int = 6           # max parallel clones (GitLab tolerates this)
 
 
+class QACacheConfig(BaseModel):
+    """Q&A semantic cache (``opsrag.qa_cache``) -- the separate Qdrant
+    collection that serves cached corpus answers for near-duplicate queries.
+
+    The cache is gated by an LLM "same question?" judge over a borderline
+    cosine band ``[floor, qa_judge_upper]``: a score ``>= qa_judge_upper``
+    auto-accepts (skip the judge, high confidence); below the band is a plain
+    miss; in-band calls the cheap judge. The borderline floor stays a judge-
+    module concern (``opsrag.qa_cache_judge``); this block surfaces the upper
+    bound + the NER discriminator toggle so ``server.py`` can thread them.
+
+    ``qa_ner_guard`` enables the spaCy free-form NER entity-swap discriminator
+    by default. It graceful-degrades: when the spaCy model is absent the
+    extractor logs once and returns no tokens (regex discriminators still run),
+    so turning it on never hard-fails a deployment without the model installed.
+    """
+
+    qa_judge_upper: float = 0.99
+    qa_ner_guard: bool = True
+    # R14 -- behaviour when the borderline-band judge LLM itself errors. Default
+    # fail-CLOSED (False): a judge error in-band re-queries the corpus rather
+    # than serving a wrong-but-close cached answer (QUALITY > latency). Set True
+    # to fail-open and prefer availability (serve the cached candidate when the
+    # judge can't decide).
+    qa_judge_fail_open: bool = False
+
+
 class TrackingUserConfig(BaseModel):
     """M1 -- Pomerium identity + M2 -- per-user token attribution.
 
@@ -905,6 +940,10 @@ class Settings(BaseModel):
     # New deployments configure bots here; `slack_bot:` is the deprecated alias.
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     code_cache: CodeCacheConfig = Field(default_factory=CodeCacheConfig)
+    # Q&A semantic cache judge/NER knobs (the cache enable toggle stays the
+    # OPSRAG_QA_CACHE env in opsrag.qa_cache). server.py threads these into the
+    # judge upper bound + the spaCy NER entity-swap discriminator.
+    qa_cache: QACacheConfig = Field(default_factory=QACacheConfig)
     rootly: RootlyConfig = Field(default_factory=RootlyConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     api: APIConfig = Field(default_factory=APIConfig)

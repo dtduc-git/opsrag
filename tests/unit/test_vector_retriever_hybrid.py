@@ -18,7 +18,7 @@ class _QdrantLikeStore:
         self.calls: list[dict] = []
 
     async def hybrid_search(
-        self, embedding, query_text, top_k=10, alpha=0.7,
+        self, embedding, query_text, top_k=10,
         filters=None, code_embedding=None, code_store=None,
     ):
         self.calls.append({
@@ -37,7 +37,7 @@ class _PgLikeStore:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def hybrid_search(self, embedding, query_text, top_k=10, alpha=0.7, filters=None):
+    async def hybrid_search(self, embedding, query_text, top_k=10, filters=None):
         self.calls.append({"query_text": query_text, "filters": filters})
         return []
 
