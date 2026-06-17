@@ -100,7 +100,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --extra dev
+      # --extra login: the shipped config.yaml defaults to auth.mode=login, so
+      # importing opsrag.api (module-level create_app) needs the login extra.
+      - run: uv sync --extra dev --extra login
       - name: pytest tests/unit
         run: |
           if [ -d tests/unit ]; then
@@ -118,7 +120,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --extra dev
+      # --extra login: shipped config.yaml defaults to auth.mode=login -> the
+      # app import (module-level create_app) needs the login extra.
+      - run: uv sync --extra dev --extra login
       - name: pytest tests/contract + shell contract tests
         run: |
           if [ -d tests/contract ]; then
@@ -159,7 +163,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --extra dev --extra fastembed
+      # --extra login: shipped config.yaml defaults to auth.mode=login -> the
+      # app import (module-level create_app) needs the login extra.
+      - run: uv sync --extra dev --extra fastembed --extra login
       - name: pytest tests/integration (excluding live-only)
         env:
           POSTGRES_URL: postgresql://opsrag:opsrag@localhost:5432/opsrag

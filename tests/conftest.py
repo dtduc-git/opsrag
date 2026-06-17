@@ -1,9 +1,17 @@
 """Shared pytest fixtures for the opsrag test suite."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# The shipped config.yaml defaults to auth.mode=login, so importing
+# opsrag.api.server (which runs `app = create_app()` at module load) builds a
+# login-mode app that wants a session signing key. Provide a dummy one BEFORE any
+# test module imports opsrag.api, so that import is clean. The API contract/unit
+# tests build their own OIDC app via the `api_app` fixture below.
+os.environ.setdefault("OPSRAG_SESSION_SIGNING_KEY", "test-session-signing-key-" + "x" * 32)
 
 # Repo root = two levels up from this file (tests/conftest.py -> repo/).
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,10 +77,20 @@ class StubOIDCVerifier:
 
 @pytest.fixture
 def api_app():
-    """A freshly constructed app (lifespan not run)."""
-    import opsrag.api.server as srv
+    """A freshly constructed app in OIDC mode (lifespan not run).
 
-    return srv.create_app()
+    The API contract/unit tests authenticate via the offline StubOIDCVerifier +
+    Bearer token (set on ``app.state.oidc_verifier`` by ``stub_app``), which only
+    applies when ``auth.mode == "oidc"``. Build the app explicitly in oidc mode
+    so the suite is independent of the shipped ``config.yaml`` default (now
+    ``login``) -- this is the mode the suite has always run under."""
+    import opsrag.api.server as srv
+    from opsrag.config import AuthConfig, Settings
+
+    cfg = Settings(
+        auth=AuthConfig(mode="oidc", issuer="https://idp.test", audience="opsrag")
+    )
+    return srv.create_app(config=cfg)
 
 
 @pytest.fixture
