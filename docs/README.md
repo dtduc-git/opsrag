@@ -36,7 +36,7 @@ Start with **Getting started**, then branch by what you need.
 
 | Doc | What it covers |
 |-----|----------------|
-| [Authentication](./auth.md) | The three auth modes (`open`/`oidc`/`login`), SSO (Google/GitHub/Microsoft), per-session ownership, and rate limiting. |
+| [Authentication](./auth.md) | The two auth modes (`login` default, or `oidc` with an external IdP), SSO (Google/GitHub/Microsoft), per-session ownership, and rate limiting. |
 | [Memory](./memory.md) | Mem0 per-user/service conversational memory. |
 | [Evaluation](./evaluation.md) | The golden-set eval harness, the 9 metrics + gate thresholds, and CI gating. |
 | [Operations](./operations.md) | Day-2 ops: indexing/reindexing (and the ratio reindex caveat), observability + cost, scaling, security hardening, troubleshooting. |

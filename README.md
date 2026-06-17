@@ -180,14 +180,20 @@ OpsRAG has two:
 | Mode | Who proves identity | First-party users? | Used by |
 |---|---|---|---|
 | `login` *(default)* | OpsRAG's own login: password + SSO (Google/GitHub/Microsoft) + cookies | **Yes** — including the bootstrap **`admin@opsrag.local`** | the **compose demo** and first-party deployments |
-| `oidc` | an **external IdP** issues a Bearer token; OpsRAG only *validates* it | **No** — no user database; identity lives entirely in the token | the **Dex** illustration above; in production, your Okta / Entra / Google |
+| `oidc` | an **external IdP** issues a Bearer token; OpsRAG only *validates* it | **No local credentials** — identity is asserted by the token; OpsRAG still records each identity in its `opsrag_user` table and resolves roles from the token's `groups` claim | the **Dex** illustration above; in production, your Okta / Entra / Google |
 
 **The key point.** The compose demo runs in `login` mode, so the web UI shows a
 **sign-in screen** and you log in as the seeded **`admin@opsrag.local`**
-account. In `oidc` mode there is no admin account at all — the "user" is
-whoever the token says (the Dex `evaluator@example.com` above) and OpsRAG keeps
-**no user records**. So the "admin user" and the "Dex user" are not the same
-thing, and you can't swap one for the other within a single mode.
+account. `oidc` mode has no *built-in* admin **account** — but it absolutely has
+**admins**: identity comes from the token, and OpsRAG grants the `admin` role to
+any user whose IdP `groups` / `roles` claim is mapped to it via
+**`auth.role_mappings`** (e.g. `{"sre-admins": ["admin"]}` — the `admin` role
+bundles every scope). So the seeded `admin@opsrag.local` (login) and a
+Dex / Okta user (oidc) reach admin by **different paths** — a local password vs.
+an IdP group — but both are real admins, and OpsRAG records every authenticated
+identity in `opsrag_user` regardless of mode. You do **not** need `login` mode to
+have an admin under `oidc`; you grant it through your IdP. (Full role-mapping
+setup: [docs/auth.md](docs/auth.md).)
 
 **The admin user.** There is no pre-baked password to retrieve — you set it.
 OpsRAG **seeds** the admin (role `admin`, idempotent) on boot in `login` mode

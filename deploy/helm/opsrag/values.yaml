@@ -16,10 +16,18 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# --- Authentication (OIDC) ---------------------------------------------------
+# --- Authentication ----------------------------------------------------------
+# Authentication is ALWAYS enforced -- there is no anonymous / "open" mode.
+# This chart is oidc-oriented: it verifies Bearer JWTs against an external IdP.
+# Set a REAL issuer + audience (the placeholders below fail at boot). Grant admin
+# by mapping an IdP group to the `admin` role via `role_mappings` (config.yaml-only
+# -- see docs/auth.md). The first-party `login` mode (admin + SSO + cookie
+# sessions) needs a session signing key + admin secret this chart does NOT wire;
+# to run `login`, supply your own `config.yaml`.
 auth:
-  issuer: https://your-idp.example.com   # OIDC discovery base URL (required)
-  audience: opsrag                        # expected token audience (required)
+  mode: oidc                             # oidc | login  (oidc is what the chart wires)
+  issuer: https://your-idp.example.com   # OIDC discovery base URL (required for oidc)
+  audience: opsrag                        # expected token audience (required for oidc)
   jwksCacheSeconds: 300
 
 # --- API workload ------------------------------------------------------------

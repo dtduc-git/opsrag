@@ -98,32 +98,32 @@ report it even after the Job exits. See
 
 ## 4. First query
 
-The default demo config configures `auth` against the bundled Dex issuer, so
-every endpoint except health needs a Bearer token. Mint one from Dex (static
-evaluator user, resource-owner password grant — no browser needed):
+The compose demo runs in `login` mode, so every endpoint except health requires
+authentication. Sign in at the web UI (<http://localhost:5173>) as the seeded
+admin (`admin@opsrag.local` by default — set `OPSRAG_ADMIN_EMAIL` /
+`OPSRAG_ADMIN_PASSWORD` in `.env`). To drive the API directly, grab a session
+cookie and reuse it on each call:
 
 ```sh
-TOKEN=$(curl -sf -X POST \
-  -d 'grant_type=password' \
-  -d 'username=evaluator@example.com' -d 'password=evaluator' \
-  -d 'client_id=opsrag-local' -d 'client_secret=local-secret' \
-  -d 'scope=openid profile email' \
-  http://localhost:5556/dex/token | jq -r .access_token)
+curl -sf -X POST http://localhost:8080/auth/login \
+  -d "email=admin@opsrag.local" -d "password=$OPSRAG_ADMIN_PASSWORD" \
+  -c cookies.txt
 
-curl -sf -X POST http://localhost:8080/query \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+curl -sf -X POST http://localhost:8080/query -b cookies.txt \
+  -H 'Content-Type: application/json' \
   -d '{"query":"How do I roll back an Acme Notes deployment?"}' | jq
 ```
 
 You get a cited English answer drawn from the indexed `samples/` corpus,
 plus a `session_id` and a `trace_id`. Open the Phoenix UI at
-<http://localhost:6006> to inspect the full LangGraph trace, or the web UI at
-<http://localhost:5173> (it runs its own OIDC handshake against Dex).
+<http://localhost:6006> to inspect the full LangGraph trace. (To use an external
+IdP instead of first-party login, switch `auth.mode` to `oidc` — the bundled Dex
+issuer illustrates that path; see [`auth.md`](./auth.md).)
 
-Requests without a valid token are rejected with a stable envelope:
+Requests without a valid session are rejected with a stable envelope:
 
 ```json
-{"error": "unauthenticated", "reason": "missing_bearer", "request_id": "..."}
+{"error": "unauthenticated", "reason": "missing_session", "request_id": "..."}
 ```
 
 > **Local Dex gotcha.** Dex advertises its issuer as
@@ -134,28 +134,20 @@ Requests without a valid token are rejected with a stable envelope:
 
 ## 5. Enabling auth and SSO
 
-opsrag has three auth modes, selected by `auth.mode` in `config.yaml`
-(`opsrag/config.py` → `AuthConfig`):
+opsrag has two auth modes, selected by `auth.mode` in `config.yaml`
+(`opsrag/config.py` → `AuthConfig`) — authentication is always enforced, there
+is no anonymous / "open" mode:
 
 | Mode    | Behavior                                                                 |
 |---------|--------------------------------------------------------------------------|
-| `open`  | No enforcement (same as omitting the `auth` block). Local-dev only.      |
-| `oidc`  | Verify incoming Bearer JWTs against `issuer` + `audience` (the demo path).|
-| `login` | First-party login: cookie sessions + optional SSO providers.            |
+| `login` | **Default** (and the compose demo): first-party login — password and/or SSO — with signed cookie sessions and a seeded bootstrap admin. |
+| `oidc`  | Verify incoming Bearer JWTs against `issuer` + `audience`; no local accounts — identity and the `admin` role come from the token's `groups` claim via `role_mappings`. |
 
-**OIDC** (the quickstart default) points at any OIDC issuer — Dex, Keycloak,
-Okta, Auth0, Azure AD / Entra:
+Authentication is **always enforced** — there is no anonymous / "open" mode.
 
-```yaml
-auth:
-  mode: oidc
-  issuer: https://your-idp.example.com   # OIDC discovery base URL (required)
-  audience: opsrag                        # expected token "aud" (required)
-  jwks_cache_seconds: 300
-```
-
-**Login** mode runs a first-party login page with password and/or SSO. The
-session signing key is sourced from a path or env only (never inline):
+**Login** (the quickstart default, and what the compose demo runs) serves a
+first-party login page with password and/or SSO. The session signing key is
+sourced from a path or env only (never inline):
 
 ```yaml
 auth:
@@ -169,6 +161,19 @@ auth:
     github:    { enabled: true, client_id: "...", client_secret_env: OPSRAG_SSO_GITHUB_SECRET }
     microsoft: { enabled: true, client_id: "...", client_secret_env: OPSRAG_SSO_MICROSOFT_SECRET,
                  server_metadata_url: "https://login.microsoftonline.com/<tenant>/v2.0/.well-known/openid-configuration" }
+```
+
+**OIDC** points at any external OIDC issuer — Dex, Keycloak, Okta, Auth0,
+Azure AD / Entra. Grant admin by mapping an IdP group to the `admin` role:
+
+```yaml
+auth:
+  mode: oidc
+  issuer: https://your-idp.example.com   # OIDC discovery base URL (required)
+  audience: opsrag                        # expected token "aud" (required)
+  jwks_cache_seconds: 300
+  role_mappings:
+    sre-admins: ["admin"]                 # IdP `groups` value -> OpsRAG admin role
 ```
 
 The three SSO providers are `google`, `github`, and `microsoft` (Azure AD /
@@ -198,22 +203,20 @@ mcp:
 
 Enabling an MCP without its required env fails fast at startup with
 `MCP_MISCONFIGURED:<name>:<env>`. Restart the API, then launch an
-investigation (the surface is gated on the `investigate` scope — in `open`
-mode every user holds it):
+investigation (the surface is gated on the `investigate` scope — a caller
+without it gets a 403):
 
 ```sh
 # Launch — returns immediately with an investigation_id
-INV=$(curl -sf -X POST http://localhost:8080/investigations \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+INV=$(curl -sf -X POST http://localhost:8080/investigations -b cookies.txt \
+  -H 'Content-Type: application/json' \
   -d '{"alert_text":"checkout-api 5xx spiking in prod"}' | jq -r .investigation_id)
 
 # Snapshot (lifecycle row + all events so far)
-curl -sf http://localhost:8080/investigations/$INV \
-  -H "Authorization: Bearer $TOKEN" | jq
+curl -sf http://localhost:8080/investigations/$INV -b cookies.txt | jq
 
 # Resumable SSE event stream (reconnect with the last seen sequence)
-curl -sN "http://localhost:8080/investigations/$INV/events?since=0" \
-  -H "Authorization: Bearer $TOKEN"
+curl -sN "http://localhost:8080/investigations/$INV/events?since=0" -b cookies.txt
 ```
 
 The runner streams events to a Postgres ledger, so a tab refresh or network
