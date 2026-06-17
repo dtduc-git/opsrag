@@ -39,7 +39,11 @@ class _InstrumentedLLM:
         self.max_in_flight = 0
         self.calls = 0
 
-    async def generate_structured(self, *, purpose, messages, schema, system_prompt):
+    async def generate_structured(
+        self, *, purpose, messages, schema, system_prompt, max_tokens=None
+    ):
+        # ``max_tokens`` is the gate output cap the grader now passes; the fake
+        # just accepts it (behaviour is unchanged -- it never truncates here).
         self.in_flight += 1
         self.calls += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)

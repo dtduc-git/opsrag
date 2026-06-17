@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from opsrag.llms.pricing import _RATES, per_call_cost_micros
+from opsrag.llms.pricing import per_call_cost_micros, token_rate_micros
 
 # Pricing lives in ONE place: opsrag/llms/pricing.py. That module's
 # `_RATES` table (micro-cents per 1M tokens) is the single source of
@@ -24,16 +24,12 @@ _MICROS_PER_USD = 100_000_000
 
 
 def _pricing_for(model: str) -> tuple[float, float]:
-    """(input, output) USD per 1M tokens, derived from pricing.py's
-    `_RATES` (micro-cents per 1M). Tries exact then a suffix match for
-    region-prefixed inference profiles. (0, 0) when unknown -- same
+    """(input, output) USD per 1M tokens, derived from pricing.py via the
+    OVERRIDE-AWARE `token_rate_micros` (so config `llm.model_prices` overrides
+    reach the /usage page too, not just the persisted cost path). Exact then
+    suffix match for region/provider-prefixed ids. (0, 0) when unknown -- same
     contract pricing.cost_usd_micros uses, so the two stay in lockstep."""
-    rates = _RATES.get(model)
-    if rates is None:
-        for key, val in _RATES.items():
-            if model.endswith(key):
-                rates = val
-                break
+    rates = token_rate_micros(model)
     if rates is None:
         return (0.0, 0.0)
     in_rate, out_rate = rates

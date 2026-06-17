@@ -269,6 +269,8 @@ class LiteLLMLLM:
         schema: type,
         system_prompt: str | None = None,
         purpose: str | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> Any:
         """Force JSON output matching a Pydantic v2 model via an in-prompt
         schema instruction, then parse + validate (portable across LiteLLM
@@ -284,13 +286,25 @@ class LiteLLMLLM:
         )
         system = f"{system_prompt}\n\n{instruction}" if system_prompt else instruction
 
-        resp = await self.generate(
-            messages=messages,
-            system_prompt=system,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            purpose=purpose,
-        )
+        # LiteLLM may proxy Gemini, whose thinking tokens count against
+        # max_output_tokens unless response_schema is set; this in-prompt
+        # path does NOT set one, so a small structured-gate cap (e.g. the
+        # gates' 128) would truncate thinking -> empty output -> json parse
+        # fails. Ignore a small cap here to keep gate verdicts unchanged:
+        # floor it at the provider default so it can never cap below the safe
+        # value. (Net effect identical to dropping a small cap; left None it
+        # preserves generate's default behavior so existing callers are
+        # unchanged.)
+        gen_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "system_prompt": system,
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+            "purpose": purpose,
+        }
+        if max_tokens is not None:
+            gen_kwargs["max_tokens"] = max(max_tokens, self._default_max_tokens)
+        resp = await self.generate(**gen_kwargs)
 
         text = resp.content.strip()
         if text.startswith("```"):
