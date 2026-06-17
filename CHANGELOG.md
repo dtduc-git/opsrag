@@ -27,6 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Categories: `factual_lookup`, `runbook_howto`, `listing`,
   `multi_doc_synthesis`, `negative`. Rewrote `opsrag/eval/golden/README.md`
   and `docs/evaluation.md` to document both eval tiers.
+
+### Fixed
+
+- **Auth defaults made coherent; oidc admins documented.** The shipped
+  `config.yaml` had drifted to `auth.mode: oidc` (Dex) while the compose stack,
+  README quickstart, and inline comments all assume `login` — so a fresh clone
+  booted with no working admin. Flipped `config.yaml` back to `login` (seeded
+  admin), keeping oidc/Dex as a commented alternative with a `role_mappings`
+  example. Corrected docs that claimed `oidc` has "no admin account / keeps no
+  user records": `oidc` grants the `admin` role via `auth.role_mappings`
+  (IdP `groups` → role, which bundles every scope), and identities persist in
+  `opsrag_user` in both modes. Purged stale `open`-mode references repo-wide.
+- **Helm chart now renders `auth.mode`.** The ConfigMap emitted
+  `auth.issuer`/`audience`/`jwks_cache_seconds` but **not** `auth.mode`, so an
+  `oidc` deploy silently fell back to the schema default (`login` — which the
+  chart does not wire) and ignored the issuer. The chart now renders `auth.mode`
+  (default `oidc`) and gates the oidc-only keys behind it.
+
 ## [0.3.1] - 2026-06-16
 
 Security + dependency patch release. The published `v0.3.0` images were built

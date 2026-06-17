@@ -179,13 +179,12 @@ ServiceAccount (IRSA on EKS, Workload Identity on GKE — see
 [Scenario values files](#scenario-values-files)). Only `POSTGRES_DSN`, the
 session signing key, MCP tokens, and SSO secrets live in the Secret.
 
-> **Auth mode note.** The chart renders `auth.issuer` / `auth.audience` /
-> `auth.jwksCacheSeconds` into the ConfigMap but does **not** template
-> `auth.mode` — so it defaults to `login` (auth is always enforced; there is no
-> anonymous / "open" mode). To run `oidc`, or to configure first-party `login`
-> SSO + `role_mappings`, supply your own `config.yaml` with the desired
-> `auth.mode` and blocks. See [`./auth.md`](./auth.md) for both modes and SSO
-> provider setup.
+> **Auth mode note.** The chart is oidc-oriented: it renders `auth.mode`
+> (default `oidc`) plus `auth.issuer` / `auth.audience` / `auth.jwksCacheSeconds`
+> into the ConfigMap — set a real `issuer`/`audience`. Auth is always enforced
+> (no anonymous / "open" mode). First-party `login` mode (cookie sessions + SSO +
+> `role_mappings`) needs a session signing key + admin secret the chart does not
+> wire — supply your own `config.yaml`. See [`./auth.md`](./auth.md).
 
 ### Scaling and HA
 

@@ -377,11 +377,12 @@ ARE first-class chart values and render into the ConfigMap:
 The following are **not** surfaced as chart values — to use them, supply your own
 `config.yaml` (baked into the image or mounted via your own ConfigMap):
 
-- **Auth mode + SSO providers.** The chart surfaces only `auth.issuer` /
-  `auth.audience` / `auth.jwksCacheSeconds`; it does **not** template `auth.mode`
-  (which defaults to `login`) or the SSO / `role_mappings` blocks. To run `oidc`,
-  or to configure first-party `login` SSO, supply your own `config.yaml` with the
-  desired `auth.mode`. See [`./auth.md`](./auth.md).
+- **Auth mode + SSO providers.** The chart is oidc-oriented: it renders
+  `auth.mode` (default `oidc`) plus `auth.issuer` / `auth.audience` /
+  `auth.jwksCacheSeconds`. It does **not** template the SSO / `role_mappings`
+  blocks or wire the session-signing-key / admin secret needed for first-party
+  `login` mode — to run `login`, supply your own `config.yaml`. See
+  [`./auth.md`](./auth.md).
 - **Advanced tuning blocks** — memory/Mem0, QA cache, corrections, eval,
   chunking, light-graph, scheduler — mount a `config.yaml` for these.
 
