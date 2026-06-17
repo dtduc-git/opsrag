@@ -49,12 +49,15 @@ docker compose -f deploy/compose/docker-compose.yaml exec opsrag-api \
 ```
 
 The compose API mounts `deploy/compose/config.yaml` over the image's default at
-`/app/config.yaml`. That demo profile is the **SSO-skipped (open) profile**: it
-ships *no* `auth:` block, so the OIDC middleware runs in open mode and the
-bundled UI can call the API without a token. Do not expose that profile on a
-network — add an `auth:` block (or use the Dex issuer) for anything real. The
-full token-based walkthrough (getting a Dex bearer token, querying, inspecting
-the Phoenix trace) is in
+`/app/config.yaml`. That demo profile runs **`login` mode** — auth is always
+enforced; there is no anonymous / "open" mode. The API seeds a bootstrap admin
+from `OPSRAG_ADMIN_EMAIL` / `OPSRAG_ADMIN_PASSWORD` and signs session cookies
+with `OPSRAG_SESSION_SIGNING_KEY` (all defaulted in `docker-compose.yaml`), so a
+fresh clone boots a working sign-in with no extra config. Change those env
+defaults — and set `cookie_secure: true` behind HTTPS — before exposing it on a
+network. To use an external IdP instead, switch `auth.mode` to `oidc` (the
+bundled Dex issuer illustrates the path). The full walkthrough (sign-in or a Dex
+bearer token, querying, inspecting the Phoenix trace) is in
 [`../specs/001-port-opsrag-opensource/quickstart.md`](../specs/001-port-opsrag-opensource/quickstart.md).
 
 Notable compose services and config:
@@ -176,12 +179,13 @@ ServiceAccount (IRSA on EKS, Workload Identity on GKE — see
 [Scenario values files](#scenario-values-files)). Only `POSTGRES_DSN`, the
 session signing key, MCP tokens, and SSO secrets live in the Secret.
 
-> **Auth mode note.** The chart's `auth.issuer`/`auth.audience` render an
-> `auth:` block into the ConfigMap, which runs the app in `oidc` mode (the
-> default). The `login` (first-party cookie sessions + SSO) and `open` modes,
-> and the SSO provider blocks, are application `config.yaml` keys that the chart
-> does not template — to use them, supply your own `config.yaml`. See
-> [`./auth.md`](./auth.md) for the three modes and SSO provider setup.
+> **Auth mode note.** The chart renders `auth.issuer` / `auth.audience` /
+> `auth.jwksCacheSeconds` into the ConfigMap but does **not** template
+> `auth.mode` — so it defaults to `login` (auth is always enforced; there is no
+> anonymous / "open" mode). To run `oidc`, or to configure first-party `login`
+> SSO + `role_mappings`, supply your own `config.yaml` with the desired
+> `auth.mode` and blocks. See [`./auth.md`](./auth.md) for both modes and SSO
+> provider setup.
 
 ### Scaling and HA
 
@@ -373,6 +377,6 @@ per-integration credentials.
 
 - [`./helm-chart.md`](./helm-chart.md) — full chart values reference, schema, and upgrade notes
 - [`./mcp-integrations.md`](./mcp-integrations.md) — the 20 MCP integrations and their credentials
-- [`./auth.md`](./auth.md) — the three auth modes (open / oidc / login) and SSO providers
+- [`./auth.md`](./auth.md) — the two auth modes (`login` default / `oidc`) and SSO providers
 - [`./architecture.md`](./architecture.md) — system architecture and the indexing/serving split
-- [`../specs/001-port-opsrag-opensource/quickstart.md`](../specs/001-port-opsrag-opensource/quickstart.md) — full local walkthrough (token + query)
+- [`../specs/001-port-opsrag-opensource/quickstart.md`](../specs/001-port-opsrag-opensource/quickstart.md) — full local walkthrough (sign-in or token, then query)

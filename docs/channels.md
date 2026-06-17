@@ -185,7 +185,8 @@ serves every role. The deprecated `slackBot:` values alias still maps to
 
 Conversations that happen in **shared channels** (Slack/Discord/Teams channels,
 Telegram groups) are browsable **read-only** in the web UI under the **Channels**
-page by any authenticated user (scope `chat`; in `open` mode, anyone). The list
+page by any authenticated user with the `chat` scope (auth is always enforced —
+there is no anonymous / "open" mode). The list
 and each conversation's messages come from `GET /channels/conversations` and
 `GET /channels/conversations/{thread_id}/messages`.
 

@@ -240,12 +240,14 @@ When `targets` is empty, the engine synthesizes a registry from the legacy
 
 ### `auth` — authentication
 
-Three modes via `auth.mode`: `open` (no enforcement), `oidc` (verify Bearer
-JWTs against `issuer` + `audience` — both required), and `login` (first-party
-cookie sessions + SSO). SSO providers are `google`, `github`, `microsoft`
-(Azure AD / Entra), each with `client_id` + `client_secret_env`. Session
-signing keys come from a path or env only. `role_mappings` maps IdP
-groups/claims to opsrag roles. Full setup is in [`auth.md`](./auth.md).
+Two modes via `auth.mode`: `login` (the default — first-party cookie sessions +
+SSO) and `oidc` (verify Bearer JWTs against `issuer` + `audience` — both
+required). Authentication is always enforced; there is no anonymous / "open"
+mode. SSO providers are `google`, `github`, `microsoft` (Azure AD / Entra), each
+with `client_id` + `client_secret_env`. Session signing keys come from a path or
+env only. `role_mappings` maps an IdP groups/roles claim to opsrag roles (e.g. an
+`admin` group → the `admin` role, which bundles every scope). Full setup is in
+[`auth.md`](./auth.md).
 
 ```yaml
 auth:

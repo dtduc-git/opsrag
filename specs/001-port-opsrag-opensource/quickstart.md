@@ -82,6 +82,11 @@ sample data.
 
 ### 6. Get an OIDC token
 
+> **Note:** this Bearer-token path requires `auth.mode: oidc` in `config.yaml`.
+> The shipped compose default is `auth.mode: login` — sign in as the seeded admin
+> instead (see the README quickstart), or switch `auth.mode` to `oidc` to follow
+> the steps below against the bundled Dex issuer.
+
 The bundled Dex ships with one static user (`evaluator@example.com` /
 `evaluator`). To exchange those credentials for a token:
 
