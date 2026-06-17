@@ -21,7 +21,7 @@ _INVESTIGATION_TELEMETRY_INTEGRATIONS = (
 
 Wiring is gated again at startup (`opsrag/api/server.py`): the runner is only constructed when `session.provider == "postgres"` (the event ledger needs a Postgres pool). The tool registry is built from `ALL_MCP_TOOLS` after every `bind_*` call, keyed by `tool.name`. If the registry is empty, the pipeline still runs but the reasoner round is skipped and every hypothesis stays `untested`.
 
-RBAC: the whole investigate surface (launch, snapshot, SSE) is gated on the `investigate` scope (`require_scope(Scope.INVESTIGATE)`). In `open` auth mode every user carries all scopes, so it is transparent; in `login`/`oidc` mode a chat-only member 403s. See [./auth.md](./auth.md).
+RBAC: the whole investigate surface (launch, snapshot, SSE) is gated on the `investigate` scope (`require_scope(Scope.INVESTIGATE)`). Auth is always enforced (no anonymous / "open" mode) — in both `login` and `oidc` mode a chat-only member 403s. See [./auth.md](./auth.md).
 
 ## Pipeline overview
 

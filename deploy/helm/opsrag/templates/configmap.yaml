@@ -12,10 +12,18 @@ data:
     {{- if .Values.config.cloudProvider }}
     cloud_provider: {{ .Values.config.cloudProvider }}
     {{- end }}
+    {{- /* Auth is ALWAYS enforced (no anonymous/"open" mode). `mode` MUST be
+           rendered -- without it the app falls back to its schema default
+           (login), which this chart does not wire (no signing-key/admin secret),
+           silently ignoring issuer/audience. Default oidc: the chart is
+           oidc-oriented (verify Bearer JWTs against an external IdP). */}}
     auth:
+      mode: {{ .Values.auth.mode | default "oidc" | quote }}
+      {{- if eq (.Values.auth.mode | default "oidc") "oidc" }}
       issuer: {{ .Values.auth.issuer | quote }}
       audience: {{ .Values.auth.audience | quote }}
       jwks_cache_seconds: {{ .Values.auth.jwksCacheSeconds | default 300 }}
+      {{- end }}
     {{- /* api block: only the rate-limit knobs are config-surfaced here.
            rate_limit_backend=redis is fail-fast -- the API PINGs Redis at
            boot (redis_url_env), so only set it when Redis is reachable. */}}

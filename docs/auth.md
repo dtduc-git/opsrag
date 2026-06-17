@@ -14,8 +14,10 @@ rejected with HTTP 401. OpsRAG has two authentication modes, set by
   password and/or SSO (Google / Microsoft / GitHub), backed by signed
   cookie sessions and a local user store, with a seeded `admin` account.
 - `oidc` -- OpsRAG verifies an incoming `Authorization: Bearer <JWT>`
-  against an external identity provider (IdP). There is no user database;
-  identity lives entirely in the token.
+  against an external identity provider (IdP). There are no local credentials:
+  identity is asserted by the token, and the `admin` role is granted by mapping
+  an IdP `groups` claim via `role_mappings`. Authenticated identities are still
+  recorded in the `opsrag_user` table (for audit) in both modes.
 
 On top of authentication ("who is calling"), OpsRAG enforces:
 
@@ -70,7 +72,8 @@ Quick rules of thumb:
 | Property | `login` | `oidc` |
 |---|---|---|
 | Identity source | OpsRAG's own users | external IdP JWT |
-| User database | yes (`opsrag_auth_user`) | no |
+| Credential storage | yes (password / SSO links) | no (token-asserted) |
+| Identity records (`opsrag_user`) | yes | yes (audit; no credentials) |
 | First-party admin account | yes (seeded from env) | no |
 | Credential the client sends | signed session cookie | `Authorization: Bearer <JWT>` |
 | Web UI shows a login screen | yes | no (UI assumes a token/gateway) |

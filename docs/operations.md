@@ -159,9 +159,9 @@ semantics.
 
 ## Security hardening checklist
 
-- **Enforce auth.** Set `auth.mode: oidc` (or `login`) — never run `open` on a
-  shared/production deployment. Per-session ownership only protects threads
-  once callers are authenticated. See [`auth.md`](./auth.md).
+- **Enforce auth.** Set `auth.mode: login` (default) or `oidc` — auth is always
+  enforced; there is no anonymous / "open" mode to disable. Per-session ownership
+  only protects threads once callers are authenticated. See [`auth.md`](./auth.md).
 - **Secrets via env, never YAML.** Every secret is sourced from an env var
   named by a `*_env` key (API keys, Redis URL, session signing key, SSO
   client secrets, Neo4j password). Inline session signing-key material is

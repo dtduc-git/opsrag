@@ -63,8 +63,9 @@ services:
       # bolt://neo4j:7687 in config.yaml to reach the compose service.
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-opsrag-password}
     volumes:
-      # Demo profile: mount the SSO-skipped (no-auth) config over the image's
-      # shipped default so the cookie-less UI can call the API.
+      # Demo profile: mount the login-mode demo config (auth.mode=login, seeded
+      # bootstrap admin) over the image's shipped default. The UI signs in and
+      # calls the API with the resulting session cookie.
       - ./config.yaml:/app/config.yaml:ro
     ports:
       - "8080:8080"
