@@ -24,6 +24,7 @@ import pytest
 from opsrag.config import (
     EnvironmentsConfig,
     EnvironmentTarget,
+    EsClusters,
     EsTarget,
     OpsRAGConfig,
 )
@@ -163,11 +164,14 @@ def test_env_without_es_target_clean_error():
     assert "elasticsearch not configured for env" in str(ei.value)
 
 
-def test_resolve_env_precedence():
-    # env arg wins over cluster alias; cluster alias works; neither -> None.
+def test_resolve_env_and_cluster_args():
+    # `env` selects the environment; `cluster` is now the ES-cluster selector
+    # within the env (NOT an env alias). Both omitted -> None (registry default).
     assert es._resolve_env({"env": "a", "cluster": "b"}) == "a"
-    assert es._resolve_env({"cluster": "b"}) == "b"
+    assert es._resolve_env({"cluster": "b"}) is None      # cluster is NOT an env alias
     assert es._resolve_env({}) is None
+    assert es._resolve_cluster({"cluster": "b"}) == "b"
+    assert es._resolve_cluster({"env": "a"}) is None
 
 
 # --- _base: reach modes (network mocked) ---------------------------------
@@ -359,17 +363,77 @@ async def test_handler_env_arg_targets_other_env(monkeypatch):
     assert call["verify"] is False  # staging verify_ssl=False
 
 
+def _bind_multi_cluster_env():
+    """One env ('prd') with TWO named ES clusters (infra + integration)."""
+    cfg = OpsRAGConfig()
+    cfg.environments = EnvironmentsConfig(
+        default="prd",
+        targets={
+            "prd": EnvironmentTarget(
+                elasticsearch=EsClusters(
+                    default="infra",
+                    clusters={
+                        "infra": EsTarget(
+                            reach="direct", url="https://es.infra:9200",
+                            api_key_env="INFRA_KEY", index_pattern="app-logs-*",
+                            usage_note="Container/app logs.",
+                        ),
+                        "integration": EsTarget(
+                            reach="direct", url="https://es.integration:9200",
+                            api_key_env="INTEG_KEY", index_pattern="integration-logs-*",
+                            usage_note="Integration pipeline logs.",
+                        ),
+                    },
+                ),
+            ),
+        },
+    )
+    bind_environments(cfg)
+
+
 @pytest.mark.asyncio
-async def test_handler_cluster_alias_targets_other_env(monkeypatch):
-    _bind_two_envs()
-    monkeypatch.setenv("STG_ES_USER", "u")
-    monkeypatch.setenv("STG_ES_PASS", "p")
+async def test_handler_cluster_selects_named_es_cluster(monkeypatch):
+    """The `cluster` arg picks a named ES cluster within the env; omitted -> the
+    env's default cluster."""
+    _bind_multi_cluster_env()
+    monkeypatch.setenv("INFRA_KEY", "ki")
+    monkeypatch.setenv("INTEG_KEY", "kn")
     _FakeAsyncClient.calls = []
     monkeypatch.setattr(es.httpx, "AsyncClient", _FakeAsyncClient)
 
-    res = await es.get_tool("elasticsearch_cluster_health").handler(None, {"cluster": "staging"})
-    assert res["env"] == "staging"
-    assert _FakeAsyncClient.calls[-1]["url"].startswith("http://os.staging.svc:9200")
+    # default cluster (infra)
+    res = await es.get_tool("elasticsearch_cluster_health").handler(None, {})
+    assert _FakeAsyncClient.calls[-1]["url"].startswith("https://es.infra:9200")
+
+    # explicit non-default cluster (integration)
+    res = await es.get_tool("elasticsearch_cluster_health").handler(None, {"cluster": "integration"})
+    assert _FakeAsyncClient.calls[-1]["url"].startswith("https://es.integration:9200")
+    assert res["cluster"] == "integration"
+
+    # unknown cluster -> bad_cluster error
+    with pytest.raises(es.MCPElasticsearchError) as ei:
+        await es.get_tool("elasticsearch_cluster_health").handler(None, {"cluster": "ghost"})
+    assert ei.value.reason == "bad_cluster"
+
+
+@pytest.mark.asyncio
+async def test_list_clusters_reports_usage_notes():
+    _bind_multi_cluster_env()
+    res = await es.get_tool("elasticsearch_list_clusters").handler(None, {})
+    assert res["env"] is None and res["default"] == "infra" and res["count"] == 2
+    by_name = {c["cluster"]: c for c in res["clusters"]}
+    assert by_name["infra"]["default"] is True
+    assert by_name["integration"]["usage_note"] == "Integration pipeline logs."
+
+
+@pytest.mark.asyncio
+async def test_single_estarget_is_a_default_cluster(monkeypatch):
+    """Back-compat: a plain single EsTarget behaves as one cluster named
+    'default' -- the `cluster` arg is unnecessary and `list_clusters` shows one."""
+    _bind_two_envs()
+    monkeypatch.setenv("PROD_ES_KEY", "k")
+    res = await es.get_tool("elasticsearch_list_clusters").handler(None, {})
+    assert res["count"] == 1 and res["default"] == "default"
 
 
 @pytest.mark.asyncio

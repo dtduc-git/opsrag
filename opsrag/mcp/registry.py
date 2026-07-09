@@ -275,6 +275,7 @@ REGISTRY: dict[str, MCPIntegration] = {
             "elasticsearch_cluster_health",
             "elasticsearch_esql_query",
             "elasticsearch_get_mappings",
+            "elasticsearch_list_clusters",
             "elasticsearch_list_indices",
             "elasticsearch_search",
         ),

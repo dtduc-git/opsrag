@@ -331,3 +331,25 @@ mcp:
   slack:         { enabled: false }   # Slack search tool
   splunk:        { enabled: false }   # Splunk SPL search (read-only)
   tool_cache:    { enabled: false }   # cross-tool result cache
+
+# --- Multi-environment registry (kubernetes / prometheus / elasticsearch) -----
+# One OpsRAG instance can target N environments; the k8s / prometheus /
+# elasticsearch tools take an optional `env` arg to pick one (omitted -> default).
+# `elasticsearch` per env is EITHER a single target OR a named-cluster map for
+# environments with several ES clusters (e.g. separate infra-logs / integration-
+# logs / product-data clusters). The ES tools then take a `cluster` arg (omitted
+# -> the env's `default`), and `elasticsearch_list_clusters` reports each with
+# its `usage_note`. Each cluster authenticates independently (its own key).
+# environments:
+#   default: prd
+#   targets:
+#     prd:
+#       kubernetes: { mode: gke, project: my-proj, location: us-west1, name: prod }
+#       # (a) single ES cluster for this env:
+#       # elasticsearch: { reach: port_forward, namespace: eck-infra, service: eck-infra-logs-es-http, api_key_env: ES_PRD_KEY }
+#       # (b) multiple named ES clusters for this env:
+#       elasticsearch:
+#         default: infra
+#         clusters:
+#           infra:       { reach: port_forward, namespace: eck-infra,       service: eck-infra-logs-es-http,       api_key_env: ES_PRD_INFRA_KEY,       index_pattern: "app-logs-*",         usage_note: "Container/app logs for most services." }
+#           integration: { reach: port_forward, namespace: eck-integration, service: eck-integration-logs-es-http, api_key_env: ES_PRD_INTEGRATION_KEY, index_pattern: "integration-logs-*", usage_note: "Integration pipeline logs." }
