@@ -5950,7 +5950,11 @@ html[data-ui-variant="classic"] .avatar.bot img {
 /* Grid: two columns; the last card spans full width. */
 .home-grid {
   display: grid;
-  grid-template-columns: 1.25fr 1fr;
+  /* minmax(0, …) instead of bare fr: an `fr` track has an implicit
+     min-content floor, so a long non-wrapping conversation title would force
+     its track (and the whole dashboard) wider than the viewport. minmax(0,…)
+     lets the track shrink so the title truncates with an ellipsis instead. */
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
   gap: 16px;
   /* stretch -> both cards in a row share the taller card's height,
      so the boxes line up evenly. */
@@ -5959,7 +5963,10 @@ html[data-ui-variant="classic"] .avatar.bot img {
 .home-card-full { grid-column: 1 / -1; }
 /* Cards fill their (stretched) grid cell and lay content top-to-bottom so a
    shorter card's footer/last row sits flush at the bottom edge. */
-.home-card { display: flex; flex-direction: column; }
+/* min-width: 0 lets a card shrink below its content's intrinsic width inside
+   its grid track -- without it a grid item's default `min-width: auto` floors
+   the track at min-content, so a long unbroken title blows the layout out. */
+.home-card { display: flex; flex-direction: column; min-width: 0; }
 
 /* Card chrome */
 .home-card {
@@ -6133,7 +6140,7 @@ html[data-ui-variant="classic"] .avatar.bot img {
 
 /* Responsive: collapse to one column, then simplify dense rows. */
 @media (max-width: 1080px) {
-  .home-grid { grid-template-columns: 1fr; }
+  .home-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 640px) {
   .home { padding: 20px 16px 32px; }
