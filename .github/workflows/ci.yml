@@ -523,7 +523,7 @@ jobs:
           exit-code: "0"
 
       - name: Upload Trivy image SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         # SARIF upload needs GHAS (unavailable on private repo) -- don't fail.
         continue-on-error: true
