@@ -16,6 +16,54 @@ from uuid import uuid4
 _log = logging.getLogger("opsrag.graph")
 
 
+async def _image_context(vision_llm, llm, images) -> str:
+    """Describe attached image(s) with a vision-capable LLM so the WHOLE agent
+    is image-aware -- not just the final generator.
+
+    In multi_agent mode the triage + reasoner nodes choose which tools to run
+    from the TEXT query alone; the raw image only reaches the answer generator.
+    So an uploaded chart never informs *what gets investigated* (e.g. a
+    ``web-svc`` liveness-probe dashboard triggers a broad, wrong investigation).
+    This runs one vision call up front and returns a short factual description
+    that the caller splices into the query as an ``IMAGE CONTEXT:`` block, so
+    triage/reasoner see what the image shows.
+
+    Describe with ``vision_llm`` (the dedicated fallback) when present, else the
+    main ``llm`` when it can already see -- the common single-model deployment,
+    where ``vision_llm`` is None precisely because the active model has vision.
+    Best-effort: returns ``""`` when neither model can see or the call fails
+    (the raw bytes still flow to the generator via the config side-channel)."""
+    if not images:
+        return ""
+    from opsrag.llms.content import build_user_content, is_vision_capable
+    describe_llm = None
+    for cand in (vision_llm, llm):
+        if cand is not None and is_vision_capable("", getattr(cand, "model_name", None)):
+            describe_llm = cand
+            break
+    if describe_llm is None:
+        return ""
+    prompt = (
+        "A user attached this image to a DevOps/SRE question. Describe it "
+        "FACTUALLY in 2-4 sentences so an agent can decide what to investigate. "
+        "State: (1) what it is (Grafana/Datadog dashboard, terminal, diagram, "
+        "log excerpt, ...); (2) the exact service / app / namespace / cluster / "
+        "resource NAMES visible; (3) the metric or state shown and any specific "
+        "values, error messages, pod names, or timestamps. Report only what is "
+        "visibly present -- no speculation, no remediation advice."
+    )
+    try:
+        resp = await describe_llm.generate(
+            purpose="vision",
+            messages=[{"role": "user", "content": build_user_content(prompt, images)}],
+            temperature=0.0,
+        )
+        return (getattr(resp, "content", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001 -- vision is best-effort; never fail the turn
+        _log.warning("image-context description failed: %s", exc)
+        return ""
+
+
 def _qa_cache_globally_disabled() -> bool:
     """True when OPSRAG_DISABLE_QA_CACHE is set. The eval harness runs the target
     server with this on so the QA cache can't serve a stored answer (and stored
@@ -993,7 +1041,17 @@ async def query_with_session(
     query_for_state = query
     if images:
         names = ", ".join(img.name or "image" for img in images)
-        query_for_state = f"{query} [attached image: {names}]".strip()
+        # Make tool SELECTION (triage/reasoner) image-aware, not just the final
+        # generator: describe the image once and splice it into the query. Falls
+        # back to the bare marker when no vision model / description available.
+        _img_ctx = await _image_context(vision_llm, llm, images)
+        if _img_ctx:
+            query_for_state = (
+                f"{query}\n\nIMAGE CONTEXT (attached {names}, transcribed by the "
+                f"vision model): {_img_ctx}"
+            ).strip()
+        else:
+            query_for_state = f"{query} [attached image: {names}]".strip()
     # Per-turn state. CRITICAL: explicitly reset every retrieval/generation
     # field so prior-turn chunks don't leak through the LangGraph checkpointer.
     # Without these resets, rerank_node reads `merged_results` from the
@@ -1431,7 +1489,17 @@ async def query_with_session_events(
     query_for_state = query
     if images:
         names = ", ".join(img.name or "image" for img in images)
-        query_for_state = f"{query} [attached image: {names}]".strip()
+        # Make tool SELECTION (triage/reasoner) image-aware, not just the final
+        # generator: describe the image once and splice it into the query. Falls
+        # back to the bare marker when no vision model / description available.
+        _img_ctx = await _image_context(vision_llm, llm, images)
+        if _img_ctx:
+            query_for_state = (
+                f"{query}\n\nIMAGE CONTEXT (attached {names}, transcribed by the "
+                f"vision model): {_img_ctx}"
+            ).strip()
+        else:
+            query_for_state = f"{query} [attached image: {names}]".strip()
     initial: dict = {
         "query": query_for_state,
         "user_id": user_id,

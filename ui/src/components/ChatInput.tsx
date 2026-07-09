@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, type KeyboardEvent, type ClipboardEvent, type DragEvent, type ChangeEvent } from "react";
 import { IconSend, IconClose } from "./icons";
+import Lightbox from "./Lightbox";
 
 // A pending (not-yet-sent) image attachment held in the composer.
 //   - `dataUrl` drives the thumbnail + the optimistic transcript render
@@ -33,6 +34,8 @@ export default function ChatInput({ onSend, disabled }: Props) {
   const [value, setValue] = useState("");
   const [images, setImages] = useState<PendingImage[]>([]);
   const [dragging, setDragging] = useState(false);
+  // Which pending image (if any) is open in the full-screen preview.
+  const [preview, setPreview] = useState<PendingImage | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -130,7 +133,15 @@ export default function ChatInput({ onSend, disabled }: Props) {
         <div className="input-thumbs">
           {images.map((img, i) => (
             <div className="input-thumb" key={`${img.name}-${i}`}>
-              <img src={img.dataUrl} alt={img.name || `attachment ${i + 1}`} />
+              <button
+                type="button"
+                className="input-thumb-open"
+                onClick={() => setPreview(img)}
+                aria-label={`Preview ${img.name || `attachment ${i + 1}`}`}
+                title="Click to enlarge"
+              >
+                <img src={img.dataUrl} alt={img.name || `attachment ${i + 1}`} />
+              </button>
               <button
                 type="button"
                 className="input-thumb-remove"
@@ -193,6 +204,13 @@ export default function ChatInput({ onSend, disabled }: Props) {
         <span><kbd>⌘</kbd>+<kbd>K</kbd> focus</span>
         <span>📎 / paste / drop image</span>
       </div>
+      {preview && (
+        <Lightbox
+          src={preview.dataUrl}
+          alt={preview.name || "attachment"}
+          onClose={() => setPreview(null)}
+        />
+      )}
     </div>
   );
 }

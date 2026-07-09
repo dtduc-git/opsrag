@@ -5,6 +5,7 @@ import ThinkingProgress, { type ProgressStep, type CacheHitInfo } from "./Thinki
 import TimeseriesChart, { type TimeseriesChartProps } from "./TimeseriesChart";
 import InvestigationPlan, { type InvestigationPlanProps } from "./InvestigationPlan";
 import DiagramComponent, { type DiagramData } from "./DiagramComponent";
+import Lightbox from "./Lightbox";
 import { postFeedback, postCorrection } from "../api";
 
 // — generic envelope for backend-emitted UI components. Today
@@ -494,6 +495,8 @@ function FeedbackButtons({
 
 export default function ChatMessage({ msg, ctx }: { msg: Message; ctx?: ChatMessageContext }) {
   const isUser = msg.role === "user";
+  // data: URL of the attached image currently open in the full-screen preview.
+  const [preview, setPreview] = useState<string | null>(null);
 
   const authorLabel = displayAuthorLabel(msg, ctx);
   const authorInitial = displayAuthorInitial(msg, ctx);
@@ -551,12 +554,20 @@ export default function ChatMessage({ msg, ctx }: { msg: Message; ctx?: ChatMess
         {isUser && msg.images && msg.images.length > 0 && (
           <div className="msg-images">
             {msg.images.map((img, i) => (
-              <img
+              <button
                 key={i}
-                className="msg-image"
-                src={img.dataUrl}
-                alt={`attached image ${i + 1}`}
-              />
+                type="button"
+                className="msg-image-btn"
+                onClick={() => setPreview(img.dataUrl)}
+                aria-label={`Enlarge attached image ${i + 1}`}
+                title="Click to enlarge"
+              >
+                <img
+                  className="msg-image"
+                  src={img.dataUrl}
+                  alt={`attached image ${i + 1}`}
+                />
+              </button>
             ))}
           </div>
         )}
@@ -631,6 +642,9 @@ export default function ChatMessage({ msg, ctx }: { msg: Message; ctx?: ChatMess
           </>
         )}
       </div>
+      {preview && (
+        <Lightbox src={preview} alt="attached image" onClose={() => setPreview(null)} />
+      )}
     </div>
   );
 }

@@ -2520,38 +2520,66 @@ svg:not([width]):not([height]) {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
-/* Pending-attachment thumbnail chips (above the composer). */
+/* Pending-attachment thumbnail chips — laid out above the composer in a
+   wrapping row so multiple images breathe instead of cramming one corner. */
 .input-thumbs {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 0 4px 8px;
+  gap: 10px;
+  padding: 2px 4px 12px;
 }
 .input-thumb {
   position: relative;
-  width: 56px; height: 56px;
-  border-radius: var(--r-sm);
-  overflow: hidden;
-  border: 1px solid var(--line-2);
+  width: 64px; height: 64px;
+  border-radius: var(--r-md);
+  overflow: visible;
 }
-.input-thumb img {
+/* The clickable preview surface — a button so it's keyboard-focusable.
+   The rounded corners + border + clip live here (not on .input-thumb) so
+   the ✕ overlay can sit slightly outside the frame without being clipped. */
+.input-thumb-open {
+  display: block;
+  width: 100%; height: 100%;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--bg-3);
+  cursor: zoom-in;
+  box-shadow: var(--shadow-1);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.input-thumb-open:hover { border-color: var(--accent); }
+.input-thumb-open:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.input-thumb-open img {
   width: 100%; height: 100%;
   object-fit: cover;
   display: block;
 }
 .input-thumb-remove {
   position: absolute;
-  top: 2px; right: 2px;
-  width: 18px; height: 18px;
+  top: -6px; right: -6px;
+  width: 20px; height: 20px;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
+  background: var(--fg);
+  color: var(--bg);
+  border: 2px solid var(--bg-2);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  cursor: pointer;
+  transition: background var(--t-fast), transform var(--t-fast);
 }
-.input-thumb-remove svg { width: 11px; height: 11px; }
-.input-thumb-remove:hover { background: rgba(0, 0, 0, 0.8); }
+.input-thumb-remove svg { width: 10px; height: 10px; }
+.input-thumb-remove:hover { background: var(--accent); transform: scale(1.08); }
+.input-thumb-remove:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
 
 /* User-message attached image thumbnails (in the transcript). */
 .msg-images {
@@ -2560,12 +2588,78 @@ svg:not([width]):not([height]) {
   gap: 8px;
   margin-top: 8px;
 }
+/* Button wrapper makes the transcript image click/keyboard-openable. */
+.msg-image-btn {
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--bg-3);
+  cursor: zoom-in;
+  line-height: 0;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.msg-image-btn:hover { border-color: var(--accent); }
+.msg-image-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
 .msg-image {
+  display: block;
   max-height: 120px;
   max-width: 220px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--line-2);
   object-fit: cover;
+}
+
+/* ============================================================
+   LIGHTBOX (Lightbox.tsx) — full-screen image preview overlay
+   Portaled onto document.body; dims the page and centers the
+   image at up to 90vw/90vh with object-fit: contain.
+   ============================================================ */
+.lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(2px);
+  cursor: zoom-out;
+  animation: lightbox-fade var(--t-fast);
+}
+@keyframes lightbox-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.lightbox-img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+.lightbox-close {
+  position: fixed;
+  top: 20px; right: 24px;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.lightbox-close svg { width: 18px; height: 18px; }
+.lightbox-close:hover { background: rgba(255, 255, 255, 0.24); }
+.lightbox-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ============================================================

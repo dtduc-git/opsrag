@@ -24,21 +24,22 @@ def _read(repo_root: Path, rel: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_registry_has_23_integrations(repo_root: Path) -> None:
+def test_registry_has_27_integrations(repo_root: Path) -> None:
     """The MCP registry is the single source of truth for the connector
-    count; both docs must match it. Keeps doc claims registry-accurate."""
+    count; both docs must match it. Keeps doc claims registry-accurate.
+    (27 = 23 base + the 4 Billing connectors: gcp/datadog/kubecost/mongodb.)"""
     src = _read(repo_root, "opsrag/mcp/registry.py")
     # Each integration entry declares a top-level ``name="..."`` field.
     names = re.findall(r'^        name="([^"]+)"', src, flags=re.MULTILINE)
-    assert len(set(names)) == 23, f"expected 23 registry integrations, got {sorted(set(names))}"
+    assert len(set(names)) == 27, f"expected 27 registry integrations, got {sorted(set(names))}"
 
 
 @pytest.mark.parametrize("rel", ["README.md", "docs/architecture.md"])
 def test_mcp_count_matches_registry(repo_root: Path, rel: str) -> None:
-    """README and docs/architecture.md must both cite 23 MCP connectors,
-    never the stale 20."""
+    """README and docs/architecture.md must both cite 27 MCP connectors,
+    never the stale 20/23."""
     text = _read(repo_root, rel)
-    assert "23" in text, f"{rel} should cite the registry-accurate 23 MCP connectors"
+    assert "27" in text, f"{rel} should cite the registry-accurate 27 MCP connectors"
     # No stray "20 MCP" / "(20, gated)" style stale counts.
     assert not re.search(r"\b20\s+(named\s+)?MCP", text), f"{rel} still cites a stale 20 MCP count"
     assert "(20, gated)" not in text, f"{rel} still has the stale (20, gated) box"

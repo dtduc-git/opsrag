@@ -52,7 +52,7 @@ surface, the `DeploymentContext` boundary, and the deployment options.
        v                    v                   v                 v
   +----------+      +---------------+    +-------------+   +---------------+
   | Agent    |      | Ingestion     |    | Providers   |   | MCP registry  |
-  | graph    |      | pipeline      |    | (factory)   |   | (23, gated)   |
+  | graph    |      | pipeline      |    | (factory)   |   | (27, gated)   |
   | (LangGr) |      | SCM->parse->  |    | LLM/embed/  |   | config-gated  |
   |          |      | chunk->embed  |    | vector/graph|   | tool exposure |
   +----+-----+      +-------+-------+    +------+------+   +-------+-------+
@@ -96,7 +96,7 @@ Top-level packages (under `opsrag/`):
 - `factory.py` + `config.py` + `context.py` + `environments.py` -
   provider wiring, the Pydantic settings root, the operator-supplied
   `DeploymentContext`, and the multi-environment registry resolver.
-- `mcp/` + `mcp_server/` - the 23 MCP integrations, their registry, and
+- `mcp/` + `mcp_server/` - the 27 MCP integrations, their registry, and
   the gating that decides which tools the agent may see.
 - `interfaces/` - the Protocol interfaces every provider implements
   (the plugin contracts).
@@ -294,7 +294,7 @@ even with `knowledge_graph.provider: none`.
 
 ## Config-gated MCP tools
 
-opsrag ships 23 named MCP integrations (live infrastructure surfaces
+opsrag ships 27 named MCP integrations (live infrastructure surfaces
 such as Kubernetes, metrics, logs, SCM, incident trackers, cloud
 inventory, and a read-through tool cache). The registry at
 `opsrag/mcp/registry.py` is the single source of truth: each entry
