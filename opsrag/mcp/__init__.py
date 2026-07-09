@@ -12,6 +12,10 @@ shape from this package.
 """
 from opsrag.mcp.aws import AWS_TOOLS, AWSMCPError
 from opsrag.mcp.azure import AZURE_TOOLS, AzureMCPError
+from opsrag.mcp.billing_datadog import BILLING_DATADOG_TOOLS, DatadogBillingMCPError
+from opsrag.mcp.billing_gcp import BILLING_GCP_TOOLS, BillingGcpMCPError
+from opsrag.mcp.billing_kubecost import BILLING_KUBECOST_TOOLS, KubecostMCPError
+from opsrag.mcp.billing_mongodb_atlas import BILLING_ATLAS_TOOLS, AtlasBillingMCPError
 from opsrag.mcp.cloudflare import (
     CLOUDFLARE_TOOLS,
     MCPCloudflareError,
@@ -72,6 +76,10 @@ ALL_MCP_TOOLS: list[MCPTool] = (
     + list(SENTRY_TOOLS)
     + list(SPLUNK_TOOLS)
     + list(AWS_TOOLS)
+    + list(BILLING_GCP_TOOLS)
+    + list(BILLING_DATADOG_TOOLS)
+    + list(BILLING_KUBECOST_TOOLS)
+    + list(BILLING_ATLAS_TOOLS)
     + list(CLOUDWATCH_TOOLS)
     + list(GCP_TOOLS)
     + list(STACKDRIVER_TOOLS)
@@ -107,6 +115,14 @@ __all__ = [
     "SplunkMCPError",
     "AWS_TOOLS",
     "AWSMCPError",
+    "BILLING_GCP_TOOLS",
+    "BillingGcpMCPError",
+    "BILLING_DATADOG_TOOLS",
+    "DatadogBillingMCPError",
+    "BILLING_KUBECOST_TOOLS",
+    "KubecostMCPError",
+    "BILLING_ATLAS_TOOLS",
+    "AtlasBillingMCPError",
     "CLOUDWATCH_TOOLS",
     "CloudWatchMCPError",
     "GCP_TOOLS",

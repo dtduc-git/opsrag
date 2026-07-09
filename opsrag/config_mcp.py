@@ -36,6 +36,10 @@ from pydantic import BaseModel, ConfigDict, Field
 KNOWN_MCP_NAMES: tuple[str, ...] = (
     "aws",
     "azure",
+    "billing_datadog",
+    "billing_gcp",
+    "billing_kubecost",
+    "billing_mongodb_atlas",
     "cloudflare",
     "cloudwatch",
     "code",
@@ -99,6 +103,48 @@ class AWSMCPConfig(MCPConfigBlock):
     (AWS_PROFILE / AWS_REGION / IRSA)."""
 
     name: Literal["aws"] = "aws"
+
+
+# ---------------------------------------------------------------------------
+# Billing category — read-only cost/spend connectors. Sensitive spend data, so
+# every billing connector ships `restricted: True` (admin-only unless granted a
+# billing role via auth.role_connectors). See opsrag.auth.connector_perms.
+# ---------------------------------------------------------------------------
+class BillingDatadogMCPConfig(MCPConfigBlock):
+    """Datadog cost/usage tools (Usage Metering API). Reuses the Datadog creds
+    (DD_API_KEY/DD_APP_KEY/DD_SITE); the APP key needs `usage_read`+`billing_read`
+    scope. Figures are estimates (~72h lag)."""
+
+    name: Literal["billing_datadog"] = "billing_datadog"
+    restricted: bool = True
+
+
+class BillingGcpMCPConfig(MCPConfigBlock):
+    """GCP billing/cost tools over the standard Cloud Billing BigQuery export
+    (`gcp_billing_export_v1_*`). Auth via ADC / Workload Identity
+    (bigquery.jobUser + dataViewer on the export dataset). Config via
+    OPSRAG_GCP_BILLING_TABLE (+ _PROJECT / _MAX_BYTES / _ENV_MAP)."""
+
+    name: Literal["billing_gcp"] = "billing_gcp"
+    restricted: bool = True
+
+
+class BillingKubecostMCPConfig(MCPConfigBlock):
+    """Kubecost/OpenCost cost-allocation tools (in-cluster `/model/*` HTTP API,
+    per-namespace/controller/label cost). Config via OPSRAG_KUBECOST_URL; no
+    auth (in-cluster, behind the frontend)."""
+
+    name: Literal["billing_kubecost"] = "billing_kubecost"
+    restricted: bool = True
+
+
+class BillingMongodbAtlasMCPConfig(MCPConfigBlock):
+    """MongoDB Atlas billing tools (Atlas Admin API v2 invoices). Auth via an
+    org-scoped Billing-Viewer OAuth2 service account (OPSRAG_ATLAS_CLIENT_ID/
+    _SECRET) or API keys; OPSRAG_ATLAS_ORG_ID required."""
+
+    name: Literal["billing_mongodb_atlas"] = "billing_mongodb_atlas"
+    restricted: bool = True
 
 
 class CloudWatchMCPConfig(MCPConfigBlock):
@@ -260,6 +306,10 @@ class ToolCacheMCPConfig(MCPConfigBlock):
 MCP_CONFIG_TYPES: dict[str, type[MCPConfigBlock]] = {
     "aws": AWSMCPConfig,
     "azure": AzureMCPConfig,
+    "billing_datadog": BillingDatadogMCPConfig,
+    "billing_gcp": BillingGcpMCPConfig,
+    "billing_kubecost": BillingKubecostMCPConfig,
+    "billing_mongodb_atlas": BillingMongodbAtlasMCPConfig,
     "cloudflare": CloudflareMCPConfig,
     "cloudwatch": CloudWatchMCPConfig,
     "code": CodeMCPConfig,

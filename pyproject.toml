@@ -94,6 +94,11 @@ cohere = ["cohere>=5.13"]
 # request-rate window + login lockout across replicas via redis.asyncio.
 # Optional — the default "memory" backend needs none of it.
 redis = ["redis>=5"]
+# Billing connectors (cost/spend, "Billing" category). Only `billing_gcp` needs
+# an SDK (BigQuery, for the Cloud Billing export); billing_datadog / _kubecost /
+# _mongodb_atlas use httpx (already a core dep). Lazy-imported so a disabled
+# connector never loads the SDK.
+billing = ["google-cloud-bigquery>=3.25"]
 # Mem0 per-service operational memory (provider="mem0"). Reuses the project's
 # existing Qdrant + configured LLM/embedder; no separate datastore.
 mem0 = ["mem0ai>=0.1"]

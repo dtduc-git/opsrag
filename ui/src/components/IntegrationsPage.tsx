@@ -9,6 +9,7 @@ const CATEGORY_ORDER = [
   "Observability",
   "Incident Management",
   "Cloud",
+  "Billing",
   "Kubernetes & Infra",
   "Source & Code",
   "Knowledge",

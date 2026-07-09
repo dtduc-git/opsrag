@@ -50,7 +50,7 @@ COPY pyproject.toml uv.lock README.md ./
 # discord + teams ship in the image so the published image supports every
 # channel; the SDKs are lazy-imported, so a disabled channel never loads them.
 # Telegram needs no extra (httpx is a core dep).
-ARG OPSRAG_EXTRAS="fastembed,pgvector,vertex,bedrock,ner,cohere,mem0,login,litellm,discord,teams"
+ARG OPSRAG_EXTRAS="fastembed,pgvector,vertex,bedrock,ner,cohere,mem0,login,litellm,discord,teams,billing"
 # Build the `--extra X --extra Y ...` flags from the comma list with a POSIX
 # loop (the RUN shell is /bin/sh = dash, which lacks bash's ${var//,/ } pattern
 # substitution -- that produced a "Bad substitution" error).

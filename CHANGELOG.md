@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Billing category — read-only cost/spend connectors.** A new "Billing"
+  connector category so the agent can answer FinOps questions ("what did we
+  spend on Vertex AI", "which namespace drives GKE cost", "are we over budget").
+  Ships four connectors: **`billing_gcp`** (real spend via the Cloud Billing
+  BigQuery export — summary, by-service/project/label, trend, anomalies; needs
+  the `billing` extra + `bigquery.jobUser`/`dataViewer`), **`billing_datadog`**
+  (Usage Metering API — estimated/historical/projected cost, hourly usage,
+  cost-by-tag; reuses `DD_*` keys, APP key needs `usage_read`+`billing_read`),
+  **`billing_kubecost`** (in-cluster Kubecost `/model/*` allocation/assets),
+  and **`billing_mongodb_atlas`** (Atlas Admin API invoices + per-project cost).
+  Every billing connector ships **`restricted: true`** (admin-only unless
+  granted a `finops` role via `auth.role_connectors`), pairing with the
+  per-connector RBAC. All read-only, all with offline `build_fake()` backends.
+
 - **Per-connector RBAC (permission control for MCP connectors).** Admins can now
   restrict which users may use which live connectors, on top of the existing
   functional scopes. A connector flagged `restricted: true` (under `mcp.<name>`)

@@ -33,7 +33,7 @@ auth:
   # are set in the "Users & Roles" admin UI, not here.
   # role_connectors:
   #   sre:     [datadog, kubernetes, elasticsearch]
-  #   finance: [gcp]
+  #   finops:  [billing_gcp, billing_datadog, billing_kubecost, billing_mongodb_atlas]
 
 # --- Cloud model bundle (optional shortcut) ----------------------------------
 # Set ONE provider to get sane per-purpose model defaults (reason / tool_call /
@@ -331,6 +331,13 @@ channels:
 mcp:
   aws:           { enabled: false }   # AWS read-only (EC2/EKS/ECS/CloudWatch/S3/Cost + aws_read)
   azure:         { enabled: false }   # Azure read-only (Monitor/AKS/Resource Graph)
+  # --- Billing category (cost/spend). Read-only. Ship `restricted: true` -----
+  # (admin/finops only) -- grant via auth.role_connectors below. See env vars
+  # for each under the "Billing connectors" note after this block.
+  billing_gcp:           { enabled: false, restricted: true }   # GCP cost via BigQuery billing export
+  billing_datadog:       { enabled: false, restricted: true }   # Datadog usage/cost (reuses DD_* keys; APP key needs usage_read+billing_read)
+  billing_kubecost:      { enabled: false, restricted: true }   # Kubecost K8s cost allocation (in-cluster)
+  billing_mongodb_atlas: { enabled: false, restricted: true }   # MongoDB Atlas invoices/cost
   cloudflare:    { enabled: false }   # Cloudflare zones / DNS / Zero-Trust
   code:          { enabled: false }   # code search lane
   datadog:       { enabled: false }   # Datadog metrics / monitors / APM
@@ -349,6 +356,15 @@ mcp:
   slack:         { enabled: false }   # Slack search tool
   splunk:        { enabled: false }   # Splunk SPL search (read-only)
   tool_cache:    { enabled: false }   # cross-tool result cache
+
+# --- Billing connectors: env vars (secrets come from env, never inline) ------
+# billing_gcp     -- ADC/Workload Identity (bigquery.jobUser + dataViewer on the
+#                    export dataset). OPSRAG_GCP_BILLING_TABLE=proj.dataset.gcp_billing_export_v1_*
+#                    (+ OPSRAG_GCP_BILLING_PROJECT / _MAX_BYTES / _ENV_MAP). Needs the `billing` extra.
+# billing_datadog -- reuses DD_API_KEY / DD_APP_KEY / DD_SITE (APP key scopes usage_read+billing_read).
+# billing_kubecost-- OPSRAG_KUBECOST_URL=http://kubecost-cost-analyzer.kubecost.svc.cluster.local:9090
+# billing_mongodb_atlas -- OPSRAG_ATLAS_ORG_ID + (OPSRAG_ATLAS_CLIENT_ID/_SECRET OAuth2 SA, or
+#                    OPSRAG_ATLAS_PUBLIC_KEY/_PRIVATE_KEY).
 
 # --- Multi-environment registry (kubernetes / prometheus / elasticsearch) -----
 # One OpsRAG instance can target N environments; the k8s / prometheus /

@@ -146,6 +146,10 @@
       "required": [
         "aws",
         "azure",
+        "billing_datadog",
+        "billing_gcp",
+        "billing_kubecost",
+        "billing_mongodb_atlas",
         "cloudflare",
         "cloudwatch",
         "code",
@@ -170,6 +174,78 @@
       ],
       "properties": {
         "aws": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretRef": {
+              "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
+            }
+          }
+        },
+        "billing_datadog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretRef": {
+              "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
+            }
+          }
+        },
+        "billing_gcp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretRef": {
+              "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
+            }
+          }
+        },
+        "billing_kubecost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretRef": {
+              "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
+            }
+          }
+        },
+        "billing_mongodb_atlas": {
           "type": "object",
           "additionalProperties": false,
           "required": [
