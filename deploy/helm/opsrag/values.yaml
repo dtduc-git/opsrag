@@ -326,10 +326,30 @@ mcp:
   aws:                  { enabled: false, secretRef: "" }
   azure:                { enabled: false, secretRef: "" }
   # Billing category — cost/spend connectors, restricted (admin/finops only).
-  billing_datadog:      { enabled: false, secretRef: "", restricted: true }
-  billing_gcp:          { enabled: false, secretRef: "", restricted: true }
-  billing_kubecost:     { enabled: false, secretRef: "", restricted: true }
-  billing_mongodb_atlas: { enabled: false, secretRef: "", restricted: true }
+  # All deployment config is set HERE (rendered into config.yaml) — nothing is
+  # hardcoded in the app. Uncomment + fill the fields when you enable one.
+  billing_datadog:      { enabled: false, secretRef: "", restricted: true }   # reuses DD_API_KEY/DD_APP_KEY/DD_SITE
+  billing_gcp:
+    enabled: false
+    restricted: true
+    secretRef: ""
+    # table: "my-proj.billing_dataset.gcp_billing_export_v1_*"   # REQUIRED — the standard Cloud Billing BQ export
+    # project: "my-proj"           # BQ project to run query jobs in (default: the table's project)
+    # max_bytes: 40000000000       # per-query maximum_bytes_billed guard
+    # env_map: { my-prod-project: prd, my-dev-project: dev }   # project id -> env label (optional)
+  billing_kubecost:
+    enabled: false
+    restricted: true
+    secretRef: ""
+    # url: "http://kubecost-cost-analyzer.kubecost.svc.cluster.local:9090"   # REQUIRED
+    # timeout_seconds: 30
+  billing_mongodb_atlas:
+    enabled: false
+    restricted: true
+    secretRef: ""
+    # org_id: "<atlas-org-id>"     # REQUIRED
+    # client_id_env: OPSRAG_ATLAS_CLIENT_ID          # env-var NAMES (secret VALUES stay in secrets)
+    # client_secret_env: OPSRAG_ATLAS_CLIENT_SECRET
   cloudflare:           { enabled: false, secretRef: "" }
   cloudwatch:    { enabled: false, secretRef: "" }
   code:          { enabled: false, secretRef: "" }

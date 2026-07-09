@@ -216,15 +216,13 @@
             "enabled"
           ],
           "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "secretRef": {
-              "type": "string"
-            },
-            "restricted": {
-              "type": "boolean"
-            }
+            "enabled": { "type": "boolean" },
+            "secretRef": { "type": "string" },
+            "restricted": { "type": "boolean" },
+            "table": { "type": "string" },
+            "project": { "type": "string" },
+            "max_bytes": { "type": "integer" },
+            "env_map": { "type": "object", "additionalProperties": { "type": "string" } }
           }
         },
         "billing_kubecost": {
@@ -234,15 +232,11 @@
             "enabled"
           ],
           "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "secretRef": {
-              "type": "string"
-            },
-            "restricted": {
-              "type": "boolean"
-            }
+            "enabled": { "type": "boolean" },
+            "secretRef": { "type": "string" },
+            "restricted": { "type": "boolean" },
+            "url": { "type": "string" },
+            "timeout_seconds": { "type": "number" }
           }
         },
         "billing_mongodb_atlas": {
@@ -252,15 +246,14 @@
             "enabled"
           ],
           "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "secretRef": {
-              "type": "string"
-            },
-            "restricted": {
-              "type": "boolean"
-            }
+            "enabled": { "type": "boolean" },
+            "secretRef": { "type": "string" },
+            "restricted": { "type": "boolean" },
+            "org_id": { "type": "string" },
+            "client_id_env": { "type": "string" },
+            "client_secret_env": { "type": "string" },
+            "public_key_env": { "type": "string" },
+            "private_key_env": { "type": "string" }
           }
         },
         "azure": {

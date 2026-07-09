@@ -50,11 +50,30 @@ def test_month_validation():
     assert bg._prev_month("202601") == "202512"
 
 
-def test_table_requires_env(monkeypatch):
+def test_table_requires_config(monkeypatch):
     monkeypatch.delenv("OPSRAG_GCP_BILLING_TABLE", raising=False)
+    bg.bind(None)
     with pytest.raises(bg.BillingGcpMCPError) as ei:
         bg._table()
     assert ei.value.reason == "bad_config"
+
+
+def test_config_block_drives_config_over_env(monkeypatch):
+    """The bound config block (from Helm values) is the source of truth; env
+    vars are only a fallback. Nothing deployment-specific is hardcoded."""
+    from types import SimpleNamespace
+    monkeypatch.delenv("OPSRAG_GCP_BILLING_TABLE", raising=False)
+    bg.bind(SimpleNamespace(
+        table="cfg-proj.ds.gcp_billing_export_v1_*", project="cfg-proj",
+        env_map={"cfg-proj": "prd"}, max_bytes=123456,
+    ))
+    try:
+        assert bg._table() == "`cfg-proj.ds.gcp_billing_export_v1_*`"
+        assert bg._bq_project() == "cfg-proj"
+        assert bg._max_bytes() == 123456
+        assert bg._env_map() == {"cfg-proj": "prd"}
+    finally:
+        bg.bind(None)
 
 
 # --- per-tool fake calls --------------------------------------------------

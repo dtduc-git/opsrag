@@ -66,22 +66,37 @@ class KubecostMCPError(Exception):
         self.reason = reason
 
 
-# --- config (env) ----------------------------------------------------------
+# --- config (Helm values via the bound config block; env vars are fallback) --
+_BOUND: Any | None = None
+
+
+def bind(cfg: Any | None = None) -> None:
+    """Register the billing_kubecost config block (or None to clear)."""
+    global _BOUND
+    _BOUND = cfg
+
 
 def _base_url() -> str:
-    raw = (os.environ.get("OPSRAG_KUBECOST_URL") or "").strip()
+    raw = (str(getattr(_BOUND, "url", None) or "").strip()
+           if _BOUND is not None else "")
+    if not raw:
+        raw = (os.environ.get("OPSRAG_KUBECOST_URL") or "").strip()
     if not raw:
         raise KubecostMCPError(
-            "OPSRAG_KUBECOST_URL is not set. Point it at the Kubecost "
-            "cost-analyzer, e.g. "
-            "`http://kubecost-cost-analyzer.kubecost.svc.cluster.local:9090` "
-            "(in-cluster) or `http://localhost:9090` (port-forwarded).",
+            "billing_kubecost url is not configured. Set `mcp.billing_kubecost.url` "
+            "in Helm values (or OPSRAG_KUBECOST_URL) to the Kubecost cost-analyzer, "
+            "e.g. `http://kubecost-cost-analyzer.kubecost.svc.cluster.local:9090`.",
             reason="bad_config",
         )
     return raw.rstrip("/")
 
 
 def _timeout() -> float:
+    if _BOUND is not None and getattr(_BOUND, "timeout_seconds", None):
+        try:
+            return float(_BOUND.timeout_seconds)
+        except (TypeError, ValueError):
+            pass
     try:
         return float(os.environ.get("OPSRAG_KUBECOST_TIMEOUT") or _DEFAULT_TIMEOUT_S)
     except (TypeError, ValueError):

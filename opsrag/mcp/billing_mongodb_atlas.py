@@ -82,28 +82,48 @@ class AtlasBillingMCPError(Exception):
         self.status = status
 
 
-# --- config (env; read at call time) ---------------------------------------
+# --- config (Helm values via the bound config block; env vars are fallback) --
+#
+# `org_id` + the credential env-var NAMES come from the config block (Helm
+# values -> config.yaml). The credential VALUES are always read from those env
+# vars (never from values), so secrets stay in secrets.
+_BOUND: Any | None = None
+
+
+def bind(cfg: Any | None = None) -> None:
+    """Register the billing_mongodb_atlas config block (or None to clear)."""
+    global _BOUND
+    _BOUND = cfg
+
+
+def _env_name(field: str, default: str) -> str:
+    return str(getattr(_BOUND, field, None) or default) if _BOUND is not None else default
+
 
 def _org_id() -> str:
-    org = (os.environ.get("OPSRAG_ATLAS_ORG_ID") or "").strip()
+    org = (str(getattr(_BOUND, "org_id", None) or "").strip()
+           if _BOUND is not None else "")
+    if not org:
+        org = (os.environ.get("OPSRAG_ATLAS_ORG_ID") or "").strip()
     if not org:
         raise AtlasBillingMCPError(
-            "OPSRAG_ATLAS_ORG_ID is not set. Point it at the MongoDB Atlas "
-            "organization id whose invoices you want to read.",
+            "billing_mongodb_atlas org_id is not configured. Set "
+            "`mcp.billing_mongodb_atlas.org_id` in Helm values (or "
+            "OPSRAG_ATLAS_ORG_ID) to the Atlas organization id.",
             reason="bad_config",
         )
     return org
 
 
 def _oauth_creds() -> tuple[str, str] | None:
-    cid = (os.environ.get("OPSRAG_ATLAS_CLIENT_ID") or "").strip()
-    csec = (os.environ.get("OPSRAG_ATLAS_CLIENT_SECRET") or "").strip()
+    cid = (os.environ.get(_env_name("client_id_env", "OPSRAG_ATLAS_CLIENT_ID")) or "").strip()
+    csec = (os.environ.get(_env_name("client_secret_env", "OPSRAG_ATLAS_CLIENT_SECRET")) or "").strip()
     return (cid, csec) if cid and csec else None
 
 
 def _api_keys() -> tuple[str, str] | None:
-    pub = (os.environ.get("OPSRAG_ATLAS_PUBLIC_KEY") or "").strip()
-    priv = (os.environ.get("OPSRAG_ATLAS_PRIVATE_KEY") or "").strip()
+    pub = (os.environ.get(_env_name("public_key_env", "OPSRAG_ATLAS_PUBLIC_KEY")) or "").strip()
+    priv = (os.environ.get(_env_name("private_key_env", "OPSRAG_ATLAS_PRIVATE_KEY")) or "").strip()
     return (pub, priv) if pub and priv else None
 
 

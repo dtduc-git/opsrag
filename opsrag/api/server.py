@@ -499,6 +499,24 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 _log.warning("elasticsearch MCP bind failed: %s", exc)
 
+        # -- Billing connectors: bind each enabled block (Helm values ->
+        #    config.mcp.<name>) so table/project/url/org_id are operator-set,
+        #    never hardcoded. Env-var fallbacks apply when a field is unset.
+        _mcp_cfg = getattr(cfg, "mcp", {}) or {}
+        for _bname, _bmod in (
+            ("billing_gcp", "opsrag.mcp.billing_gcp"),
+            ("billing_kubecost", "opsrag.mcp.billing_kubecost"),
+            ("billing_mongodb_atlas", "opsrag.mcp.billing_mongodb_atlas"),
+        ):
+            _block = _mcp_cfg.get(_bname)
+            if _block is not None and getattr(_block, "enabled", False):
+                try:
+                    import importlib
+                    importlib.import_module(_bmod).bind(_block)
+                    _log.info("%s MCP config bound", _bname)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("%s MCP bind failed: %s", _bname, exc)
+
         # -- Cloudflare MCP (LIVE API surface) ----------------------
         # Token source priority:
         #   1. CLOUDFLARE_API_KEY env (prod path -- ExternalSecret from

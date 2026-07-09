@@ -380,10 +380,10 @@ mcp:
 #     prd:
 #       kubernetes: { mode: gke, project: my-proj, location: us-west1, name: prod }
 #       # (a) single ES cluster for this env:
-#       # elasticsearch: { reach: port_forward, namespace: eck-infra, service: eck-infra-logs-es-http, api_key_env: ES_PRD_KEY }
+#       # elasticsearch: { reach: port_forward, namespace: logging, service: app-logs-es-http, api_key_env: ES_PRD_KEY }
 #       # (b) multiple named ES clusters for this env:
 #       elasticsearch:
-#         default: infra
+#         default: app-logs
 #         clusters:
-#           infra:       { reach: port_forward, namespace: eck-infra,       service: eck-infra-logs-es-http,       api_key_env: ES_PRD_INFRA_KEY,       index_pattern: "app-logs-*",         usage_note: "Container/app logs for most services." }
-#           integration: { reach: port_forward, namespace: eck-integration, service: eck-integration-logs-es-http, api_key_env: ES_PRD_INTEGRATION_KEY, index_pattern: "integration-logs-*", usage_note: "Integration pipeline logs." }
+#           app-logs:     { reach: port_forward, namespace: logging,     service: app-logs-es-http,     api_key_env: ES_PRD_APPLOGS_KEY,     index_pattern: "app-logs-*",         usage_note: "Container/app logs for most services." }
+#           integration:  { reach: port_forward, namespace: integration, service: integration-es-http,  api_key_env: ES_PRD_INTEGRATION_KEY, index_pattern: "integration-logs-*", usage_note: "Integration pipeline logs." }

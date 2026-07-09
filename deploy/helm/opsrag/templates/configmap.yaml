@@ -135,6 +135,23 @@ data:
         {{- if $cfg.restricted }}
         restricted: {{ $cfg.restricted }}
         {{- end }}
+        {{- /* Optional per-connector config passthrough (e.g. the Billing
+               connectors' table/project/url/org_id). Operator-set via values;
+               nothing connector-specific is hardcoded in the app. */}}
+        {{- range $ck := (list "table" "project" "url" "org_id" "client_id_env" "client_secret_env" "public_key_env" "private_key_env") }}
+        {{- with (index $cfg $ck) }}
+        {{ $ck }}: {{ . | quote }}
+        {{- end }}
+        {{- end }}
+        {{- range $nk := (list "max_bytes" "timeout_seconds") }}
+        {{- with (index $cfg $nk) }}
+        {{ $nk }}: {{ . }}
+        {{- end }}
+        {{- end }}
+        {{- with $cfg.env_map }}
+        env_map:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
       {{- end }}
     {{- /* channels: render each channel's enabled flag so flipping a channel
            in values flips the in-app adapter. Token *_env names + allowlists +

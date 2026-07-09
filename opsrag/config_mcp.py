@@ -122,29 +122,50 @@ class BillingDatadogMCPConfig(MCPConfigBlock):
 class BillingGcpMCPConfig(MCPConfigBlock):
     """GCP billing/cost tools over the standard Cloud Billing BigQuery export
     (`gcp_billing_export_v1_*`). Auth via ADC / Workload Identity
-    (bigquery.jobUser + dataViewer on the export dataset). Config via
-    OPSRAG_GCP_BILLING_TABLE (+ _PROJECT / _MAX_BYTES / _ENV_MAP)."""
+    (bigquery.jobUser + dataViewer on the export dataset). All deployment
+    config is set here (from Helm values -> config.yaml); nothing is hardcoded.
+    Env-var fallbacks (OPSRAG_GCP_BILLING_*) apply only when a field is unset."""
 
     name: Literal["billing_gcp"] = "billing_gcp"
     restricted: bool = True
+    # Fully-qualified wildcard export table, e.g.
+    # `my-proj.billing_dataset.gcp_billing_export_v1_*`.
+    table: str | None = None
+    # BQ project to run query jobs in (billed for the scan). Defaults to the
+    # table's leading project segment when unset.
+    project: str | None = None
+    # Optional {project_id: env_label} map to tag the by-project breakdown.
+    env_map: dict[str, str] = Field(default_factory=dict)
+    # Per-query maximum_bytes_billed guard (bytes). None -> the 40 GB default.
+    max_bytes: int | None = None
 
 
 class BillingKubecostMCPConfig(MCPConfigBlock):
     """Kubecost/OpenCost cost-allocation tools (in-cluster `/model/*` HTTP API,
-    per-namespace/controller/label cost). Config via OPSRAG_KUBECOST_URL; no
-    auth (in-cluster, behind the frontend)."""
+    per-namespace/controller/label cost). No auth (in-cluster, behind the
+    frontend). `url` set via Helm values; env fallback OPSRAG_KUBECOST_URL."""
 
     name: Literal["billing_kubecost"] = "billing_kubecost"
     restricted: bool = True
+    # Kubecost base URL, e.g. http://kubecost-cost-analyzer.kubecost.svc:9090
+    url: str | None = None
+    timeout_seconds: float | None = None
 
 
 class BillingMongodbAtlasMCPConfig(MCPConfigBlock):
     """MongoDB Atlas billing tools (Atlas Admin API v2 invoices). Auth via an
-    org-scoped Billing-Viewer OAuth2 service account (OPSRAG_ATLAS_CLIENT_ID/
-    _SECRET) or API keys; OPSRAG_ATLAS_ORG_ID required."""
+    org-scoped Billing-Viewer OAuth2 service account or API keys (the *secret*
+    values come from the referenced env vars, never from values). `org_id` +
+    the auth env-var NAMES are set via Helm values; env fallbacks apply."""
 
     name: Literal["billing_mongodb_atlas"] = "billing_mongodb_atlas"
     restricted: bool = True
+    org_id: str | None = None
+    # Names of the env vars carrying the credentials (values stay in secrets).
+    client_id_env: str = "OPSRAG_ATLAS_CLIENT_ID"
+    client_secret_env: str = "OPSRAG_ATLAS_CLIENT_SECRET"
+    public_key_env: str = "OPSRAG_ATLAS_PUBLIC_KEY"
+    private_key_env: str = "OPSRAG_ATLAS_PRIVATE_KEY"
 
 
 class CloudWatchMCPConfig(MCPConfigBlock):

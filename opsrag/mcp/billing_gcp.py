@@ -61,35 +61,63 @@ class BillingGcpMCPError(Exception):
         self.reason = reason
 
 
-# --- config (env) ----------------------------------------------------------
+# --- config (Helm values via the bound config block; env vars are fallback) --
+#
+# `bind()` is called once at startup with the `mcp.billing_gcp` config block
+# (populated from Helm values -> config.yaml), so the table/project/env_map/
+# max_bytes are operator-configured, never hardcoded. Env vars only fill in
+# when a config field is unset, so a values-free / env-only deploy still works.
+_BOUND: Any | None = None
+
+
+def bind(cfg: Any | None = None) -> None:
+    """Register the billing_gcp config block (or None to clear)."""
+    global _BOUND
+    _BOUND = cfg
+
+
+def _cfg(field: str) -> Any:
+    return getattr(_BOUND, field, None) if _BOUND is not None else None
+
+
+def _raw_table() -> str:
+    return (str(_cfg("table") or "").strip()
+            or (os.environ.get("OPSRAG_GCP_BILLING_TABLE") or "").strip())
+
 
 def _table() -> str:
-    raw = (os.environ.get("OPSRAG_GCP_BILLING_TABLE") or "").strip()
+    raw = _raw_table()
     if not raw:
         raise BillingGcpMCPError(
-            "OPSRAG_GCP_BILLING_TABLE is not set. Point it at the standard "
-            "Cloud Billing BigQuery export, e.g. "
-            "`proj.dataset.gcp_billing_export_v1_*`.",
+            "billing_gcp table is not configured. Set `mcp.billing_gcp.table` "
+            "in Helm values (or OPSRAG_GCP_BILLING_TABLE) to the standard Cloud "
+            "Billing BigQuery export, e.g. `proj.dataset.gcp_billing_export_v1_*`.",
             reason="bad_config",
         )
     if not _TABLE_RE.match(raw.strip("`")):
         raise BillingGcpMCPError(
-            f"OPSRAG_GCP_BILLING_TABLE {raw!r} has unexpected characters.",
+            f"billing_gcp table {raw!r} has unexpected characters.",
             reason="bad_config",
         )
     return f"`{raw.strip('`')}`"
 
 
 def _bq_project() -> str | None:
-    proj = (os.environ.get("OPSRAG_GCP_BILLING_PROJECT") or "").strip()
+    proj = (str(_cfg("project") or "").strip()
+            or (os.environ.get("OPSRAG_GCP_BILLING_PROJECT") or "").strip())
     if proj:
         return proj
     # default: the table's leading project segment
-    raw = (os.environ.get("OPSRAG_GCP_BILLING_TABLE") or "").strip().strip("`")
+    raw = _raw_table().strip("`")
     return raw.split(".", 1)[0] if "." in raw else None
 
 
 def _max_bytes() -> int:
+    if _cfg("max_bytes"):
+        try:
+            return int(_cfg("max_bytes"))
+        except (TypeError, ValueError):
+            pass
     try:
         return int(os.environ.get("OPSRAG_GCP_BILLING_MAX_BYTES") or _DEFAULT_MAX_BYTES)
     except ValueError:
@@ -97,6 +125,9 @@ def _max_bytes() -> int:
 
 
 def _env_map() -> dict[str, str]:
+    cfg_map = _cfg("env_map")
+    if isinstance(cfg_map, dict) and cfg_map:
+        return {str(k): str(v) for k, v in cfg_map.items()}
     raw = (os.environ.get("OPSRAG_GCP_BILLING_ENV_MAP") or "").strip()
     if not raw:
         return {}
