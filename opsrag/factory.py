@@ -126,6 +126,12 @@ def resolve_vision_model(vision, llm_cfg) -> tuple[str, str] | None:
 
 
 def build_providers(config: OpsRAGConfig) -> Providers:
+    # Bind the operator-configured high-priority repos (config.priority_repos)
+    # into the shared priority module BEFORE any indexing/retrieval — so both
+    # the api and the indexer (both call build_providers) tag/boost the same set.
+    from opsrag.vectorstores import priority as _priority
+    _priority.set_priority_repos(config.priority_repos)
+
     token = _env(config.scm.token_env) or ""
 
     if config.scm.clone_mode and config.scm.provider in ("gitlab", "github"):

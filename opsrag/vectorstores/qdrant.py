@@ -45,17 +45,14 @@ _RRF_K = 60
 # (single source, shared with pgvector so both backends boost symbol queries
 # identically). Imported as compute_lane_weights below.
 
-# -- Priority boost (Layer 3 SRE-KB authoritative ranking) -----------------
-# Chunks whose `repo` matches one of these substrings get `priority: high`
-# stamped on their payload at upsert time. At search time both `search()`
-# and `hybrid_search()` multiply the score of high-priority hits by
-# `_HIGH_PRIORITY_BOOST`, so SRE-authored canonical docs out-rank
-# Confluence/Slack on overlapping queries. The list is a substring match,
-# not exact, so e.g. "devops/sre/sre-knowledge-base" and
-# "sre-knowledge-base" both trigger.
-_HIGH_PRIORITY_REPO_PATTERNS: tuple[str, ...] = (
-    "sre-knowledge-base",
-)
+# -- Priority boost (Layer 3 authoritative ranking) ------------------------
+# Chunks whose `repo` matches a high-priority substring get `priority: high`
+# stamped on their payload at upsert time (via `_chunk_priority`). At search
+# time both `search()` and `hybrid_search()` multiply the score of high-priority
+# hits by `_HIGH_PRIORITY_BOOST`, so authoritative docs out-rank Confluence/Slack
+# on overlapping queries. The substring set is CONFIG-DRIVEN
+# (config.priority_repos -> opsrag.vectorstores.priority.high_priority_repo_substr;
+# bound in build_providers) so it's not hardcoded per deployment.
 _HIGH_PRIORITY_BOOST: float = 1.5  # 50% lift -- enough to dominate ties, not steamroll
 
 # User-correction tier. An OPERATOR-APPROVED correction (see the moderation
@@ -97,7 +94,10 @@ def _chunk_priority(
     if not repo:
         return None
     low = repo.lower()
-    if not any(p in low for p in _HIGH_PRIORITY_REPO_PATTERNS):
+    # Config-driven single source of truth (config.priority_repos, bound in
+    # build_providers). Falls back to the module default when unset.
+    from opsrag.vectorstores.priority import high_priority_repo_substr
+    if not any(p in low for p in high_priority_repo_substr()):
         return None
     if (
         source_path

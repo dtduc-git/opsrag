@@ -48,8 +48,27 @@ _PRIORITY_RRF_BONUS: dict[str, float] = {
 
 # Repo/path rules for deriving the tier when no stored tag is available
 # (e.g. the pgvector store has no `priority` payload field).
-_HIGH_PRIORITY_REPO_SUBSTR = ("sre-knowledge-base",)
+_DEFAULT_HIGH_PRIORITY_REPO_SUBSTR = ("sre-knowledge-base",)
+# Active set = config.priority_repos when set, else the default. Bound once at
+# startup (build_providers, shared by api + indexer). Single source of truth for
+# the qdrant index-time tag AND this fallback derivation.
+_high_priority_repo_substr: tuple[str, ...] = _DEFAULT_HIGH_PRIORITY_REPO_SUBSTR
 _ARCHITECTURE_PATH_PREFIX = "docs/architecture/"
+
+
+def set_priority_repos(repos: object) -> None:
+    """Bind the operator-configured high-priority repo substrings
+    (``config.priority_repos``). Non-empty replaces the default; empty keeps it."""
+    global _high_priority_repo_substr
+    cleaned = tuple(
+        s.strip().lower() for s in (repos or []) if isinstance(s, str) and s.strip()
+    )
+    _high_priority_repo_substr = cleaned or _DEFAULT_HIGH_PRIORITY_REPO_SUBSTR
+
+
+def high_priority_repo_substr() -> tuple[str, ...]:
+    """The active high-priority repo substrings (config-bound)."""
+    return _high_priority_repo_substr
 
 
 def priority_multiplier(tag: str | None) -> float:
@@ -75,7 +94,7 @@ def priority_rrf_bonus(tag: str | None) -> float:
 def chunk_priority(repo: str | None, source_path: str | None) -> str | None:
     """Derive a priority tier from repo/source_path (SRE-KB + architecture
     tiers only; user-correction is stamped at index time, not derivable here)."""
-    if not repo or not any(s in repo.lower() for s in _HIGH_PRIORITY_REPO_SUBSTR):
+    if not repo or not any(s in repo.lower() for s in _high_priority_repo_substr):
         return None
     if source_path and source_path.startswith(_ARCHITECTURE_PATH_PREFIX):
         return "architecture-canonical"

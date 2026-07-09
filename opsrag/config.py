@@ -949,6 +949,13 @@ class Settings(BaseModel):
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     vector_store: VectorStoreConfig = Field(default_factory=VectorStoreConfig)
+    priority_repos: list[str] = Field(default_factory=lambda: ["sre-knowledge-base"])
+    """Repo-path SUBSTRINGS whose chunks get the "high" retrieval-priority boost,
+    so authoritative content out-ranks Confluence/Slack on overlapping queries.
+    Substring match (``sre-knowledge-base`` matches ``devops/sre/sre-knowledge-
+    base``). Deployment-specific — set to YOUR canonical repo(s); default is a
+    single generic example. Chunks under ``docs/architecture/`` in these repos
+    get an even higher tier. Applied at index time (payload tag) + query time."""
     llm: LLMConfig = Field(default_factory=LLMConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     knowledge_graph: GraphStoreConfig = Field(default_factory=GraphStoreConfig)
