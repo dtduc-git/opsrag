@@ -471,6 +471,16 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             _log.warning("environments registry bind failed: %s", exc)
 
+        # Per-connector operator system-prompts (config.mcp.<name>.system_prompt)
+        # -> the reasoner appends each to its connector's tool descriptions so
+        # tool SELECTION honors deployment-specific routing (configurable, not
+        # hardcoded). No-op when no connector sets one.
+        try:
+            from opsrag.mcp_server import registry_loader as _rl
+            _rl.set_connector_system_prompts(cfg)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("connector system-prompt bind failed: %s", exc)
+
         # Register K8s cluster coordinates with the K8s MCP for the optional
         # GKE Workload-Identity provider (ADC + GCP Container API). Empty
         # config (the default) falls through to the vendor-neutral path:

@@ -286,8 +286,20 @@ def _tool_specs_for_llm() -> list[dict]:
     available since it is an engine tool, not an MCP call.
     """
     from opsrag.agent.services.plan_tool import PLAN_TOOL_SPEC
+    from opsrag.mcp_server.registry_loader import (
+        connector_for_tool,
+        connector_system_prompt,
+    )
+
+    def _desc(t: Any) -> str:
+        # Append the connector's operator system-prompt (config.mcp.<name>.
+        # system_prompt) so the reasoner sees per-connector routing guidance
+        # when it selects tools. No-op when none is configured.
+        note = connector_system_prompt(connector_for_tool(t.name))
+        return f"{t.description}\n\n[Deployment note: {note}]" if note else t.description
+
     return [
-        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        {"name": t.name, "description": _desc(t), "input_schema": t.input_schema}
         for t in _enabled_tools()
     ] + [PLAN_TOOL_SPEC]
 

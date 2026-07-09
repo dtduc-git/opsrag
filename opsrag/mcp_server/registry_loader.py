@@ -146,6 +146,33 @@ def connector_for_tool(tool_name: str | None) -> str | None:
     return _TOOL_TO_CONNECTOR.get(tool_name)
 
 
+# Per-connector operator system-prompts (config.mcp.<name>.system_prompt),
+# bound once at startup. The reasoner appends a connector's note to every one
+# of its tools' descriptions so tool SELECTION honors deployment routing (e.g.
+# "Datadog = tracing only; logs in Elasticsearch") -- configurable, not hardcoded.
+_CONNECTOR_SYSTEM_PROMPTS: dict[str, str] = {}
+
+
+def set_connector_system_prompts(settings: Any) -> None:
+    """Populate the per-connector system-prompt map from ``config.mcp.<name>.
+    system_prompt``. Idempotent; safe to call at every startup/reload."""
+    global _CONNECTOR_SYSTEM_PROMPTS
+    out: dict[str, str] = {}
+    mcp = getattr(settings, "mcp", {}) or {}
+    for name, block in mcp.items():
+        note = (getattr(block, "system_prompt", None) or "").strip()
+        if note:
+            out[name] = note
+    _CONNECTOR_SYSTEM_PROMPTS = out
+
+
+def connector_system_prompt(connector: str | None) -> str | None:
+    """The operator system-prompt configured for ``connector``, or ``None``."""
+    if not connector:
+        return None
+    return _CONNECTOR_SYSTEM_PROMPTS.get(connector)
+
+
 def set_request_connector_perms(
     allowed_connectors: Iterable[str] | None,
     enabled_connectors: Iterable[str] = (),

@@ -90,6 +90,13 @@ class MCPConfigBlock(BaseModel):
     secret_ref: str | None = None
     endpoint: str | None = None
     api_key_env: str | None = None
+    system_prompt: str | None = None
+    """Optional operator guidance for THIS connector, injected into the agent's
+    tool-selection prompt next to every one of the connector's tools. Steers
+    routing per deployment WITHOUT hardcoding it in the codebase -- e.g. a site
+    that keeps logs in Elasticsearch sets datadog.system_prompt='Datadog serves
+    tracing/APM only here; application logs live in Elasticsearch.', while a
+    Datadog-logs shop leaves it empty. Deployment-specific; empty by default."""
     extra: dict[str, object] = Field(default_factory=dict)
 
 
