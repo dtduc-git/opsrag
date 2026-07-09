@@ -97,12 +97,11 @@ _DEFAULT_EXCLUDES: tuple[str, ...] = (
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
     ".min.js", ".min.css",
     ".pb.go", "_pb2.py",      # generated protobuf
-    # Vendored snapshots inside internal-image-repo. The opsrag image
-    # source tree contains a copy of sre-knowledge-base + runbooks at
-    # `images/opsrag/{backend,backend,indexer,indexer}/...` so that
-    # the container ships with markdown bundled. Those copies are NOT
-    # source -- the canonical source is the upstream `sre-knowledge-base`
-    # repo, which is indexed separately. Without this exclude we end up
+    # Vendored doc snapshots inside a container image build. Some image
+    # source trees bundle a copy of a knowledge-base + runbooks under
+    # `images/opsrag/.../` so the container ships with the markdown baked in.
+    # Those copies are NOT source -- the canonical source is the upstream
+    # knowledge-base repo, indexed separately. Without this exclude we end up
     # with every chunk indexed twice, halving recall in practice.
     "/images/opsrag/",
     # IDE / AI-assistant local config trees. These get committed to source

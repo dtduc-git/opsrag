@@ -1,9 +1,7 @@
 # =============================================================================
-# OpsRAG frontend image — React 19 + Vite + nginx (LOCAL DEV)
+# OpsRAG frontend image — React 19 + Vite + nginx
 #
-# Owner: Duke Dinh (DevOps/SRE)
-# Production image is built from `internal-image-repo/images/opsrag/frontend/`
-# (vendored from this tree); keep this Dockerfile in sync with that one.
+# Two-stage: build the Vite bundle, then serve it from nginx-unprivileged.
 # =============================================================================
 
 # Stage 1 — build the React bundle.
