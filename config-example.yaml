@@ -22,6 +22,18 @@ auth:
   issuer: https://your-idp.example.com        # OIDC discovery base URL (mode=oidc)
   audience: opsrag                             # expected token audience (mode=oidc)
   jwks_cache_seconds: 300                      # how long to cache signing keys
+  # RBAC roles: map an IdP group / claim value -> opsrag roles.
+  # role_mappings:
+  #   sre-admins: [admin]
+  #   oncall:     [member_investigate]
+  # Per-connector RBAC (optional): map a role -> the MCP connectors it grants.
+  # ONLY affects connectors flagged `restricted: true` under `mcp:` below --
+  # non-restricted connectors are usable by everyone; the `admin` role implies
+  # all; `["*"]` grants every enabled connector. Per-user allow/deny overrides
+  # are set in the "Users & Roles" admin UI, not here.
+  # role_connectors:
+  #   sre:     [datadog, kubernetes, elasticsearch]
+  #   finance: [gcp]
 
 # --- Cloud model bundle (optional shortcut) ----------------------------------
 # Set ONE provider to get sane per-purpose model defaults (reason / tool_call /
@@ -310,6 +322,12 @@ channels:
 # required env (see .env.example). Missing env on an enabled MCP fails startup
 # with MCP_MISCONFIGURED:<name>:<env> (FR-004). Per-integration knobs go under
 # `extra:` and are validated by that integration's own model.
+#
+# Per-connector RBAC: add `restricted: true` to make a connector off-by-default
+# (usable only by users granted it via auth.role_connectors or a per-user
+# override in the admin UI; the `admin` role always has access). Non-restricted
+# connectors stay usable by every authenticated user.
+#   datadog: { enabled: true, restricted: true }
 mcp:
   aws:           { enabled: false }   # AWS read-only (EC2/EKS/ECS/CloudWatch/S3/Cost + aws_read)
   azure:         { enabled: false }   # Azure read-only (Monitor/AKS/Resource Graph)

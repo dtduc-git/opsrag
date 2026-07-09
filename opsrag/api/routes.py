@@ -644,6 +644,12 @@ async def query(
     # Anonymous / tracking-disabled requests set None, which the
     # persistence layer treats as "leave the column NULL".
     token = current_user_oid_var.set(current_user.oid)
+    # Per-connector RBAC: install the caller's allowed-connector set so the
+    # reasoner only sees (and the executor only runs) tools they may use, and
+    # forbidden-but-enabled connectors surface an honest refusal. Same task as
+    # the streaming graph, so the contextvar propagates (like current_user_oid).
+    from opsrag.api._connector_perms import install_request_connector_perms
+    await install_request_connector_perms(request, current_user)
     # Owner binding: persist the AUTHENTICATED identity as the session owner
     # (never the spoofable client-supplied req.user_id). Falls back to the
     # client value / "anonymous" in open mode. See _owner_id_for.

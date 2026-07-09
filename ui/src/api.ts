@@ -1101,6 +1101,11 @@ export interface AdminUser {
   email_verified: boolean;
   created_at: string | null;
   updated_at: string | null;
+  // Per-connector overrides (RBAC). `effective_connectors` is the net result of
+  // the user's roles + these overrides + each connector's `restricted` default.
+  connectors_allow: string[];
+  connectors_deny: string[];
+  effective_connectors: string[];
 }
 
 export interface RoleInfo {
@@ -1108,6 +1113,12 @@ export interface RoleInfo {
   label: string;
   description: string;
   scopes: string[];
+}
+
+export interface ConnectorInfo {
+  name: string;
+  label: string;
+  restricted: boolean;
 }
 
 export async function fetchAdminUsers(): Promise<AdminUser[]> {
@@ -1137,6 +1148,31 @@ export async function updateUserRoles(
     let detail: unknown = `${r.status}`;
     try { const j = await r.json(); detail = j.detail || detail; } catch {}
     throw new Error(typeof detail === "string" ? detail : `update roles failed: ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function fetchConnectorCatalog(): Promise<ConnectorInfo[]> {
+  const r = await apiFetch(`${BASE}/admin/connectors`);
+  if (!r.ok) throw new Error(`connector catalog failed: ${r.status}`);
+  const data = await r.json();
+  return (data.connectors ?? []) as ConnectorInfo[];
+}
+
+export async function updateUserConnectors(
+  userId: string,
+  allow: string[],
+  deny: string[],
+): Promise<AdminUser> {
+  const r = await apiFetch(`${BASE}/admin/users/${encodeURIComponent(userId)}/connectors`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ allow, deny }),
+  });
+  if (!r.ok) {
+    let detail: unknown = `${r.status}`;
+    try { const j = await r.json(); detail = j.detail || detail; } catch {}
+    throw new Error(typeof detail === "string" ? detail : `update connectors failed: ${r.status}`);
   }
   return r.json();
 }

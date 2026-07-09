@@ -820,6 +820,14 @@ class AuthConfig(BaseModel):
     # (e.g. {"sre-admins": ["admin"], "oncall": ["member_investigate"]}).
     # Empty = everyone authenticated gets the default member role.
     role_mappings: dict[str, list[str]] = Field(default_factory=dict)
+    # RBAC (per-connector): map an opsrag role -> the MCP connectors that role
+    # grants (e.g. {"finance": ["gcp"], "sre": ["datadog", "kubernetes"]}). A
+    # value of ["*"] grants every enabled connector. Only MATTERS for connectors
+    # flagged `restricted: true` (non-restricted connectors are usable by all);
+    # the `admin` role implicitly grants everything. Empty = no role grants, so
+    # restricted connectors are reachable only via per-user allow overrides.
+    # See opsrag.auth.connector_perms.
+    role_connectors: dict[str, list[str]] = Field(default_factory=dict)
     # mode='login' first-party login: cookie sessions + SSO providers.
     login: SessionConfigAuth = Field(default_factory=SessionConfigAuth)
     sso: SSOConfig = Field(default_factory=SSOConfig)

@@ -631,6 +631,89 @@ server then 403s on.
 
 ---
 
+## Per-connector permissions
+
+Scopes decide *what a user may do* (chat / investigate / mcp / admin).
+**Per-connector permissions** decide *which live MCP connectors a user may
+use* — a finer, orthogonal layer for locking down sensitive data sources
+(cost/billing, a production cluster, incident PII) to a subset of users
+while everyone else keeps the general connectors.
+
+### The model
+
+- **Default-allow.** Every enabled connector is usable by any authenticated
+  user **unless** the operator marks it `restricted`. Nothing is locked down
+  until you opt a connector in, so upgrades are behavior-preserving.
+- **Restrict a connector** in config (or Helm values):
+
+  ```yaml
+  mcp:
+    datadog: { enabled: true, restricted: true }   # off-by-default now
+  ```
+
+- **Grant a restricted connector** to roles via `auth.role_connectors`
+  (`{role: [connectors]}`; `["*"]` grants all):
+
+  ```yaml
+  auth:
+    role_connectors:
+      sre:     [datadog, kubernetes, elasticsearch]
+      finance: [gcp]
+  ```
+
+  The `admin` role implicitly gets every enabled connector.
+
+- **Per-user overrides** are set in the **Users & Roles** admin page (each
+  user has a per-connector *Default / Allow / Deny* control), or via the API:
+
+  ```sh
+  # Catalog of enabled connectors + their `restricted` flag (admin scope).
+  curl -sf http://localhost:8080/admin/connectors -b cookies.txt | jq
+
+  # Set a user's per-connector overrides (admin scope). `allow` grants a
+  # connector (even a restricted one); `deny` blocks it.
+  curl -sf -X PUT http://localhost:8080/admin/users/<user-id>/connectors \
+    -b cookies.txt -H 'Content-Type: application/json' \
+    -d '{"allow": ["datadog"], "deny": []}' | jq
+  ```
+
+  **Deny wins over everything** — role grants, default-allow, even `admin`.
+  It's the escape hatch for "this one person must never touch billing."
+  Like role changes, saving overrides revokes the user's refresh sessions so
+  the change takes effect promptly. Per-user overrides require `login` mode
+  (they live on the local auth user); role-based grants work in both modes.
+
+### How it's enforced
+
+The user's allowed-connector set is resolved per request from their roles +
+`role_connectors` + the `restricted` flags + their overrides. Enforcement is
+layered so it can't be prompted around:
+
+1. **Tool visibility** — a forbidden connector's tools are filtered out of
+   the list the agent's LLM ever sees.
+2. **Executor gate** — if a call still targets a forbidden tool, the tool
+   executor refuses it (returns `permission_denied`, never runs it).
+3. **Honest refusal** — every answer-writing node is told which connectors
+   the user lacks, so the agent says *"I can't get that — you don't have
+   permission to use Datadog"* rather than claiming the capability doesn't
+   exist or answering from tangential docs.
+
+Effective access is always a subset of the connectors actually enabled on the
+deployment: you can never grant a connector the operator hasn't turned on.
+
+Enforcement precedence, top wins:
+
+| Rule | Effect |
+| --- | --- |
+| Per-user `deny` | Always blocked (even for admins) |
+| Per-user `allow` | Granted (even a restricted connector) |
+| `admin` role / role granting `"*"` | All enabled connectors |
+| `role_connectors[role]` | The listed connectors |
+| Not `restricted` | Allowed to everyone (default) |
+| `restricted`, no grant | Blocked |
+
+---
+
 ## MCP token auth
 
 External MCP clients (Claude Code's `mcp-remote`, Cursor, etc.) connect

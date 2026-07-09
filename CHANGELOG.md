@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-connector RBAC (permission control for MCP connectors).** Admins can now
+  restrict which users may use which live connectors, on top of the existing
+  functional scopes. A connector flagged `restricted: true` (under `mcp.<name>`)
+  is off-by-default and usable only by users granted it — via `auth.role_connectors`
+  (`{role: [connectors]}`, `["*"]` for all) for one of their roles, or a per-user
+  Allow/Deny override in the **Users & Roles** admin page. Non-restricted
+  connectors stay usable by everyone; the `admin` role implies all; a per-user
+  **Deny wins over everything** (roles, default-allow, even admin). Enforcement is
+  layered: forbidden tools are hidden from the agent's tool list, blocked at the
+  executor, and the agent refuses with an honest "you don't have permission to
+  use `<connector>`" instead of fabricating or claiming the capability is absent.
+  New admin API: `GET /admin/connectors`, `PUT /admin/users/{id}/connectors`.
+  Migration `0013` adds `connectors_allow`/`connectors_deny` to the auth user.
+  Chart: `mcp.<name>.restricted` + `auth.roleConnectors`. See
+  [docs/auth.md](docs/auth.md#per-connector-permissions).
 - **Runnable offline retrieval eval over `samples/`.** A new always-on,
   no-secrets CI gate (`eval-offline`) indexes the shipped synthetic corpus
   into an in-process Qdrant with a local FastEmbed ONNX embedder and asserts

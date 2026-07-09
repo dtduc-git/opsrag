@@ -1613,6 +1613,90 @@ button svg, .stat-icon svg, .repo-sync svg, .source-group-chevron svg,
 .ur-msg.ok { color: var(--green); }
 .ur-msg.err { color: var(--danger); }
 
+/* Per-user connector access sub-row. The main (roles) row drops its bottom
+   border so the connector row reads as a continuation of the same user. */
+.ur-table tr.ur-main-row td { border-bottom: none; }
+.ur-conn-row td { padding-top: 0; padding-bottom: 10px; }
+.ur-conn { margin-top: 2px; }
+/* Collapsed summary: a full-width disclosure button (connector count + effective
+   set). The tri-state editor only mounts when expanded, keeping the list scannable. */
+.ur-conn-summary {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 7px 10px; border: 1px solid transparent; border-radius: 8px;
+  background: none; cursor: pointer; text-align: left; color: inherit;
+  transition: background 0.12s, border-color 0.12s;
+}
+.ur-conn-summary:hover { background: var(--bg-2, rgba(127,127,127,0.05)); border-color: var(--line-2); }
+.ur-conn-caret {
+  color: var(--text-3); font-size: 10px; transition: transform 0.15s; flex: none;
+}
+.ur-conn-caret.open { transform: rotate(90deg); }
+.ur-conn-summary-chips { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; min-width: 0; }
+.ur-conn-override {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  padding: 1px 7px; border-radius: 999px; white-space: nowrap; flex: none;
+}
+.ur-conn-summary-cta {
+  margin-left: auto; font-size: 12px; font-weight: 600; color: var(--accent);
+  white-space: nowrap; flex: none;
+}
+.ur-conn-editor {
+  display: flex; flex-direction: column; gap: 12px;
+  border-left: 2px solid var(--line-2); padding: 10px 0 4px 22px;
+  margin: 4px 0 2px 16px;
+}
+.ur-conn-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ur-conn-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  font-weight: 600; color: var(--text-3);
+}
+.ur-conn-actions { margin-left: auto; white-space: nowrap; }
+.ur-conn-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+  gap: 2px 32px;
+}
+.ur-conn-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 7px 10px; border-radius: 8px; transition: background 0.12s;
+}
+.ur-conn-item:hover { background: var(--bg-2, rgba(127,127,127,0.06)); }
+.ur-conn-label { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }
+.ur-conn-name {
+  font-size: 13px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ur-conn-restricted {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  background: var(--bg-3); color: var(--text-3);
+  padding: 1px 6px; border-radius: 999px; font-weight: 600;
+  border: 1px solid var(--line-2); white-space: nowrap; flex: none;
+}
+/* Tri-state segmented control. Reuses the .ur-chip visual language.
+   flex:none so it never shrinks and clips its labels ("Deny" -> "De"). */
+.ur-tri {
+  display: inline-flex; border-radius: 999px; overflow: hidden;
+  border: 1px solid var(--line-2); flex: none;
+}
+.ur-tri-btn {
+  font: inherit; font-size: 12px; padding: 4px 14px; white-space: nowrap;
+  border: none; border-left: 1px solid var(--line-2);
+  background: var(--bg); color: var(--text-2);
+  cursor: pointer; transition: all 0.12s;
+}
+.ur-tri-btn:first-child { border-left: none; }
+.ur-tri-btn:hover:not(:disabled):not(.on) { color: var(--accent); }
+.ur-tri-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.ur-tri-btn.on.default { background: var(--accent); color: #fff; }
+.ur-tri-btn.on.allow { background: var(--green); color: #fff; }
+.ur-tri-btn.on.deny { background: var(--danger); color: #fff; }
+.ur-conn-effective { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.ur-conn-eff-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  font-weight: 600; color: var(--text-3); white-space: nowrap;
+}
+
 /* Usage page stat cards / bar chart */
 .stat-card {
   background: var(--bg);

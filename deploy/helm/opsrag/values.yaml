@@ -29,6 +29,13 @@ auth:
   issuer: https://your-idp.example.com   # OIDC discovery base URL (required for oidc)
   audience: opsrag                        # expected token audience (required for oidc)
   jwksCacheSeconds: 300
+  # Per-connector RBAC (optional): map an opsrag role -> the MCP connectors it
+  # grants. ONLY affects connectors flagged `restricted: true` below (others are
+  # usable by everyone); the `admin` role implicitly grants all. `["*"]` = all.
+  # Per-user allow/deny overrides live in the "Users & Roles" admin UI, not here.
+  roleConnectors: {}
+  #   sre:     [datadog, kubernetes, elasticsearch]
+  #   finance: [gcp]
 
 # --- API workload ------------------------------------------------------------
 api:
@@ -311,6 +318,10 @@ config:
 # The key set MUST equal the MCPIntegration registry exactly (CI-enforced).
 # Each `enabled` maps to OPSRAG_MCP_<NAME>_ENABLED on the api container.
 # `secretRef` optionally names a Secret carrying that integration's credentials.
+# Each connector: { enabled, secretRef, restricted }. `restricted: true` makes a
+# connector off-by-default (usable only by users granted it via auth.roleConnectors
+# or a per-user override in the admin UI); the `admin` role always has access.
+# e.g.  datadog: { enabled: true, restricted: true }
 mcp:
   aws:           { enabled: false, secretRef: "" }
   azure:         { enabled: false, secretRef: "" }

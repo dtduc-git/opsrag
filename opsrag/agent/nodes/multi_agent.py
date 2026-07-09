@@ -292,6 +292,15 @@ def _tool_specs_for_llm() -> list[dict]:
     ] + [PLAN_TOOL_SPEC]
 
 
+def _connector_permission_block() -> str:
+    """Per-connector RBAC refusal note for the current request. Delegates to the
+    single renderer in ``registry_loader`` so the reasoner, the multi-agent
+    generator, and the retrieval-path generator all emit identical guidance."""
+    from opsrag.mcp_server.registry_loader import connector_permission_prompt_block
+
+    return connector_permission_prompt_block()
+
+
 def _agent_event(name: AgentName, status: str, message: str, **metadata) -> dict:
     """Structured agent_status event matching the user's spec shape."""
     return {
@@ -1160,6 +1169,15 @@ def _build_reasoner_prompt(state: dict) -> str:
 
     parts.append(_SYSTEM_REASONER_BASE)
 
+    # Per-connector RBAC: when the caller is forbidden connectors that ARE
+    # enabled on this deployment, tell the reasoner to refuse honestly instead
+    # of claiming the capability doesn't exist or fabricating an answer. Those
+    # tools are already filtered out of the LLM's tool list (via filter_enabled);
+    # this note makes the refusal accurate ("you don't have permission").
+    denied_block = _connector_permission_block()
+    if denied_block:
+        parts.append(denied_block)
+
     # P2 -- repomap compass. Always injected when available; cheap.
     try:
         from opsrag.agent.repomap import get_repomap_card
@@ -1875,6 +1893,40 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                     continue
 
                 if kind == "unknown":
+                    # Per-connector RBAC: distinguish "no such tool" from "you
+                    # exist but the caller lacks permission". A denied tool is a
+                    # REAL registered tool of an enabled connector the current
+                    # user may not use, so it was filtered out of `registry`.
+                    # Give an honest permission refusal instead of the
+                    # nonexistence error (which would mislead the generator).
+                    from opsrag.mcp_server.registry_loader import (
+                        connector_for_tool,
+                        request_denied_connectors,
+                    )
+                    _denied = request_denied_connectors()
+                    _conn = connector_for_tool(name)
+                    if _conn is not None and _conn in _denied:
+                        err = (
+                            f"PERMISSION DENIED: {name!r} belongs to the "
+                            f"{_conn!r} connector, which the current user is NOT "
+                            "permitted to use. This is an authorization boundary, "
+                            "not a missing capability. DO NOT retry, DO NOT claim "
+                            "the data doesn't exist, and DO NOT fabricate a "
+                            "result. Tell the user they don't have permission to "
+                            "access that data and can request it from an OpsRAG "
+                            "admin."
+                        )
+                        history.append({
+                            "role": "tool_result", "name": name,
+                            "response": {"error": err},
+                        })
+                        audit.append({"name": name, "args": args, "error": err,
+                                      "latency_ms": 0.0, "ts": time.time()})
+                        # A permission denial is not an "unknown tool" round (it
+                        # must not count toward MAX_UNKNOWN_TOOL_ROUNDS) and does
+                        # not consume the real tool budget; just mark activity.
+                        executed_now += 1
+                        continue
                     # Loud, prescriptive error -- the previous silent
                     # `unknown tool 'X'` was ignored by the LLM in a
                     # secret-value hallucination incident: the
@@ -2421,7 +2473,7 @@ def generator_node(
             resp = await asyncio.wait_for(
                 chosen_llm.generate(
                     messages=flattened,
-                    system_prompt=_SYSTEM_GENERATOR + custom_instructions_block(),
+                    system_prompt=_SYSTEM_GENERATOR + custom_instructions_block() + _connector_permission_block(),
                     temperature=0.0,
                     # Bumped 4096 -> 16384 so exhaustive per-job enumeration
                     # (multiple jobs x dozens of failing tests x code blocks)
@@ -2494,7 +2546,7 @@ def generator_node(
                 resp = await asyncio.wait_for(
                     chosen_llm.generate(
                         messages=retry_messages,
-                        system_prompt=_SYSTEM_GENERATOR + custom_instructions_block(),
+                        system_prompt=_SYSTEM_GENERATOR + custom_instructions_block() + _connector_permission_block(),
                         temperature=0.0,
                         max_tokens=16384,
                         purpose="generator_retry_grounding",

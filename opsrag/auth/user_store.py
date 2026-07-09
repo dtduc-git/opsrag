@@ -57,6 +57,11 @@ class AuthUser:
     roles: tuple[str, ...] = ()
     name: str | None = None
     picture_url: str | None = None
+    # Per-connector RBAC overrides (see opsrag.auth.connector_perms):
+    # explicit per-user grants/denials layered on top of role-derived access.
+    # `connectors_deny` wins over everything (role grants, default-allow, admin).
+    connectors_allow: tuple[str, ...] = ()
+    connectors_deny: tuple[str, ...] = ()
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -133,6 +138,17 @@ class AuthUserStore(abc.ABC):
 
     @abc.abstractmethod
     async def mark_email_verified(self, user_id: str) -> None: ...
+
+    @abc.abstractmethod
+    async def set_connector_overrides(
+        self,
+        user_id: str,
+        *,
+        allow: tuple[str, ...],
+        deny: tuple[str, ...],
+    ) -> None:
+        """Replace a user's per-connector allow/deny override lists."""
+        ...
 
     @abc.abstractmethod
     async def set_roles(self, user_id: str, roles: tuple[str, ...]) -> None:
@@ -253,6 +269,23 @@ class InMemoryAuthUserStore(AuthUserStore):
                     u, roles=tuple(roles), updated_at=datetime.now(UTC)
                 )
 
+    async def set_connector_overrides(
+        self,
+        user_id: str,
+        *,
+        allow: tuple[str, ...],
+        deny: tuple[str, ...],
+    ) -> None:
+        with self._lock:
+            u = self._users.get(user_id)
+            if u is not None:
+                self._users[user_id] = replace(
+                    u,
+                    connectors_allow=tuple(allow),
+                    connectors_deny=tuple(deny),
+                    updated_at=datetime.now(UTC),
+                )
+
     async def list_users(self, *, limit: int = 200) -> list[AuthUser]:
         with self._lock:
             users = list(self._users.values())
@@ -368,13 +401,16 @@ class PostgresAuthUserStore(AuthUserStore):
             roles=tuple(row[4] or ()),
             name=row[5],
             picture_url=row[6],
-            created_at=row[7],
-            updated_at=row[8],
+            connectors_allow=tuple(row[7] or ()),
+            connectors_deny=tuple(row[8] or ()),
+            created_at=row[9],
+            updated_at=row[10],
         )
 
     _USER_COLS = (
         "id, email, email_verified, password_hash, roles, "
-        "name, picture_url, created_at, updated_at"
+        "name, picture_url, connectors_allow, connectors_deny, "
+        "created_at, updated_at"
     )
 
     async def create_user(
@@ -449,6 +485,21 @@ class PostgresAuthUserStore(AuthUserStore):
                     "UPDATE opsrag_auth_user SET roles = %s, updated_at = NOW() "
                     "WHERE id = %s",
                     (list(roles), user_id),
+                )
+
+    async def set_connector_overrides(
+        self,
+        user_id: str,
+        *,
+        allow: tuple[str, ...],
+        deny: tuple[str, ...],
+    ) -> None:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE opsrag_auth_user SET connectors_allow = %s, "
+                    "connectors_deny = %s, updated_at = NOW() WHERE id = %s",
+                    (list(allow), list(deny), user_id),
                 )
 
     async def list_users(self, *, limit: int = 200) -> list[AuthUser]:

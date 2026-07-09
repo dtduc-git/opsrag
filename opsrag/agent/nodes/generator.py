@@ -249,6 +249,14 @@ def generate_node(
         if mem_block:
             system_prompt = f"{system_prompt}\n\n{mem_block}"
 
+        # Per-connector RBAC: when triage routed to the retrieval path but the
+        # question needs a connector the user is forbidden, refuse honestly with
+        # the permission reason rather than answering from tangential docs.
+        from opsrag.mcp_server.registry_loader import connector_permission_prompt_block
+        perm_block = connector_permission_prompt_block()
+        if perm_block:
+            system_prompt = f"{system_prompt}\n{perm_block}"
+
         # Regenerate loop (grounding failed -> generate again): re-running at
         # temperature 0.0 with identical context is deterministic, so it re-emits
         # the same ungrounded answer and just burns the regen budget. Warm the

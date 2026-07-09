@@ -66,6 +66,14 @@
         "jwksCacheSeconds": {
           "type": "integer",
           "minimum": 1
+        },
+        "roleConnectors": {
+          "type": "object",
+          "description": "Per-connector RBAC: role -> [connectors it grants]. Only affects restricted connectors.",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
         }
       }
     },
@@ -173,6 +181,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -188,6 +199,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -203,6 +217,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -218,6 +235,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -233,6 +253,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -248,6 +271,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -263,6 +289,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -278,6 +307,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -293,6 +325,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -308,6 +343,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -323,6 +361,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -338,6 +379,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -353,6 +397,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -368,6 +415,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -383,6 +433,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -398,6 +451,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -413,6 +469,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -428,6 +487,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -443,6 +505,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -458,6 +523,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -473,6 +541,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -488,6 +559,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         },
@@ -503,6 +577,9 @@
             },
             "secretRef": {
               "type": "string"
+            },
+            "restricted": {
+              "type": "boolean"
             }
           }
         }

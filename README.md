@@ -213,6 +213,13 @@ must be sent over plain HTTP, so set `cookie_secure: false` in that case. Full
 steps (SSO, refresh tokens, RBAC, the `oidc` setup) are in
 [docs/auth.md](docs/auth.md), which covers both modes end to end.
 
+Beyond the functional scopes, you can lock **individual live connectors** to a
+subset of users: mark a connector `restricted` and grant it per role
+(`auth.role_connectors`) or per user (in the Users & Roles admin page). A
+forbidden connector is hidden from the agent and refused with an honest "you
+don't have permission" — see
+[Per-connector permissions](docs/auth.md#per-connector-permissions).
+
 ## 🧭 Documentation
 
 Full docs are in **[`docs/`](docs/README.md)**. Start here:

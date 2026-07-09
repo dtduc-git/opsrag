@@ -24,6 +24,12 @@ data:
       audience: {{ .Values.auth.audience | quote }}
       jwks_cache_seconds: {{ .Values.auth.jwksCacheSeconds | default 300 }}
       {{- end }}
+      {{- with .Values.auth.roleConnectors }}
+      {{- /* Per-connector RBAC: role -> [connectors it grants]. Only matters for
+             connectors flagged mcp.<name>.restricted; admin implies all. */}}
+      role_connectors:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     {{- /* api block: only the rate-limit knobs are config-surfaced here.
            rate_limit_backend=redis is fail-fast -- the API PINGs Redis at
            boot (redis_url_env), so only set it when Redis is reachable. */}}
@@ -126,6 +132,9 @@ data:
       {{- range $name, $cfg := .Values.mcp }}
       {{ $name }}:
         enabled: {{ $cfg.enabled }}
+        {{- if $cfg.restricted }}
+        restricted: {{ $cfg.restricted }}
+        {{- end }}
       {{- end }}
     {{- /* channels: render each channel's enabled flag so flipping a channel
            in values flips the in-app adapter. Token *_env names + allowlists +

@@ -77,6 +77,12 @@ class MCPConfigBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     enabled: bool = False
+    restricted: bool = False
+    """When true, this connector is NOT usable by default. Only users granted
+    it (via ``auth.role_connectors`` for one of their roles, or a per-user
+    allow override) may call its tools; everyone else gets a permission refusal.
+    Non-restricted connectors are usable by any authenticated user (the
+    behavior-preserving default). See ``opsrag.auth.connector_perms``."""
     secret_ref: str | None = None
     endpoint: str | None = None
     api_key_env: str | None = None
