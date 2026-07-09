@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Migration `0013` adds `connectors_allow`/`connectors_deny` to the auth user.
   Chart: `mcp.<name>.restricted` + `auth.roleConnectors`. See
   [docs/auth.md](docs/auth.md#per-connector-permissions).
+- **Multiple Elasticsearch clusters per environment.** An environment's
+  `elasticsearch:` now accepts either a single target (as before) OR a named
+  map — `{default, clusters: {name: EsTarget}}` — so one env can expose several
+  ES clusters (e.g. separate ECK clusters for infra logs / integration logs /
+  product data). The ES tools take a `cluster` arg to select one (omitted → the
+  env's `default`); a new **`elasticsearch_list_clusters`** tool reports each
+  cluster with an operator `usage_note` describing what it holds, so the agent
+  can pick the right store (and stops missing logs that live in a cluster it
+  wasn't searching). `cluster` is no longer an alias for `env`. Single-target
+  configs are unchanged (they behave as one cluster named `default`).
 - **Runnable offline retrieval eval over `samples/`.** A new always-on,
   no-secrets CI gate (`eval-offline`) indexes the shipped synthetic corpus
   into an in-process Qdrant with a local FastEmbed ONNX embedder and asserts

@@ -653,17 +653,37 @@ class EsTarget(BaseModel):
     # logical -> physical ES field mapping (de-hardcodes one org's schema,
     # e.g. {"timestamp": "@timestamp", "service": "kubernetes.labels.app_name"}).
     fields: dict[str, str] = Field(default_factory=dict)
+    # Operator note surfaced by `elasticsearch_list_clusters` so the agent knows
+    # WHAT this cluster holds (e.g. "container logs" vs "product data") and picks
+    # the right one. Only meaningful in a multi-cluster `EsClusters` map.
+    usage_note: str | None = None
+
+
+class EsClusters(BaseModel):
+    """Multiple named Elasticsearch clusters within ONE environment (e.g. an env
+    with separate ECK clusters for infra logs / integration logs / product data).
+    The ES tools take a `cluster` arg to select one; omitted -> `default`.
+
+    An environment's `elasticsearch:` accepts EITHER a single `EsTarget` (one
+    cluster, back-compatible) OR this map — they discriminate by keys since both
+    forbid unknown fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default: str | None = None
+    clusters: dict[str, EsTarget] = Field(default_factory=dict)
 
 
 class EnvironmentTarget(BaseModel):
     """One environment: how to reach its k8s + prometheus + elasticsearch.
-    Any integration may be None (that integration is unavailable for the env)."""
+    Any integration may be None (that integration is unavailable for the env).
+    `elasticsearch` is a single `EsTarget` or an `EsClusters` map (multi-cluster)."""
 
     model_config = ConfigDict(extra="forbid")
 
     kubernetes: K8sTarget | None = None
     prometheus: PrometheusTarget | None = None
-    elasticsearch: EsTarget | None = None
+    elasticsearch: EsTarget | EsClusters | None = None
 
 
 class EnvironmentsConfig(BaseModel):

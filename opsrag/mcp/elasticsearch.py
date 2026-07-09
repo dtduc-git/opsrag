@@ -80,33 +80,68 @@ def bind(es_config: Any, **_ignored: Any) -> None:
 # --- config / client -------------------------------------------------------
 
 def _resolve_env(args: dict) -> str | None:
-    """Pick the env name for a handler call: explicit ``env`` arg wins, then
-    the back-compat ``cluster`` alias, else ``None`` (-> registry default)."""
-    return args.get("env") or args.get("cluster") or None
+    """The env name for a handler call: explicit ``env`` arg, else ``None``
+    (-> registry default)."""
+    return args.get("env") or None
 
 
-def _config(env: str | None = None) -> dict:
-    """Resolve the request bundle for an environment's Elasticsearch target.
+def _resolve_cluster(args: dict) -> str | None:
+    """The Elasticsearch cluster name within the env (multi-cluster envs). The
+    ``cluster`` arg selects a named cluster from the env's ``EsClusters`` map;
+    ``None`` -> the env's default cluster."""
+    return args.get("cluster") or None
 
-    Looks up ``resolve_environment(env).elasticsearch`` (an ``EsTarget``; ``env``
-    None -> registry default) and turns it into a concrete bundle:
-    ``{reach, env, url, headers, auth, backend, default_index, verify_ssl,
-    fields, target}``. Credentials are read from env vars (``api_key_env`` /
-    ``username_env`` + ``password_env``) at call time -- never captured at bind.
 
-    Raises ``MCPElasticsearchError`` when the env has no ES target, or (for
-    ``reach=direct``) when no URL is configured. ``EnvironmentResolutionError``
-    (unknown / empty registry) propagates for a clear caller-facing error."""
+def _es_clusters(env: str | None) -> tuple[dict[str, Any], str | None]:
+    """Return ``({cluster_name: EsTarget}, default_name)`` for an env.
+
+    Normalizes both config shapes: a single ``EsTarget`` becomes a one-entry map
+    named ``"default"``; an ``EsClusters`` map is returned as-is with its
+    configured (or first) default. Raises ``MCPElasticsearchError`` when the env
+    has no ES configured at all."""
+    from opsrag.config import EsClusters
     from opsrag.environments import resolve_environment
 
-    target = resolve_environment(env).elasticsearch
-    if target is None:
+    es = resolve_environment(env).elasticsearch
+    if es is None:
         name = env or "(default)"
         raise MCPElasticsearchError(
             f"elasticsearch not configured for env {name!r} -- add an "
             f"`elasticsearch:` block under environments.targets.{name}.",
             reason="bad_env",
         )
+    if isinstance(es, EsClusters):
+        clusters = dict(es.clusters or {})
+        default = es.default or (next(iter(clusters), None) if clusters else None)
+        return clusters, default
+    # single EsTarget -> a one-cluster map
+    return {"default": es}, "default"
+
+
+def _config(env: str | None = None, cluster: str | None = None) -> dict:
+    """Resolve the request bundle for an environment's Elasticsearch target.
+
+    Looks up ``resolve_environment(env).elasticsearch`` and selects the named
+    ``cluster`` (multi-cluster envs; omitted -> the env's default cluster), then
+    turns the chosen ``EsTarget`` into a concrete bundle: ``{reach, env, cluster,
+    url, headers, auth, backend, default_index, verify_ssl, fields, target}``.
+    Credentials are read from env vars (``api_key_env`` / ``username_env`` +
+    ``password_env``) at call time -- never captured at bind.
+
+    Raises ``MCPElasticsearchError`` when the env has no ES target, an unknown
+    ``cluster`` is requested, or (for ``reach=direct``) no URL is configured.
+    ``EnvironmentResolutionError`` (unknown / empty registry) propagates."""
+    clusters, default_name = _es_clusters(env)
+    name = cluster or default_name
+    if name is None or name not in clusters:
+        env_label = env or "(default)"
+        raise MCPElasticsearchError(
+            f"unknown elasticsearch cluster {cluster!r} for env {env_label!r}. "
+            f"Configured: {sorted(clusters)}. Call `elasticsearch_list_clusters` "
+            "to see what each holds.",
+            reason="bad_cluster",
+        )
+    target = clusters[name]
 
     backend = (getattr(target, "backend", "elasticsearch") or "elasticsearch").lower()
     if backend not in ("elasticsearch", "opensearch"):
@@ -132,6 +167,7 @@ def _config(env: str | None = None) -> dict:
     return {
         "reach": getattr(target, "reach", "direct") or "direct",
         "env": env,
+        "cluster": name,
         "url": (getattr(target, "url", None) or "").strip().rstrip("/") or None,
         "headers": headers,
         "auth": auth,
@@ -296,7 +332,7 @@ def _map_field(cfg: dict, logical: str) -> str:
 async def _h_list_indices(_unused, args: dict) -> Any:
     """`GET /_cat/indices?format=json` -- list indices with health + doc
     count. Optional `index` filters by pattern; system indices (`.`) hidden."""
-    cfg = _config(_resolve_env(args))
+    cfg = _config(_resolve_env(args), _resolve_cluster(args))
     pattern = (args.get("index") or "").strip()
     path = f"/_cat/indices/{pattern}" if pattern else "/_cat/indices"
     rows = await _get(
@@ -319,7 +355,7 @@ async def _h_list_indices(_unused, args: dict) -> Any:
 
 async def _h_get_mappings(_unused, args: dict) -> Any:
     """`GET /<index>/_mapping` -- field mappings (schema discovery)."""
-    cfg = _config(_resolve_env(args))
+    cfg = _config(_resolve_env(args), _resolve_cluster(args))
     index = _index(args, cfg)
     resp = await _get(cfg, f"/{index}/_mapping", tool="elasticsearch_get_mappings")
     out: dict[str, dict] = {}
@@ -337,7 +373,7 @@ async def _h_search(_unused, args: dict) -> Any:
     `service` (logical) filters via the env's `fields.service` mapping (so a
     caller need not know the physical field name); `sort` defaults to most-
     recent-first on the env's `fields.timestamp` field when set."""
-    cfg = _config(_resolve_env(args))
+    cfg = _config(_resolve_env(args), _resolve_cluster(args))
     index = _index(args, cfg)
     size = _clamp(args.get("size"))
     body: dict[str, Any] = {"size": size, "track_total_hits": False}
@@ -374,7 +410,7 @@ async def _h_search(_unused, args: dict) -> Any:
 async def _h_esql_query(_unused, args: dict) -> Any:
     """`POST /_query` -- run an ES|QL query (Elasticsearch only; OpenSearch
     does not implement ES|QL). `query` is the ES|QL string."""
-    cfg = _config(_resolve_env(args))
+    cfg = _config(_resolve_env(args), _resolve_cluster(args))
     if cfg["backend"] != "elasticsearch":
         raise MCPElasticsearchError(
             "elasticsearch_esql_query: ES|QL is Elasticsearch-only "
@@ -393,27 +429,56 @@ async def _h_esql_query(_unused, args: dict) -> Any:
 async def _h_cluster_health(_unused, args: dict) -> Any:
     """`GET /_cluster/health` -- cluster status (green/yellow/red) + shard
     counts."""
-    cfg = _config(_resolve_env(args))
+    cfg = _config(_resolve_env(args), _resolve_cluster(args))
     resp = await _get(cfg, "/_cluster/health", tool="elasticsearch_cluster_health")
     keys = ("cluster_name", "status", "number_of_nodes", "active_shards",
             "relocating_shards", "initializing_shards", "unassigned_shards",
             "active_shards_percent_as_number")
     out = {k: resp.get(k) for k in keys if k in (resp or {})}
     out["env"] = cfg["env"]
+    out["cluster"] = cfg["cluster"]
     return out
+
+
+async def _h_list_clusters(_unused, args: dict) -> Any:
+    """List the ES clusters configured for an env + each cluster's `usage_note`
+    (what it holds), so the agent can pick the right one. No network call --
+    reads the environments registry."""
+    env = _resolve_env(args)
+    clusters, default_name = _es_clusters(env)
+    out = [
+        {
+            "cluster": cname,
+            "default": cname == default_name,
+            "backend": getattr(t, "backend", "elasticsearch"),
+            "reach": getattr(t, "reach", "direct"),
+            "index_pattern": getattr(t, "index_pattern", "*"),
+            "usage_note": getattr(t, "usage_note", None),
+        }
+        for cname, t in sorted(clusters.items())
+    ]
+    return {"env": env, "default": default_name, "count": len(out), "clusters": out}
 
 
 # --- tool specs ------------------------------------------------------------
 
 _INDEX_PROP = {"index": {"type": "string", "description": "Index or index pattern (default: configured index_pattern)."}}
-# Optional env selector on EVERY tool. Omitted -> the registry default env, so
-# single-env callers are unaffected. `cluster` is a back-compat alias.
+# Optional env + cluster selectors on the query tools. Both omitted -> the
+# registry default env and that env's default ES cluster, so single-env /
+# single-cluster callers are unaffected.
 _ENV_PROP = {
-    "env": {"type": "string", "description": "Target environment name from the environments: registry (default: the configured default env). Back-compat alias: 'cluster'."},
-    "cluster": {"type": "string", "description": "Back-compat alias for 'env'."},
+    "env": {"type": "string", "description": "Target environment name from the environments: registry (default: the configured default env)."},
+    "cluster": {"type": "string", "description": "Elasticsearch cluster name within the env (multi-cluster envs; see elasticsearch_list_clusters). Omitted -> the env's default cluster."},
 }
+_ENV_ONLY = {"env": _ENV_PROP["env"]}
 
 ES_TOOLS: list[MCPTool] = [
+    MCPTool(
+        name="elasticsearch_list_clusters",
+        description="List the Elasticsearch clusters available for an environment, each with a usage note describing what it holds (e.g. container logs vs integration logs vs product data). Call this FIRST when a query could target more than one cluster, or when a search finds nothing. Optional 'env'. Read-only.",
+        input_schema={"type": "object", "properties": {**_ENV_ONLY}},
+        handler=_h_list_clusters,
+    ),
     MCPTool(
         name="elasticsearch_list_indices",
         description="List Elasticsearch/OpenSearch indices with health, status, and document counts. Optional 'index' filters by pattern. Optional 'env' selects the target environment. Read-only.",

@@ -12,6 +12,7 @@ from opsrag.mcp.elasticsearch import (
 )
 
 _EXPECTED_TOOLS = {
+    "elasticsearch_list_clusters",
     "elasticsearch_list_indices",
     "elasticsearch_get_mappings",
     "elasticsearch_search",
