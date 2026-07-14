@@ -206,22 +206,18 @@ try:
                 o = ord(ch)
                 if o == 9 or o == 10 or o == 13 or 0x20 <= o <= 0x7e:
                     continue
-                # The rule targets FOREIGN-LANGUAGE text, i.e. actual words in
-                # a non-Latin script -- NOT the Unicode symbols, math signs,
-                # emoji, marks, or typographic punctuation that routinely appear
-                # in English prose/comments/UX (em/en dashes, smart quotes,
-                # ellipsis, arrows, bullets, middle dots, section signs, >=/<=,
-                # 👍👎⚠️ and other load-bearing glyphs). Only a codepoint that is
-                # a LETTER (Unicode category L*) AND not a Latin-script letter
-                # (accented Latin like é/ü stays fine) is flagged.
-                cat = unicodedata.category(ch)
-                if not cat.startswith("L"):
+                # The rule targets FOREIGN-LANGUAGE text, i.e. actual words made
+                # of LETTERS (Unicode category L*). Everything that is NOT a
+                # letter -- symbols, math signs, emoji, combining marks, and
+                # typographic punctuation that routinely appear in English
+                # prose/comments/UX (em/en dashes, smart quotes, ellipsis,
+                # arrows, bullets, middle dots, section signs, >=/<=, 👍👎⚠️ and
+                # other load-bearing glyphs) -- is allowed. A non-ASCII LETTER is
+                # flagged regardless of script: this catches Latin-script
+                # diacritics used by non-English languages (Vietnamese and
+                # French/German accented letters) as well as CJK/Cyrillic/etc.
+                if not unicodedata.category(ch).startswith("L"):
                     continue
-                try:
-                    if unicodedata.name(ch).startswith("LATIN"):
-                        continue
-                except ValueError:
-                    continue  # unnamed letter -> not a vendor-neutrality concern
                 stripped = line.rstrip("\n")
                 print(f"{i}:{stripped}")
                 break

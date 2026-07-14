@@ -40,7 +40,7 @@ dependencies = [
     "httpx>=0.28",
     # Config / validation
     "pydantic>=2.10",
-    "pydantic-settings>=2.6",
+    "pydantic-settings>=2.14.2",
     "pyyaml>=6.0",
     # Round-trip YAML (comments + anchors preserved through ingestion so ops
     # rationale comments get indexed/embedded/BM25'd -- PyYAML drops them).
