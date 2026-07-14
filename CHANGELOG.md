@@ -7,8 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-14
+
 ### Added
 
+- **Slack first-responder.** An opt-in, per-channel first-responder that
+  auto-answers questions in allow-listed Slack channels: it classifies the
+  request, extracts a normalized query from Slack mrkdwn, answers with a
+  confidence signal and an always-cc on-call handle, and renders 👍/👎 feedback
+  buttons and reactions. Config-driven per channel (`agent_name`,
+  `oncall_handle`, `request_app_allowlist`), off by default.
+- **External MCP connectors.** A framework to discover, filter, and wrap tools
+  from upstream MCP servers as first-class read-only connectors — runtime
+  registration, per-connector RBAC, and graceful degradation — so third-party
+  MCP servers can be admitted into the tool registry.
+- **Chart rendering in answers (UI).** The agent can return chart specs the web
+  UI renders (recharts), plus image-aware multi-agent tool selection and a
+  thumbnail/lightbox for attached images.
+- **Slack thread deep-links & richer chat UI.** Clickable Slack permalinks,
+  title normalization, requester-name display, and preserved line breaks in
+  request text (`slack.workspace_url`).
+- **Runbooks upgrades.** Thumbs-up/down on runbook cards, a catalog card view,
+  an in-chat Runbooks tab, and operator-authored scope surfaced in `when_to_use`.
+- **Qdrant file-key backfill.** A `backfill_file_key` maintenance tool plus a
+  payload index so re-augment/delete reroutes address points by stable file key.
+- **Cloudflare read-only MCP + health probe.** Read-only Cloudflare tools
+  (zones / DNS / firewall) with a lazy health probe; token via `CLOUDFLARE_API_KEY`.
 - **Billing category — read-only cost/spend connectors.** A new "Billing"
   connector category so the agent can answer FinOps questions ("what did we
   spend on Vertex AI", "which namespace drives GKE cost", "are we over budget").
@@ -336,5 +360,10 @@ amd64 UI image `ghcr.io/dtduc-git/opsrag-ui`, and the Helm chart
   tool surface is read-only by construction (verb allow-lists + output clamps).
 - The vendor-neutrality audit gates CI (proprietary names / non-English text /
   hardcoded hosts), with Trivy, gitleaks, CodeQL, and pip-audit scanning.
+- Patched dependency vulnerabilities: `langsmith` 0.8.5 → 0.10.3
+  (GHSA-f4xh-w4cj-qxq8), `pydantic-settings` 2.14.1 → 2.14.2
+  (GHSA-4xgf-cpjx-pc3j), `echarts` 5 → 6.1.0 (GHSA-fgmj-fm8m-jvvx), and
+  `dompurify` → 3.4.12 (GHSA-cmwh-pvxp-8882).
 
-[Unreleased]: https://github.com/dtduc-git/opsrag/commits/master
+[Unreleased]: https://github.com/dtduc-git/opsrag/compare/v0.5.0...master
+[0.5.0]: https://github.com/dtduc-git/opsrag/releases/tag/v0.5.0
