@@ -108,6 +108,111 @@ _catalog_built_at: float = 0.0
 _catalog_max_mtime: float = 0.0
 
 
+# --- Runbook-tab store (hand-authored in the UI) ---------------------
+# Wired at server startup via set_runbook_store(app.state.runbook_store).
+# These entries are the OPERATOR-CURATED source of truth and list BEFORE
+# the file catalog; ids are namespaced `rb-<uuid>` so they never collide
+# with file-frontmatter ids. None (dev / store init failure) degrades to
+# the file-only behavior.
+
+_runbook_store: Any | None = None
+_STORE_ID_PREFIX = "rb-"
+
+
+def set_runbook_store(store: Any | None) -> None:
+    global _runbook_store
+    _runbook_store = store
+
+
+def _store_entry(rb: Any) -> dict:
+    scope_bits = [b for b in (rb.service, rb.issue_kind) if b]
+    if rb.tags:
+        scope_bits.append("tags: " + ", ".join(rb.tags))
+    return {
+        "name": f"{_STORE_ID_PREFIX}{rb.id}",
+        "title": rb.title,
+        "when_to_use": " · ".join(scope_bits) or rb.title,
+        "source": "runbook-tab",
+    }
+
+
+async def _store_list(topic: str) -> list[dict]:
+    """Tab-store entries for runbook_list. Best-effort: a store hiccup
+    must never take the file catalog down with it."""
+    if _runbook_store is None:
+        return []
+    try:
+        if topic:
+            hits = await _runbook_store.search(topic, top_k=_LIST_TOPIC_TOP_K)
+            return [_store_entry(h.runbook) for h in hits]
+        rbs = await _runbook_store.list(limit=_LIST_NO_TOPIC_CAP)
+        return [_store_entry(rb) for rb in rbs]
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("runbook-tab store list failed: %s", exc)
+        return []
+
+
+# --- catalog card (reasoner-prompt addendum) --------------------------
+# Data-driven routing: instead of hardcoding per-domain dispatch rules in
+# the triage/reasoner prompts ("kafka questions -> runbook_list"), the
+# reasoner prompt carries this LIVE card -- every runbook advertises its
+# own scope (title · service · issue_kind · tags), so authoring one in
+# the UI is all it takes for the planner to start routing matching
+# questions to it. Same inject-when-available pattern as the repomap
+# card. Refreshed async (TTL) at the top of each reasoner turn; read
+# synchronously while building the prompt.
+
+_catalog_card: str = ""
+_catalog_card_built_at: float = 0.0
+_CATALOG_CARD_TTL_S = 60.0
+_CATALOG_CARD_MAX_ENTRIES = 30
+
+
+def runbook_catalog_card() -> str:
+    """Current curated-runbook catalog card ('' when no runbooks exist)."""
+    return _catalog_card
+
+
+async def refresh_runbook_catalog_card(force: bool = False) -> None:
+    """Rebuild the card when the TTL lapsed (or on force). Best-effort --
+    a store/catalog hiccup leaves the previous card in place."""
+    global _catalog_card, _catalog_card_built_at
+    now = time.time()
+    if not force and (now - _catalog_card_built_at) < _CATALOG_CARD_TTL_S:
+        return
+    _catalog_card_built_at = now
+    entries = await _store_list("")
+    try:
+        entries += [
+            {"name": e.name, "title": e.title, "when_to_use": e.when_to_use}
+            for e in _get_catalog().values()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("file catalog unavailable for card: %s", exc)
+    if not entries:
+        _catalog_card = ""
+        return
+    lines = [
+        "## Curated runbooks (operator-authored -- authoritative procedures)",
+        "When the user's question matches a runbook's scope below, call "
+        "`runbook_load(name=<name>)` FIRST and follow its procedure with the "
+        "live tools it names. Do NOT improvise a procedure -- or guess a "
+        "name/mapping -- that a runbook already derives.",
+    ]
+    for e in entries[:_CATALOG_CARD_MAX_ENTRIES]:
+        lines.append(f"- `{e['name']}` -- {e['title']} ({e['when_to_use']})")
+    hidden = len(entries) - _CATALOG_CARD_MAX_ENTRIES
+    if hidden > 0:
+        lines.append(f"- ...and {hidden} more -- call `runbook_list` to see all.")
+    _catalog_card = "\n".join(lines) + "\n"
+    # INFO on rebuild (once per TTL, not per turn): operators debugging
+    # "why didn't my runbook fire" can see the card exists and its size.
+    _log.info(
+        "runbook catalog card rebuilt: %d entr%s (%d chars)",
+        len(entries), "y" if len(entries) == 1 else "ies", len(_catalog_card),
+    )
+
+
 # --- helpers --------------------------------------------------------
 
 
@@ -346,13 +451,17 @@ def _score(entry: RunbookEntry, topic_tokens: list[str], topic_lower: str) -> fl
 
 async def _h_list_runbooks(_unused, args: dict) -> Any:
     topic = (args.get("topic") or "").strip()
+    # Operator-curated tab runbooks first -- they out-rank the file catalog.
+    store_out = await _store_list(topic)
     catalog = _get_catalog()
-    if not catalog:
+    if not catalog and not store_out:
         return {
             "topic": topic,
             "count": 0,
             "runbooks": [],
-            "error": "no runbooks found -- check OPSRAG_SRE_KB_PATH and that sre-knowledge-base/docs/runbooks/ has .md files",
+            "error": "no runbooks found -- author one in the UI Runbooks tab, "
+                     "or check OPSRAG_SRE_KB_PATH and that "
+                     "sre-knowledge-base/docs/runbooks/ has .md files",
         }
 
     entries = list(catalog.values())
@@ -370,7 +479,7 @@ async def _h_list_runbooks(_unused, args: dict) -> Any:
         entries.sort(key=lambda e: e.name)
         ranked = entries[:_LIST_NO_TOPIC_CAP]
 
-    out = [
+    out = store_out + [
         {
             "name": e.name,
             "title": e.title,
@@ -382,9 +491,28 @@ async def _h_list_runbooks(_unused, args: dict) -> Any:
     return {
         "topic": topic,
         "count": len(out),
-        "total_in_catalog": len(catalog),
+        "total_in_catalog": len(catalog) + len(store_out),
         "runbooks": out,
     }
+
+
+def _cap_markdown(markdown: str, *, source: str) -> tuple[str, bool]:
+    """Cap runbook markdown to keep the generator's context budget under
+    control. ~12K chars ~= 3K tokens -- enough to carry a typical runbook
+    (5 KB median, 15 KB max) without truncation on most, while giving the
+    generator room to actually write an answer. Oversized ones get cut at
+    a paragraph boundary near the cap, not mid-sentence."""
+    _LOAD_CAP = 12_000
+    if len(markdown) <= _LOAD_CAP:
+        return markdown, False
+    cut = markdown.rfind("\n\n", 0, _LOAD_CAP)
+    if cut < _LOAD_CAP // 2:
+        cut = _LOAD_CAP
+    body = markdown[:cut].rstrip() + (
+        f"\n\n[...runbook truncated at {cut} chars; full file is "
+        f"{len(markdown)} chars at {source}]"
+    )
+    return body, True
 
 
 async def _h_load_runbook(_unused, args: dict) -> Any:
@@ -392,36 +520,52 @@ async def _h_load_runbook(_unused, args: dict) -> Any:
     if not name:
         return {"error": "name is required (use list_runbooks to discover ids)"}
 
+    # Tab-store runbooks (`rb-<uuid>`): fetch from Postgres and bump the
+    # UI's USED counter so operators see the runbook actually firing.
+    if name.startswith(_STORE_ID_PREFIX) and _runbook_store is not None:
+        rb_id = name[len(_STORE_ID_PREFIX):]
+        try:
+            rb = await _runbook_store.get(rb_id)
+        except Exception:  # noqa: BLE001 -- unknown id / store hiccup
+            rb = None
+        if rb is None:
+            return {
+                "error": "runbook not found",
+                "requested_name": name,
+                "available_names_first_5": [
+                    e["name"] for e in await _store_list("")
+                ][:5],
+            }
+        try:
+            # NB: the store method is `record_use` (NOT mark_used) -- calling
+            # a wrong name here fails silently into this except and the UI's
+            # USED column never moves; warn so it can't hide again.
+            await _runbook_store.record_use(rb_id)
+        except Exception as exc:  # noqa: BLE001 -- counter is best-effort
+            _log.warning("runbook record_use failed for %s: %s", rb_id, exc)
+        body, truncated = _cap_markdown(rb.body_markdown, source="runbook-tab")
+        return {
+            "name": name,
+            "title": rb.title,
+            "source": "runbook-tab",
+            "markdown": body,
+            "truncated": truncated,
+            "full_length_chars": len(rb.body_markdown),
+            "last_reviewed": rb.updated_at.date().isoformat(),
+        }
+
     catalog = _get_catalog()
     entry = catalog.get(name)
     if entry is None:
-        available = sorted(catalog.keys())[:5]
+        store_names = [e["name"] for e in await _store_list("")]
+        available = (store_names + sorted(catalog.keys()))[:5]
         return {
             "error": "runbook not found",
             "requested_name": name,
             "available_names_first_5": available,
         }
 
-    # Cap markdown to keep the generator's context budget under control.
-    # ~12K chars ~= 3K tokens -- enough to carry a typical runbook
-    # (5 KB median, 15 KB max) without truncation on most, while giving
-    # the generator room to actually write an answer. The biggest runbook
-    # (onboarding-new-saas-app.md at ~38KB) gets cut to its first 12KB --
-    # which still includes Summary + Prerequisites + Steps 1-3, the part
-    # the user most often needs.
-    body = entry.markdown
-    _LOAD_CAP = 12_000
-    truncated = False
-    if len(body) > _LOAD_CAP:
-        # Cut at a paragraph boundary near the cap, not mid-sentence.
-        cut = body.rfind("\n\n", 0, _LOAD_CAP)
-        if cut < _LOAD_CAP // 2:
-            cut = _LOAD_CAP
-        body = body[:cut].rstrip() + (
-            f"\n\n[...runbook truncated at {cut} chars; full file is "
-            f"{len(entry.markdown)} chars at {entry.source}]"
-        )
-        truncated = True
+    body, truncated = _cap_markdown(entry.markdown, source=entry.source)
     return {
         "name": entry.name,
         "title": entry.title,

@@ -553,6 +553,25 @@ class RunbookStore:
         except Exception as exc:
             _log.warning("runbooks: record_use failed for %s: %s", runbook_id, exc)
 
+    async def record_thumbs(self, runbook_id: str, *, thumbs: str) -> None:
+        """Thumbs-only counter bump from ANSWER feedback (a user thumbed a
+        chat answer that loaded this runbook). Deliberately does NOT touch
+        used_count/last_used_at -- runbook_load already counted the use via
+        record_use, so bumping here would double-count USED and turn it
+        into a mixed load+feedback metric. Best-effort, never raises."""
+        if thumbs not in ("up", "down"):
+            return
+        col = "thumbs_up_count" if thumbs == "up" else "thumbs_down_count"
+        try:
+            async with self._pg.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"UPDATE opsrag_runbooks SET {col} = {col} + 1 WHERE id = %s",
+                        (runbook_id,),
+                    )
+        except Exception as exc:
+            _log.warning("runbooks: record_thumbs failed for %s: %s", runbook_id, exc)
+
     # -- Internals -----------------------------------------------
 
     async def _embed(self, title: str, body: str) -> list[float] | None:

@@ -52,6 +52,10 @@ _PRO_PATTERNS = [
     (re.compile(r"\b(diagram|architecture)\b", re.I), "diagram_request"),
     (re.compile(r"\b(draw|sketch|visuali[sz]e)\s+", re.I), "draw_visualize"),
     (re.compile(r"\bshow\s+(me\s+)?(a\s+|the\s+)?(flow|diagram|architecture|components?|topology)\b", re.I), "show_diagram"),
+    # Chart / graph / plot requests -- Pro is likewise more reliable at
+    # producing a clean `render_chart` spec (correct type + series) than Flash,
+    # which tends to fall back to a markdown table.
+    (re.compile(r"\b(chart|graph|plot|trend)\b", re.I), "chart_request"),
 ]
 
 _LONG_QUERY_TOKEN_THRESHOLD = 30  # >30 tokens -> likely multi-step

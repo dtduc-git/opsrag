@@ -481,6 +481,22 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             _log.warning("connector system-prompt bind failed: %s", exc)
 
+        # External MCP Adapter: discover + register upstream MCP servers at
+        # runtime (mutates ALL_MCP_TOOLS/REGISTRY/_active_enabled in place).
+        # Graceful-degrade: unreachable/misconfigured servers register 0 tools
+        # and must never block boot.
+        try:
+            from opsrag.mcp.external.connector import register_external_connectors
+            _external = await register_external_connectors(cfg)
+            if _external:
+                # Re-bind per-connector prompts now that external names exist;
+                # register_external_connectors already rebuilt
+                # _TOOL_TO_CONNECTOR and re-ran set_active_enabled.
+                _rl.set_connector_system_prompts(cfg)
+                _log.info("external MCP connectors registered: %s", _external)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("external MCP registration failed (non-fatal): %s", exc)
+
         # Register K8s cluster coordinates with the K8s MCP for the optional
         # GKE Workload-Identity provider (ADC + GCP Container API). Empty
         # config (the default) falls through to the vendor-neutral path:
@@ -529,8 +545,8 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
 
         # -- Cloudflare MCP (LIVE API surface) ----------------------
         # Token source priority:
-        #   1. CLOUDFLARE_API_KEY env (prod path -- ExternalSecret from
-        #      GSM `opsrag-cloudflare-api-key`).
+        #   1. CLOUDFLARE_API_KEY env (prod path -- populated from your
+        #      secret store).
         #   2. CLOUDFLARE_API_KEY_FILE env (local dev path -- file
         #      `.cloudflare-api-key` mounted via docker-compose volume).
         # Empty token -> bind is no-op; every cloudflare_* tool surfaces
@@ -812,8 +828,15 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
                         qdrant=rb_qdrant,
                         embedder=providers.embedder,
                     )
+                    # Expose the tab store to the chat agent's runbook_list /
+                    # runbook_load tools -- without this, hand-authored tab
+                    # runbooks are only ever seen by Investigations Lane A
+                    # and chat falls back to stale RAG chunks (USED stays 0).
+                    from opsrag.mcp import runbooks as mcp_runbooks
+                    mcp_runbooks.set_runbook_store(app.state.runbook_store)
                     _log.info(
-                        "runbook_store wired (Postgres pool=1-4, Qdrant collection=opsrag_runbooks_vec)"
+                        "runbook_store wired (Postgres pool=1-4, Qdrant collection=opsrag_runbooks_vec) "
+                        "+ exposed to chat runbook_list/runbook_load"
                     )
                 except Exception as exc:
                     _log.warning("runbook_store init failed: %s", exc)
@@ -1332,13 +1355,19 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
 
         # Writer roles flush the in-memory tracker into Postgres on a throttle
         # so backend pods see near-real-time progress without per-file DB
-        # writes. A "writer" is any role that can run indexing in-process: the
-        # `api`/`indexer`/dev roles (POST /index/repo runs in-process) and the
-        # job-indexer Job. Only the pure-serving `backend` role is read-only.
-        # NOTE: the entrypoint defaults OPSRAG_ROLE to "api", so gating on
-        # `_is_indexer` (== role in {"", "indexer"}) wrongly excluded the
-        # common compose/dev case -- gate on "not backend" instead.
-        _is_index_writer = _role != "backend"
+        # writes. A "writer" is ONLY a role that can run indexing in-process:
+        # the `api`/`indexer`/dev roles (POST /index/repo runs in-process) and
+        # the job-indexer Job.
+        #
+        # Allow-LIST, not "not backend": gating on `_role != "backend"` also
+        # made every channel worker (slackbot/telegrambot/discordbot) a writer.
+        # Those pods never index, but each backfilled the full Qdrant snapshot
+        # at boot and then flushed it (guarded=False) on a loop -- clobbering
+        # the live job-indexer's per-repo rows every cycle, so `total_chunks`
+        # in /indexing/status oscillated between the stale full snapshot and
+        # the live partial one (the UI "looping" between e.g. 578K and 25K).
+        _INDEX_WRITER_ROLES = {"", "api", "indexer", "job-indexer"}
+        _is_index_writer = _role in _INDEX_WRITER_ROLES
 
         # Indexing trigger: in production POST /index/repo creates an ephemeral
         # k8s Job (the API stays pure-serving). In dev / no-cluster the launcher
@@ -1423,41 +1452,18 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
         # Independent of the startup auto-index above; that runs once per
         # process lifecycle, this fires once per day on cron.
         scheduler = None
-        # Confluence spaces are added to the daily run if the
-        # connector is enabled AND a non-empty allowlist is configured.
-        # Personal `~space` keys are filtered defensively even if they
-        # somehow ended up in the allowlist (the connector's own check
-        # also blocks them).
-        confluence_scopes: list[tuple[str, str]] = []
-        if cfg.confluence.enabled and "confluence" in (providers.sources or {}):
-            confluence_scopes = [
-                ("confluence", k)
-                for k in cfg.confluence.spaces_allowlist
-                if k and not k.startswith("~")
-            ]
-        slack_scopes: list[tuple[str, str]] = []
-        if cfg.slack.enabled and "slack" in (providers.sources or {}):
-            slack_scopes = [
-                ("slack", channel_id)
-                for channel_id in cfg.slack.channels_allowlist
-                if channel_id
-            ]
-        rootly_scopes: list[tuple[str, str]] = []
-        if cfg.rootly.enabled and "rootly" in (providers.sources or {}):
-            # Rootly is single-tenant per token -- one synthetic scope.
-            rootly_scopes = [("rootly", cfg.rootly.scope)]
-        # Investigation-history source: synthetic
-        # single scope ("opsrag") since investigations live in one global
-        # collection.
-        investigation_scopes: list[tuple[str, str]] = []
-        if (
-            cfg.investigation_history.enabled
-            and "investigation-history" in (providers.sources or {})
-        ):
-            investigation_scopes = [("investigation-history", "opsrag")]
-        source_scopes = (
-            confluence_scopes + slack_scopes + rootly_scopes + investigation_scopes
-        )
+        # Non-git sources for the daily run: every scope that opted into
+        # auto-index via its config block (`auto_index` flag, see
+        # Settings.auto_index_source_targets -- config-driven, per-source
+        # filtering like Confluence `~space` exclusion lives in each block's
+        # auto_index_targets()), limited to sources whose provider actually
+        # got built on this pod (missing token -> skipped, not failed).
+        _available_sources = set((providers.sources or {}).keys())
+        source_scopes = [
+            (st, scope)
+            for st, scope in cfg.auto_index_source_targets()
+            if st in _available_sources
+        ]
 
         if _is_indexer and cfg.scheduler.enabled and (repo_pairs or source_scopes):
             from functools import partial
@@ -1673,6 +1679,11 @@ def create_app(config: OpsRAGConfig | None = None) -> FastAPI:
     # resolve each request's roles/scopes.
     app.state.auth_config = cfg.auth
     app.state.role_mappings = cfg.auth.role_mappings
+    # Bind the configured unmatched-user fallback roles (auth.default_roles) so
+    # e.g. every signed-in user gets MCP by default without a per-user override.
+    from opsrag.auth.scopes import set_default_roles
+    set_default_roles(cfg.auth.default_roles)
+    _log.info("auth: default_roles=%s", sorted(cfg.auth.default_roles))
     # mode='login': register the first-party login/SSO router. Imported
     # lazily so oidc deployments don't need the `login` extra (authlib,
     # pwdlib, ...). The login-mode runtime state (SessionManager, user store,

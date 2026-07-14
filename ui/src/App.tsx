@@ -20,7 +20,8 @@ import RetrievalQualityPage from "./components/RetrievalQualityPage";
 import IndexingJobsPage from "./components/IndexingJobsPage";
 import ConversationListPane from "./components/ConversationListPane";
 import InvestigationListPane from "./components/InvestigationListPane";
-import { fetchSessions, fetchSessionMessages, deleteSession, streamQuery, fetchUIConfig, fetchInvestigationHistory, logout, fetchChannelConversations, fetchChannelMessages, channelPlatformLabel, type Session, type UIConfig, type InvestigationHistoryItem, type MeResponse } from "./api";
+import SlackThreadLink from "./components/SlackThreadLink";
+import { fetchSessions, fetchSessionMessages, deleteSession, streamQuery, fetchUIConfig, fetchInvestigationHistory, logout, fetchChannelConversations, fetchChannelMessages, channelPlatformLabel, slackPermalink, normalizeTitle, type Session, type UIConfig, type InvestigationHistoryItem, type MeResponse } from "./api";
 import type { ProgressStep, CacheHitInfo } from "./components/ThinkingProgress";
 // IconBolt previously powered the chat empty-state glyph; the premium
 // redesign replaces it with the brand logo PNG, so the import is dead.
@@ -156,6 +157,10 @@ export default function App({ me, reloadMe }: AppProps) {
         authorEmail: m.author_email ?? null,
         authorName: m.author_name ?? null,
         ts: m.ts ?? null,
+        // Re-hydrate charts/plan so they render on replay. Map the backend's
+        // `{component, props}` to the UI's `{type, props}` RichComponent shape
+        // (same mapping the live `render_component` handler does).
+        richComponents: m.rich_components?.map((c) => ({ type: c.component, props: c.props })),
       })));
     } catch {
       // Swallow — empty pane is fine fallback. New turns still work.
@@ -322,9 +327,14 @@ export default function App({ me, reloadMe }: AppProps) {
         grounded: m.grounded,
         queryType: m.query_type ?? null,
         investigationId: m.investigation_id ?? null,
-        // Channel users are anonymous — never surface author identity here.
+        // First-responder / workflow turns carry the resolved Slack requester
+        // NAME even though the numeric channel user_id is anonymized. Surface
+        // the name so a teammate turn reads e.g. "Jane Doe" not "You".
+        // authorEmail stays null: we don't expose requester emails in the
+        // public Channels browser, and null lets displayAuthorLabel fall
+        // straight through to the name (requires the 95-112 reorder).
         authorEmail: null,
-        authorName: null,
+        authorName: m.author_name ?? null,
         ts: m.ts ?? null,
       })));
     } catch { /* empty pane is a fine fallback */ }
@@ -529,6 +539,7 @@ export default function App({ me, reloadMe }: AppProps) {
             sessions={sessions}
             brandName={uiConfig?.brand_name ?? "OpsRAG"}
             investigationEnabled={uiConfig?.investigation_enabled ?? false}
+            workspaceUrl={uiConfig?.slack_workspace_url}
             onNavigate={(p) => setPage(p as Page)}
             onNewChat={handleNewConversation}
             onOpenChat={async (id) => {
@@ -541,16 +552,22 @@ export default function App({ me, reloadMe }: AppProps) {
           />
         )}
 
-        {page === "chat" && (
+        {page === "chat" && (() => {
+          const activeSession = activeThread
+            ? sessions.find((s) => s.thread_id === activeThread) ?? null
+            : null;
+          const titleText = activeThread
+            ? (normalizeTitle(activeSession?.title) || `conversation ${activeThread.slice(0, 8)}`)
+            : "new conversation";
+          const permalink = activeSession
+            ? slackPermalink(activeSession.thread_id, uiConfig?.slack_workspace_url)
+            : null;
+          return (
           <section className="page">
             <div className="topbar">
-              <h1>
-                Conversations <span className="dim">· {
-                  activeThread
-                    ? (sessions.find((s) => s.thread_id === activeThread)?.title
-                        ?? `conversation ${activeThread.slice(0, 8)}`)
-                    : "new conversation"
-                }</span>
+              <h1 title={activeSession?.title ?? ""}>
+                Conversations <span className="dim">· {titleText}</span>
+                {permalink && <SlackThreadLink href={permalink} />}
               </h1>
               <div className="actions">
                 {loading && <span className="hdr-badge">streaming</span>}
@@ -565,6 +582,7 @@ export default function App({ me, reloadMe }: AppProps) {
                 <ConversationListPane
                   sessions={sessions}
                   activeThread={activeThread}
+                  workspaceUrl={uiConfig?.slack_workspace_url}
                   onSelect={async (id) => {
                     setActiveThread(id);
                     setPageState("chat");
@@ -638,7 +656,8 @@ export default function App({ me, reloadMe }: AppProps) {
               </div>
             </div>
           </section>
-        )}
+          );
+        })()}
 
         {page === "channels" && (() => {
           const active = activeChannelThread
@@ -648,12 +667,16 @@ export default function App({ me, reloadMe }: AppProps) {
           return (
           <section className="page">
             <div className="topbar">
-              <h1>
+              <h1 title={active?.title ?? ""}>
                 Channels <span className="dim">· {
                   active
-                    ? (active.title ?? `conversation ${active.thread_id.slice(0, 8)}`)
+                    ? (normalizeTitle(active.title) || `conversation ${active.thread_id.slice(0, 8)}`)
                     : "shared chat-channel conversations"
                 }</span>
+                {active && (() => {
+                  const pl = slackPermalink(active.thread_id, uiConfig?.slack_workspace_url);
+                  return pl ? <SlackThreadLink href={pl} /> : null;
+                })()}
               </h1>
               <div className="actions">
                 <span className="hdr-badge">read-only</span>
@@ -664,6 +687,7 @@ export default function App({ me, reloadMe }: AppProps) {
                 <ConversationListPane
                   sessions={channelConversations}
                   activeThread={activeChannelThread}
+                  workspaceUrl={uiConfig?.slack_workspace_url}
                   onSelect={async (id) => {
                     setActiveChannelThread(id);
                     await loadChannelMessages(id);
@@ -933,11 +957,17 @@ export default function App({ me, reloadMe }: AppProps) {
         )}
 
         {page === "runbook-edit" && (
-          <RunbookEditorPage
-            runbookId={parseHash().runbookId}
-            onSaved={() => { window.location.hash = "runbooks"; }}
-            onCancel={() => { window.location.hash = "runbooks"; }}
-          />
+          /* Wrapped in .page like every other screen: .page owns the
+             vertical scroll inside the fixed-height app shell — unwrapped,
+             a long runbook body (Edit textarea / Preview) was clipped with
+             no way to scroll. */
+          <section className="page">
+            <RunbookEditorPage
+              runbookId={parseHash().runbookId}
+              onSaved={() => { window.location.hash = "runbooks"; }}
+              onCancel={() => { window.location.hash = "runbooks"; }}
+            />
+          </section>
         )}
 
         {page === "sources" && (

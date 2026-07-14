@@ -137,6 +137,23 @@ def _chunk_point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
 
 
+# `file_key` = the exact-match delete key. On Qdrant 1.12.4 `repo`/`source_path`
+# carry the TEXT index the MatchText lanes need (filename fanout, repo-slug
+# fanout, find_repo_by_substring, enumerate_paths) and a field cannot hold BOTH
+# a text and a keyword index -- so MatchValue filters on them have no usable
+# index and full-scan the collection (~7s per per-file delete at ~700K points,
+# measured). A separate keyword-indexed field sidesteps the conflict without
+# touching the text indexes. NUL can't appear in git repo names or paths, so
+# the key is unambiguous.
+_FILE_KEY_SEP = "\x00"
+
+
+def _make_file_key(repo: str | None, source_path: str | None) -> str:
+    """Single source of truth for file_key -- used by BOTH the upsert write and
+    the delete-time derivation so the bytes always match (same None->"")."""
+    return f"{repo or ''}{_FILE_KEY_SEP}{source_path or ''}"
+
+
 class QdrantVectorStore:
     def __init__(
         self,
@@ -146,13 +163,22 @@ class QdrantVectorStore:
         dimension: int = 3072,
         distance: str = "cosine",
         allow_dimension_change: bool = False,
+        timeout: float | None = None,
+        use_file_key_delete: bool = False,
     ):
         # ":memory:" -> in-process Qdrant (no server, no network); used by the
         # offline retrieval eval + unit tests. A real URL goes over the network.
         if url == ":memory:":
             self._client = AsyncQdrantClient(location=":memory:")
         else:
-            self._client = AsyncQdrantClient(url=url, api_key=api_key)
+            # timeout: the qdrant-client REST path inherits httpx's 5s default when
+            # none is passed. That 5s aborts `wait=True` writes whenever the server
+            # is momentarily slow (recovering/optimizing under concurrent load) --
+            # the client raises an EMPTY-str httpx.ReadTimeout ("file process
+            # failed ... : ") while the server still completes and returns 200,
+            # orphaning/dropping files. Pass an explicit, generous timeout
+            # (config.vector_store.request_timeout via the factory).
+            self._client = AsyncQdrantClient(url=url, api_key=api_key, timeout=timeout)
         self._collection = collection_name
         self._dimension = dimension
         self._distance = {
@@ -161,6 +187,12 @@ class QdrantVectorStore:
             "euclid": qm.Distance.EUCLID,
         }[distance]
         self._allow_dimension_change = allow_dimension_change
+        # Route exact-match (repo, source_path) deletes through the keyword-
+        # indexed `file_key` field. Default OFF: flipping it before the live
+        # collection is 100% backfilled would make deletes silently MISS
+        # points that predate the field (stale chunks keep matching queries).
+        # See opsrag/tools/backfill_file_key.py for the gated rollout.
+        self._use_file_key_delete = use_file_key_delete
         self._ensured = False
 
     async def ensure_collection(self) -> None:
@@ -211,7 +243,11 @@ class QdrantVectorStore:
             # search_by_text / search_by_path). Without the index Qdrant scans
             # the payload for that exclusion on every query -- latency + recall
             # degradation at scale. Mirrors the other KEYWORD fields.
-            for field in ("repo", "source_path", "doc_type", "entity_ids", "chunk_type"):
+            # `file_key` is the composite (repo, source_path) exact-match key
+            # for the fast delete path -- see _make_file_key above. Only fires
+            # for NEW collections; existing ones get the index out-of-band via
+            # opsrag/tools/backfill_file_key.py.
+            for field in ("repo", "source_path", "doc_type", "entity_ids", "chunk_type", "file_key"):
                 try:
                     await self._client.create_payload_index(
                         collection_name=self._collection,
@@ -282,6 +318,8 @@ class QdrantVectorStore:
                     "doc_type": c.doc_type.value,
                     "source_path": c.source_path,
                     "repo": c.repo,
+                    # Keyword-indexed exact-match delete key (see _make_file_key).
+                    "file_key": _make_file_key(c.repo, c.source_path),
                     "parent_chunk_id": c.parent_chunk_id,
                     "chunk_type": c.chunk_type,
                     "token_count": c.token_count,
@@ -368,7 +406,7 @@ class QdrantVectorStore:
 
     async def delete_by_filter(self, filters: dict) -> int:
         await self.ensure_collection()
-        qfilter = self._build_filter(filters)
+        qfilter = self._file_key_filter(filters) or self._build_filter(filters)
         if qfilter is None:
             return 0
         await self._client.delete(
@@ -866,6 +904,30 @@ class QdrantVectorStore:
             token_count=payload.get("token_count", 0),
         )
         return SearchResult(chunk=chunk, score=float(getattr(point, "score", 0.0) or 0.0), distance_metric="cosine")
+
+    def _file_key_filter(self, filters: dict | None) -> qm.Filter | None:
+        """Fast-delete translation: scalar {repo, source_path} -> one MatchValue
+        on the keyword-indexed `file_key` (extra keys carried through). Returns
+        None -- caller falls back to _build_filter -- when the flag is OFF or
+        the shape doesn't map (repo-only, list values -> MatchAny semantics a
+        single composite key can't express)."""
+        if not self._use_file_key_delete or not filters:
+            return None
+        repo = filters.get("repo")
+        source_path = filters.get("source_path")
+        if not isinstance(repo, str) or not isinstance(source_path, str):
+            return None
+        conds: list = [
+            qm.FieldCondition(
+                key="file_key",
+                match=qm.MatchValue(value=_make_file_key(repo, source_path)),
+            )
+        ]
+        rest = {k: v for k, v in filters.items() if k not in ("repo", "source_path")}
+        rest_filter = self._build_filter(rest)
+        if rest_filter is not None and rest_filter.must:
+            conds.extend(rest_filter.must)
+        return qm.Filter(must=conds)
 
     @staticmethod
     def _build_filter(filters: dict | None) -> qm.Filter | None:

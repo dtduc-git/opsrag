@@ -25,9 +25,11 @@ class ReactionKind(str, Enum):
     reaction-on-message (Telegram/Teams) implement these as no-ops.
     """
 
-    ACK = "ack"      # "I picked this up" (Slack 👀)
-    DONE = "done"    # success (Slack ✅)
-    ERROR = "error"  # failure (Slack ❌)
+    ACK = "ack"                    # "I picked this up" (Slack 👀)
+    DONE = "done"                  # success (Slack ✅)
+    ERROR = "error"                # failure (Slack ❌)
+    THUMBS_UP = "thumbs_up"        # 👍 feedback recorded (Slack +1)
+    THUMBS_DOWN = "thumbs_down"    # 👎 feedback recorded (Slack -1)
 
 
 @dataclass(frozen=True)
@@ -84,13 +86,26 @@ class AgentResult:
 
 @dataclass(frozen=True)
 class FeedbackEvent:
-    """A normalised 👍/👎 feedback action on a prior bot answer."""
+    """A normalised 👍/👎 feedback action on a prior bot answer.
+
+    ``channel_id`` / ``message_ts`` are the answer message's own coords (NOT
+    the thread) -- the dispatcher uses them to add a 👍/👎 reaction directly
+    onto that message via ``adapter.react``. Both default to ``""`` for
+    back-compat with adapters/tests that don't (yet) supply them; an empty
+    value means "skip the react, we don't know where to put it".
+    """
 
     thumbs: str                     # "up" | "down"
     investigation_id: str
     user_id: str
     thread_id: str | None
     raw: dict = field(default_factory=dict)
+    channel_id: str = ""
+    message_ts: str = ""
+    # Answer text captured from the click payload's message -- the dashboard
+    # snippet for feedback on answers with no cached investigation (ungrounded
+    # / LOW-confidence). "" when the payload carried no message to read.
+    answer_snippet: str = ""
 
 
 @dataclass(frozen=True)

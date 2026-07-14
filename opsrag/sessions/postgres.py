@@ -10,6 +10,8 @@ from typing import Any
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 
+from opsrag.sessions.replay_components import rebuild_rich_components
+
 
 class PostgresSessionStore:
     def __init__(self, dsn: str, min_size: int = 1, max_size: int = 10):
@@ -174,8 +176,9 @@ class PostgresSessionStore:
         """Replay a session's chat history from the LangGraph checkpoints.
 
         Each ``ainvoke`` for a thread produces many intermediate checkpoints
-        (one per node). We dedupe on (query, generation) so we end up with
-        one (user, assistant) pair per turn, ordered oldest-first.
+        (one per node), and a turn can write several distinct ``generation``
+        values. We collapse each contiguous same-query run to one (user,
+        assistant) pair per turn, ordered oldest-first.
 
         Also returns the original author's email/name (from the checkpoint
         config) attached to every user-role message, so the UI can show the
@@ -185,13 +188,21 @@ class PostgresSessionStore:
         if self._saver is None:
             return []
 
-        # Walk every checkpoint for this thread. ``alist`` yields newest-first;
-        # we collect into ``seen`` to keep the LAST occurrence of each pair
-        # (which carries the final ``sources``/``grounded`` flags) and then
-        # reverse for chronological display.
+        # Walk every checkpoint for this thread (``alist`` yields newest-first)
+        # and collapse each TURN to one (user, assistant) pair. A single turn
+        # checkpoints the ``generation`` channel several times (draft -> refined
+        # -> final) and can transiently carry the PRIOR turn's answer before it
+        # regenerates -- so a (query, generation) dedup emitted multiple rows per
+        # turn (the duplicate-message bug). Collapse by CONTIGUOUS query-run
+        # instead: turns are sequential, so one turn's checkpoints form a
+        # contiguous same-query block, and the FIRST (newest) qualifying
+        # checkpoint of the block carries that turn's FINAL answer -- skip the
+        # rest of the block. A query that reappears in a LATER turn is
+        # non-contiguous (separated by the intervening turn's query), so it is
+        # still preserved.
         config = {"configurable": {"thread_id": thread_id}}
-        seen: dict[tuple[str, str], dict] = {}
-        order: list[tuple[str, str]] = []
+        turns: list[dict] = []
+        prev_query: str | None = None
         # Author attribution: LangGraph's saver stores user-defined
         # configurable keys in ``cp_tuple.metadata`` -- NOT in
         # ``cp_tuple.config.configurable`` (which only carries canonical
@@ -213,9 +224,12 @@ class PostgresSessionStore:
             generation = (values.get("generation") or "").strip()
             if not query or not generation:
                 continue
-            key = (query, generation)
-            if key in seen:
+            # New turn iff the query changed from the previous qualifying
+            # checkpoint (same query = same contiguous turn -> the newest
+            # generation is already captured; skip the draft/stale rest).
+            if query == prev_query:
                 continue
+            prev_query = query
             # Build a UI-shaped message pair. Sources/grounded come from
             # whatever final-stage state was captured in this checkpoint.
             sources = []
@@ -227,20 +241,23 @@ class PostgresSessionStore:
                     label = f"{repo}:{src}" if repo else src
                     if label not in sources:
                         sources.append(label)
-            seen[key] = {
+            turns.append({
                 "query": query,
                 "generation": generation,
                 "sources": sources[:8],
                 "grounded": bool(values.get("generation_grounded")),
                 "query_type": values.get("query_type"),
                 "ts": cp_tuple.checkpoint.get("ts"),
-            }
-            order.append(key)
+                # Source data for renderable charts/plan -- accumulated channels
+                # that survive on this (final) checkpoint of the turn. Rebuilt
+                # into rich-components below so charts survive replay/refresh.
+                "tool_message_history": values.get("tool_message_history") or [],
+                "plan": values.get("plan") or [],
+            })
 
-        # ``alist`` is newest-first -> reverse for chronological replay.
+        # ``turns`` is newest-first -> reverse for chronological replay.
         messages: list[dict] = []
-        for key in reversed(order):
-            entry = seen[key]
+        for entry in reversed(turns):
             messages.append({
                 "role": "user",
                 "content": entry["query"],
@@ -251,12 +268,20 @@ class PostgresSessionStore:
                 "author_name": author_name,
                 "ts": entry["ts"],
             })
-            messages.append({
+            assistant_msg = {
                 "role": "assistant",
                 "content": entry["generation"],
                 "sources": entry["sources"],
                 "grounded": entry["grounded"],
                 "query_type": entry["query_type"],
                 "ts": entry["ts"],
-            })
+            }
+            # Re-derive charts/plan from the persisted channels so they render
+            # on replay instead of vanishing after the live stream ends.
+            rich = rebuild_rich_components(
+                entry.get("tool_message_history"), entry.get("plan")
+            )
+            if rich:
+                assistant_msg["rich_components"] = rich
+            messages.append(assistant_msg)
         return messages

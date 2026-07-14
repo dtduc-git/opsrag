@@ -23,6 +23,7 @@ from opsrag.channels.config import ChannelsConfig, SlackChannelConfig
 from opsrag.config_mcp import (
     KNOWN_MCP_NAMES,
     MCP_CONFIG_TYPES,
+    ExternalMCPConfigBlock,
     MCPConfigBlock,
 )
 from opsrag.config_mcp import (
@@ -124,12 +125,28 @@ class VectorStoreConfig(BaseModel):
     # Vector distance metric. cosine default keeps all current deployments
     # byte-identical; wired into Qdrant + pgvector.
     distance: Literal["cosine", "dot", "euclid"] = "cosine"
+    # Qdrant client request timeout (seconds). The qdrant-client REST path
+    # otherwise inherits httpx's 5s default, which aborts `wait=True` writes with
+    # an empty-str ReadTimeout whenever the server is momentarily slow (recovery /
+    # segment optimization under concurrent indexing), while the server still
+    # returns 200 -> silently dropped/orphaned files. 120s matches the LLM client
+    # intent. qdrant-only (pgvector ignores it).
+    request_timeout: float = 120.0
     # Fail-closed embedding-dimension guard (shared seam across the main
     # index, the QA cache, and investigations). When False (default), the
     # factory refuses to start if the embedder's dimension differs from an
     # existing collection's dimension (a silent mismatch corrupts retrieval).
     # Set True only for an intentional reindex after an embed-model switch.
     allow_dimension_change: bool = False
+    # Route exact-match (repo, source_path) deletes through the keyword-indexed
+    # `file_key` payload field instead of the TEXT-indexed repo/source_path
+    # (which have no usable exact-match index on Qdrant 1.12.4 -> ~7s full-scan
+    # per per-file delete at ~700K points). qdrant-only. ROLLOUT ORDER MATTERS:
+    # flip ON only after `python -m opsrag.tools.backfill_file_key --verify-only`
+    # reports 0 points missing file_key on the target collection -- flipping
+    # early makes deletes silently MISS pre-backfill points (stale chunks keep
+    # matching queries). OFF reverts to the slow-but-correct path at any time.
+    use_file_key_delete: bool = False
 
 
 class LLMConfig(BaseModel):
@@ -364,6 +381,9 @@ class ConfluenceConfig(BaseModel):
     # spaces. The Atlassian API can return more than what we want.
     spaces_allowlist: list[str] = Field(default_factory=list)
     spaces_denylist: list[str] = Field(default_factory=list)
+    # Include this connector in the nightly `--all` / scheduler auto-index.
+    # Operator opt-OUT lives in config (config.yaml / values), not code.
+    auto_index: bool = True
     # Pages carrying any of these labels are skipped (HR / personal /
     # salary / etc.). Use lowercase; matched case-insensitively.
     label_denylist: list[str] = Field(default_factory=list)
@@ -374,6 +394,16 @@ class ConfluenceConfig(BaseModel):
     # Backoff policy for 429s.
     max_retries: int = 3
     retry_base_seconds: float = 2.0
+
+    def auto_index_targets(self) -> list[tuple[str, str]]:
+        """(source_type, scope) pairs for the auto-index resolver. Personal
+        `~user` spaces are filtered defensively (the connector blocks them
+        too)."""
+        return [
+            ("confluence", k)
+            for k in self.spaces_allowlist
+            if k and not k.startswith("~")
+        ]
 
 
 class SlackConfig(BaseModel):
@@ -398,7 +428,7 @@ class SlackConfig(BaseModel):
     # answers. Format: `https://<workspace>.slack.com`. Per Constitution
     # Principle VI, no default; operators set this or leave it None.
     workspace_url: str | None = None
-    # Hard allowlist of channel IDs (e.g. CC448TKTQ for #devops).
+    # Hard allowlist of channel IDs (e.g. C0EXAMPLE01 for #ops).
     # IDs not names -- channel names can be renamed; IDs are stable.
     channels_allowlist: list[str] = Field(default_factory=list)
     # Backfill window for the initial run. Daily delta scheduler picks
@@ -416,6 +446,11 @@ class SlackConfig(BaseModel):
     fetch_concurrency: int = 3
     max_retries: int = 3
     retry_base_seconds: float = 2.0
+    # Include this connector in the nightly `--all` / scheduler auto-index.
+    auto_index: bool = True
+
+    def auto_index_targets(self) -> list[tuple[str, str]]:
+        return [("slack", c) for c in self.channels_allowlist if c]
 
 
 class RootlyConfig(BaseModel):
@@ -459,6 +494,12 @@ class RootlyConfig(BaseModel):
     skip_private: bool = True
     max_retries: int = 3
     retry_base_seconds: float = 2.0
+    # Include this connector in the nightly `--all` / scheduler auto-index.
+    auto_index: bool = True
+
+    def auto_index_targets(self) -> list[tuple[str, str]]:
+        # Single-tenant per token -- one synthetic scope.
+        return [("rootly", self.scope)] if self.scope else []
 
 
 class SchedulerConfig(BaseModel):
@@ -500,6 +541,13 @@ class InvestigationHistoryConfig(BaseModel):
     max_docs_per_run: int = 500
     # Drop entries flagged thumbs-down entirely.
     skip_thumbs_down: bool = True
+    # Include this source in the nightly `--all` / scheduler auto-index.
+    auto_index: bool = True
+
+    def auto_index_targets(self) -> list[tuple[str, str]]:
+        # Investigations live in one global collection -- single synthetic
+        # scope (matches the provider registry key "investigation-history").
+        return [("investigation-history", "opsrag")]
 
 
 class BrandConfig(BaseModel):
@@ -840,6 +888,12 @@ class AuthConfig(BaseModel):
     # (e.g. {"sre-admins": ["admin"], "oncall": ["member_investigate"]}).
     # Empty = everyone authenticated gets the default member role.
     role_mappings: dict[str, list[str]] = Field(default_factory=dict)
+    # Fallback role(s) for an authenticated user whose groups match no
+    # role_mapping. Defaults to the built-in interactive role. Set to e.g.
+    # ["member_investigate", "member_mcp"] to give every signed-in user MCP by
+    # default (no per-user override needed). Bound at startup via
+    # opsrag.auth.scopes.set_default_roles; unknown role names grant no scopes.
+    default_roles: list[str] = Field(default_factory=lambda: ["member_investigate"])
     # RBAC (per-connector): map an opsrag role -> the MCP connectors that role
     # grants (e.g. {"finance": ["gcp"], "sre": ["datadog", "kubernetes"]}). A
     # value of ["*"] grants every enabled connector. Only MATTERS for connectors
@@ -894,6 +948,7 @@ class Settings(BaseModel):
     # to first-party `login` mode (built-in admin + optional SSO).
     auth: AuthConfig = Field(default_factory=lambda: AuthConfig(mode="login"))
     mcp: dict[str, MCPConfigBlock] = Field(default_factory=_default_mcp_map)
+    external_mcp: dict[str, ExternalMCPConfigBlock] = Field(default_factory=dict)
     deployment: DeploymentContext = Field(default_factory=DeploymentContext)
 
     # Cloud model bundle. null = use the classic provider blocks exactly as
@@ -902,6 +957,24 @@ class Settings(BaseModel):
     # resolver runs in Settings.load (models feature track).
     cloud_provider: Literal["aws", "gcp"] | None = None
     models: ModelsConfig | None = None
+
+    @field_validator("external_mcp", mode="after")
+    @classmethod
+    def _reject_external_name_collisions(
+        cls, v: dict[str, ExternalMCPConfigBlock]
+    ) -> dict[str, ExternalMCPConfigBlock]:
+        """An `external_mcp.<name>` colliding with a native connector key
+        (KNOWN_MCP_NAMES) would cross-contaminate the native connector: the
+        enumerators merge `mcp` + `external_mcp` by name, so an external
+        `restricted: true` / `system_prompt` would flag/override the native
+        one. Reject at config-load instead of letting it silently merge."""
+        clashes = set(v) & set(KNOWN_MCP_NAMES)
+        if clashes:
+            raise ValueError(
+                f"external_mcp keys must not collide with native MCP connector "
+                f"names: {sorted(clashes)}"
+            )
+        return v
 
     @field_validator("mcp", mode="before")
     @classmethod
@@ -1035,6 +1108,29 @@ class Settings(BaseModel):
                 f"(the code lane only supports Qdrant), got {self.code_vector_store.provider!r}"
             )
         return self
+
+    def auto_index_source_targets(self) -> list[tuple[str, str]]:
+        """(source_type, scope) pairs for every enabled non-git source that
+        opts into the nightly `--all` / scheduler auto-index.
+
+        Duck-typed over ALL config blocks: a block participates by carrying
+        `enabled` + `auto_index` (operator-facing flag in config.yaml, not
+        code) + an `auto_index_targets()` method that self-describes its
+        (source_type, scope) pairs. Adding a new source never touches the
+        indexer or scheduler wiring again. (scm has an `auto_index` FIELD but
+        no targets method -- git repos flow through repos_with_branch().)"""
+        out: list[tuple[str, str]] = []
+        for name in type(self).model_fields:
+            block = getattr(self, name, None)
+            targets_fn = getattr(block, "auto_index_targets", None)
+            if (
+                targets_fn is None
+                or not getattr(block, "enabled", False)
+                or not getattr(block, "auto_index", False)
+            ):
+                continue
+            out.extend(targets_fn())
+        return out
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Settings:

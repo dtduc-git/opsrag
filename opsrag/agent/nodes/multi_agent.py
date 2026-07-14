@@ -34,6 +34,7 @@ from opsrag.agent.nodes.hallucination import verify_groundedness
 from opsrag.agent.nodes.tool_caller import (
     _RETRIEVAL_EXTRACTORS,
     _dedupe_chunks,
+    _tool_call_history_row,
 )
 from opsrag.agent.prompt_render import custom_instructions_block
 from opsrag.interfaces.chunker import Chunk
@@ -277,6 +278,32 @@ def _triage_prompt() -> str:
     return out
 
 
+def _triage_system_prompt() -> str:
+    """Full triage system prompt: today's date + the (cartography-aware)
+    triage prompt + the curated-runbook catalog card. The card sits HERE as
+    well as in the reasoner prompt because TRIAGE picks the first tool and
+    seeds the plan -- in prod, with the card only on the reasoner, triage
+    locked the investigation onto prometheus before the catalog was ever
+    seen."""
+    from datetime import datetime
+    _today = datetime.now(UTC).strftime("%Y-%m-%d")
+    out = (
+        f"Today's date (UTC): {_today}. When the user "
+        f"references relative dates ('yesterday', 'last week', "
+        f"'in the last 24 hours'), compute them from THIS date "
+        f"-- never from your training cutoff.\n\n"
+        + _triage_prompt()
+    )
+    try:
+        from opsrag.mcp.runbooks import runbook_catalog_card
+        rb_card = runbook_catalog_card()
+        if rb_card:
+            out += "\n\n" + rb_card
+    except Exception as exc:  # noqa: BLE001 -- card is advisory only
+        _log.debug("runbook catalog card unavailable (triage): %s", exc)
+    return out
+
+
 def _tool_specs_for_llm() -> list[dict]:
     """MCP tools exposed to the LLM, plus rec #3's `update_plan` (a state-mutation
     tool, not an MCP call). The reasoner sees them all uniformly; `tool_caller_node`
@@ -285,6 +312,7 @@ def _tool_specs_for_llm() -> list[dict]:
     Only ENABLED integrations' tools are offered (T091); update_plan is always
     available since it is an engine tool, not an MCP call.
     """
+    from opsrag.agent.services.chart_tool import RENDER_CHART_TOOL_SPEC
     from opsrag.agent.services.plan_tool import PLAN_TOOL_SPEC
     from opsrag.mcp_server.registry_loader import (
         connector_for_tool,
@@ -301,7 +329,7 @@ def _tool_specs_for_llm() -> list[dict]:
     return [
         {"name": t.name, "description": _desc(t), "input_schema": t.input_schema}
         for t in _enabled_tools()
-    ] + [PLAN_TOOL_SPEC]
+    ] + [PLAN_TOOL_SPEC, RENDER_CHART_TOOL_SPEC]
 
 
 def _connector_permission_block() -> str:
@@ -480,6 +508,28 @@ async def _build_tool_history_tree_summary(
     )
 
 
+_TOOL_MARKER_RE = re.compile(
+    r"\[called tool\]\s*\w+\(\{.*?\}\)|\[called tool\]\s*\w+\(\)",
+    re.DOTALL,
+)
+
+
+def _strip_tool_marker_mimicry(draft: str) -> tuple[str, bool]:
+    """Remove `[called tool] name({...})` lines the generator sometimes ECHOES
+    from the flattened history instead of answering (observed in prod: the
+    whole reply was two glued `[called tool] code_grep(...)` markers). Returns
+    (cleaned_draft, is_dump) -- is_dump=True when nothing meaningful remains
+    after stripping, i.e. the draft was a trace dump, not an answer."""
+    if "[called tool]" not in draft:
+        return draft, False
+    cleaned = _TOOL_MARKER_RE.sub("", draft)
+    # Any marker fragment our regex didn't fully span still signals mimicry --
+    # exclude it from the residue that decides whether a real answer remains.
+    residue = cleaned.replace("[called tool]", "").strip()
+    is_dump = len(residue) < 40
+    return ("" if is_dump else cleaned.strip()), is_dump
+
+
 def _flatten_tool_history(history: list[dict]) -> list[dict]:
     flat: list[dict] = []
     for msg in history:
@@ -569,7 +619,7 @@ Therefore -- HARD RULES, NO EXCEPTIONS:
    > ```bash
    > kubectl --context <cluster-name> -n <ns> exec deploy/<name> -- printenv <X> | wc -c   # length only
    > ```
-   > I CAN tell you it's set via ExternalSecret from GSM `<key-name>` (per the helm chart), but I can't read the value."
+   > I CAN tell you it's set via ExternalSecret from your secret manager `<key-name>` (per the helm chart), but I can't read the value."
    Provide the kubectl command -- NEVER a fabricated result.
 
 5. **If a tool result somehow contains secret-like content** (long high-entropy string adjacent to "secret"/"key"/"token"/"password" labels in any tool's response payload), **REDACT it from your answer body** -- do not echo verbatim. Surface "[REDACTED secret-shaped value from `<tool_name>` result]" instead.
@@ -940,6 +990,7 @@ PLAN EXTERNALIZATION (rec #3) -- call `update_plan` whenever your hypothesis set
 - Items have a stable `id` (e.g. `h1`, `h2`) so consecutive updates merge instead of accumulating duplicates.
 - Don't call `update_plan` for trivial single-tool queries (e.g. "what's pod X's CPU?") -- only when there are multiple hypotheses to track.
 - **Don't call `update_plan` for DESCRIPTIVE / ARCHITECTURE questions** -- e.g. "explain how X works", "draw the diagram of components", "describe the flow", "how is X routed". These are walk-the-codebase requests, not hypothesis-driven debugging. The plan card adds noise to the UI for that user intent. The litmus test: if you're going to answer with prose + a diagram (no actionable next step for the user), skip `update_plan` entirely.
+- **Don't call `update_plan` for DATA-RETRIEVAL / METRICS-DISPLAY / CHARTING requests** -- e.g. "show me X", "chart/plot/graph X", "what's the trend of X", "give me the numbers/breakdown for X". Fetching values and visualizing them is retrieve-and-display, NOT a hypothesis-driven investigation -- there is nothing to validate or invalidate, so a plan just restates the request and clutters the UI. In particular, NEVER create a plan item whose only purpose is to announce that you are about to call `render_chart` (or any single display tool). Only externalize a plan when you are genuinely tracking 2+ competing explanations for a problem.
 
 RUNBOOK LOADING (rec #1) -- when answering "how to do X" or "what's the procedure for Y":
 - If `runbook_list` returned a matching runbook in triage, follow up with `runbook_load(name=<id>)` to fetch the full markdown.
@@ -1183,6 +1234,21 @@ def _build_reasoner_prompt(state: dict) -> str:
             "`knowledge_search`.\n"
         )
 
+    # Curated-runbook catalog card -- data-driven dispatch: every runbook
+    # (UI tab store + file catalog) advertises its own scope, so the
+    # reasoner routes matching questions to `runbook_load` without any
+    # per-domain rules in this prompt. Placed BEFORE the base prompt:
+    # buried at the tail (after base + repomap) the reasoner ignored it
+    # in prod and drilled prometheus to the loop cap. Cache is refreshed
+    # at the top of each triage/reasoner turn.
+    try:
+        from opsrag.mcp.runbooks import runbook_catalog_card
+        rb_card = runbook_catalog_card()
+        if rb_card:
+            parts.append("\n" + rb_card)
+    except Exception as exc:
+        _log.debug("runbook catalog card unavailable: %s", exc)
+
     parts.append(_SYSTEM_REASONER_BASE)
 
     # Per-connector RBAC: when the caller is forbidden connectors that ARE
@@ -1316,6 +1382,8 @@ NEVER ship contradictory diagnoses in the same answer. The reasoner trace is vis
 CRITICAL OUTPUT-FORMAT RULE -- read SECOND:
 
 When the user asks for a diagram (any phrasing: "draw diagram", "component diagram", "sketch architecture", "show the components"), you MUST emit a fenced code block with language `diagram-json` containing structured JSON. DO NOT emit `mermaid` blocks. Mermaid is legacy and the UI no longer renders it for new diagrams. Even if your training data prefers mermaid, output `diagram-json` here. See the USER-REQUESTED DIAGRAMS section below for the exact JSON schema.
+
+When the user asks for a CHART/GRAPH/PLOT of NUMERIC data, or when a visual makes numbers clearer (cost over time, cost/usage breakdown by project/service, counts, month-over-month or day-over-day trends, comparisons), call the `render_chart` tool -- DO NOT hand-write a markdown table as the only output. Extract the series from your prior tool results and pass them: `type=line` for a time-series (e.g. cost per month), `type=bar` for a categorical comparison (e.g. cost per project), `type=pie` for a share-of-total. `x` is the time/category label (string, e.g. "May 2026" or a project/service name), `y` is the numeric value. The chart renders inline beneath your answer, so keep the prose to the headline (total, trend, top driver) instead of restating every value. `render_chart` is for tabular/numeric visualization; `diagram-json` is only for topology/architecture. A short accompanying table is fine, but the chart is the primary artifact. (A single-period breakdown that is genuinely a topology -- e.g. billing-account -> projects -- may still use `diagram-json`.)
 
 Format guidelines:
 - Lead with a one-line direct answer (status / count / timestamp).
@@ -1503,6 +1571,15 @@ def triage_node(llm, observability: ObservabilityProvider, model_router=None):
 
     async def _triage(state: dict) -> dict:
         query = state.get("query") or ""
+        # Keep the curated-runbook catalog card fresh for THIS turn's
+        # prompt (TTL-gated no-op on most turns) -- triage is the first
+        # consumer, so refreshing only in the reasoner left the very
+        # first post-boot triage without a card.
+        try:
+            from opsrag.mcp.runbooks import refresh_runbook_catalog_card
+            await refresh_runbook_catalog_card()
+        except Exception as exc:  # noqa: BLE001 -- card is advisory only
+            _log.debug("runbook catalog refresh failed (triage): %s", exc)
         # Seed the per-turn wall-clock breaker (MAX_TURN_WALL_CLOCK_SEC).
         # Recorded once here -- the start of the tool path -- and read by
         # the reasoner at every hop. Monotonic so it's immune to clock
@@ -1556,18 +1633,10 @@ def triage_node(llm, observability: ObservabilityProvider, model_router=None):
             # budget when on Pro so a triage decision doesn't get
             # clipped mid-function-call.
             triage_max_tokens = 4096 if chosen_tier == "pro" else 2048
-            # Prefix today's date -- without it the model uses its
-            # training-cutoff year for "yesterday", which can be 2 years
-            # off and lead to ES queries against the wrong indices.
-            from datetime import datetime
-            _today = datetime.now(UTC).strftime("%Y-%m-%d")
-            triage_system = (
-                f"Today's date (UTC): {_today}. When the user "
-                f"references relative dates ('yesterday', 'last week', "
-                f"'in the last 24 hours'), compute them from THIS date "
-                f"-- never from your training cutoff.\n\n"
-                + _triage_prompt()
-            )
+            # Date prefix + triage prompt + runbook catalog card -- see
+            # _triage_system_prompt for why the card must be visible to
+            # triage, not just the reasoner.
+            triage_system = _triage_system_prompt()
             resp = await chosen_llm.generate_with_tools(
                 messages=llm_messages,
                 tools=_tool_specs_for_llm(),
@@ -1673,7 +1742,7 @@ def triage_node(llm, observability: ObservabilityProvider, model_router=None):
 
         pending = [{"name": tc.name, "args": tc.args} for tc in resp.tool_calls]
         for tc in resp.tool_calls:
-            history.append({"role": "tool_call", "name": tc.name, "args": tc.args})
+            history.append(_tool_call_history_row(tc))
 
         _log.info(
             "triage -> tool_path %d call(s): %s",
@@ -1814,6 +1883,12 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                     classified.append({"kind": "update_plan", "name": name, "args": args})
                     sim_count += 1  # update_plan consumes the real budget
                     continue
+                if name == "render_chart":
+                    # Engine tool (like update_plan): intercepted + validated
+                    # here, not dispatched to an MCP handler. Consumes budget.
+                    classified.append({"kind": "render_chart", "name": name, "args": args})
+                    sim_count += 1
+                    continue
                 tool = registry.get(name)
                 if tool is None:
                     classified.append({"kind": "unknown", "name": name, "args": args})
@@ -1903,6 +1978,40 @@ def tool_caller_node(observability: ObservabilityProvider, llm_for_compaction=No
                         history.append({
                             "role": "tool_result", "name": name,
                             "response": {"error": f"update_plan failed: {exc}"},
+                        })
+                    executed_count += 1
+                    executed_now += 1
+                    continue
+
+                if kind == "render_chart":
+                    # Engine tool (rec: generic visualization). Validate the
+                    # spec and write it back as a `render_chart` tool_result
+                    # carrying the normalized spec JSON. api/routes.py (live) +
+                    # replay_components (history reload) turn that into a
+                    # `Chart` component. Failure is non-fatal -- the answer text
+                    # still stands.
+                    try:
+                        from opsrag.agent.services.chart_tool import build_chart_spec
+                        spec = build_chart_spec(args)
+                        if spec is None:
+                            history.append({
+                                "role": "tool_result", "name": name,
+                                "response": {"error": (
+                                    "render_chart: invalid spec -- need type in "
+                                    "{line,bar,pie} and at least one series with "
+                                    "numeric points. Chart not rendered."
+                                )},
+                            })
+                        else:
+                            history.append({
+                                "role": "tool_result", "name": name,
+                                "response": {"text": json.dumps(spec)},
+                            })
+                            audit.append({"name": name, "args": args, "latency_ms": 0.0, "ts": time.time()})
+                    except Exception as exc:  # noqa: BLE001
+                        history.append({
+                            "role": "tool_result", "name": name,
+                            "response": {"error": f"render_chart failed: {exc}"},
                         })
                     executed_count += 1
                     executed_now += 1
@@ -2164,6 +2273,14 @@ def reasoner_node(llm, observability: ObservabilityProvider, model_router=None):
     """
 
     async def _reason(state: dict) -> dict:
+        # Keep the curated-runbook catalog card fresh (TTL-gated no-op on
+        # most turns) so _build_reasoner_prompt can read it synchronously.
+        try:
+            from opsrag.mcp.runbooks import refresh_runbook_catalog_card
+            await refresh_runbook_catalog_card()
+        except Exception as exc:  # noqa: BLE001 -- card is advisory only
+            _log.debug("runbook catalog refresh failed: %s", exc)
+
         history: list[dict] = list(state.get("tool_message_history") or [])
         call_count = int(state.get("tool_call_count") or 0)
 
@@ -2383,7 +2500,7 @@ def reasoner_node(llm, observability: ObservabilityProvider, model_router=None):
         # One more tool round.
         pending = [{"name": tc.name, "args": tc.args} for tc in resp.tool_calls]
         for tc in resp.tool_calls:
-            history.append({"role": "tool_call", "name": tc.name, "args": tc.args})
+            history.append(_tool_call_history_row(tc))
         _log.info(
             "reasoner -> tool_caller %d more call(s): %s",
             len(pending), [p["name"] for p in pending],
@@ -2516,6 +2633,63 @@ def generator_node(
                 "agent_event": _agent_event("generator", "error", str(exc)),
             }
 
+        # -- Marker-mimicry guard --------------------------------------
+        # The flattened history renders past calls as `[called tool] ...`
+        # assistant lines; Gemini occasionally CONTINUES that pattern
+        # instead of answering, shipping a bare tool-trace dump as the
+        # whole reply. Strip mimicked markers; if nothing but markers,
+        # retry once with a corrective note (same shape as the
+        # fabricated-citation retry below).
+        draft_text, _marker_dump = _strip_tool_marker_mimicry(resp.content or "")
+        if _marker_dump:
+            _log.warning(
+                "generator: draft was tool-marker mimicry, not an answer -- "
+                "retrying once with corrective context",
+            )
+            mimic_note = {
+                "role": "user",
+                "content": (
+                    "[runtime output check -- your previous draft consisted "
+                    "of `[called tool] ...` trace markers echoed from the "
+                    "conversation history, not an answer]\n\n"
+                    "Those markers are HISTORY RENDERING, never something "
+                    "you produce. Write the ACTUAL final answer for the "
+                    "user now, in prose/markdown, based on the tool "
+                    "results above."
+                ),
+            }
+            try:
+                resp = await asyncio.wait_for(
+                    chosen_llm.generate(
+                        messages=flattened + [mimic_note],
+                        system_prompt=_SYSTEM_GENERATOR + custom_instructions_block() + _connector_permission_block(),
+                        temperature=0.0,
+                        max_tokens=16384,
+                        purpose="generator_retry_mimicry",
+                    ),
+                    timeout=45.0,
+                )
+                draft_text, _marker_dump = _strip_tool_marker_mimicry(resp.content or "")
+            except Exception as exc:
+                _log.warning("generator mimicry retry failed: %s", exc)
+            if _marker_dump or not draft_text.strip():
+                return {
+                    "generation": (
+                        "I drafted a malformed reply (a tool-trace echo "
+                        "instead of an answer) twice in a row, so I'm not "
+                        "shipping it. The tool calls themselves succeeded -- "
+                        "please re-ask the question."
+                    ),
+                    "generation_grounded": False,
+                    "final_chunks": [],
+                    "current_step": "generator",
+                    "agent_event": _agent_event(
+                        "generator", "error",
+                        "Refused -- tool-marker mimicry after retry",
+                    ),
+                }
+        # ---------------------------------------------------------------
+
         # -- Runtime citation enforcement ------------------------------
         # Detect fabricated tool-name citations in the draft answer.
         # See `_detect_fabricated_tool_citations` doc near top of file
@@ -2526,7 +2700,6 @@ def generator_node(
         #     cartography_resource_search` + invented service names
         # The SECRET & EXEC GATE prompt rules were ignored by the LLM
         # in both cases. This is a runtime check, not a prompt rule.
-        draft_text = (resp.content or "")
         audit_for_check = state.get("tool_call_audit") or []
         cited, fabricated = _detect_fabricated_tool_citations(
             draft_text, audit_for_check,
@@ -2645,7 +2818,10 @@ def generator_node(
             if mark not in sources_searched:
                 sources_searched.append(mark)
 
-        answer_text = resp.content or ""
+        # Use the guarded draft (mimicry-stripped; refreshed by the
+        # grounding retry above when that path fired) -- NOT the raw
+        # resp.content, which may still carry mimicked markers.
+        answer_text = draft_text
 
         # Shared, FAIL-CLOSED groundedness gate on the default path.
         # Previously this hardcoded `generation_grounded=True` with NO check,

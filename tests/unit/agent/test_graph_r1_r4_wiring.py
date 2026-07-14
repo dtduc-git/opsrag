@@ -213,14 +213,11 @@ class _CapturingVerifierLLM:
     def __init__(self) -> None:
         self.user_msg: str | None = None
 
-    async def generate(self, **kw):  # noqa: ANN003
+    async def generate_structured(self, **kw):  # noqa: ANN003
         msgs = kw.get("messages") or []
         self.user_msg = msgs[0]["content"] if msgs else ""
-
-        class R:
-            content = '{"verified": ["k8s_list_pods"], "unverifiable": []}'
-
-        return R()
+        schema = kw["schema"]
+        return schema(verified=["k8s_list_pods"], unverifiable=[])
 
 
 async def test_verifier_feeds_live_tool_evidence():

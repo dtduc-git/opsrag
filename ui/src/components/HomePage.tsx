@@ -4,6 +4,8 @@ import {
   fetchUsageWeekly,
   fetchIndexing,
   fetchInvestigationHistory,
+  slackPermalink,
+  normalizeTitle,
   type Session,
   type MeResponse,
   type UsageSummary,
@@ -110,6 +112,10 @@ interface Props {
   // CTA + recent-investigations card when no live-telemetry integration is
   // enabled, matching the sidebar tab gate.
   investigationEnabled?: boolean;
+  // Slack workspace base URL (from /ui-config) — enables the "open in
+  // Slack" icon on recent-conversation rows whose thread is a shared
+  // Slack thread.
+  workspaceUrl?: string | null;
 }
 
 export default function HomePage({
@@ -120,6 +126,7 @@ export default function HomePage({
   onOpenChat,
   brandName = "OpsRAG",
   investigationEnabled = false,
+  workspaceUrl,
 }: Props) {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageWeeks, setUsageWeeks] = useState<UsageWeek[] | null>(null);
@@ -249,14 +256,31 @@ export default function HomePage({
           ) : (
             <ul className="home-conv-list">
               {recentSessions.map((s, i) => {
-                const title = s.title?.trim() || `Conversation ${threadLabel(s.thread_id)}`;
+                const title = normalizeTitle(s.title) || `Conversation ${threadLabel(s.thread_id)}`;
+                const permalink = slackPermalink(s.thread_id, workspaceUrl);
                 const turns = s.turn_count ?? s.checkpoint_count;
                 return (
                   <li key={s.thread_id}>
                     <button className="home-conv-row" onClick={() => onOpenChat(s.thread_id)} title={title}>
                       <span className={`home-dot ${DOT_TONES[i % DOT_TONES.length]}`} />
                       <span className="home-conv-body">
-                        <span className="home-conv-title">{title}</span>
+                        <span className="home-conv-title-row">
+                          <span className="home-conv-title">{title}</span>
+                          {permalink && (
+                            <span
+                              className="mdl-slack-link"
+                              role="link"
+                              tabIndex={-1}
+                              aria-label="Open Slack thread"
+                              title="Open Slack thread"
+                              onClick={(e) => { e.stopPropagation(); window.open(permalink, "_blank", "noopener,noreferrer"); }}
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <path d="M10 14 21 3M15 3h6v6M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+                              </svg>
+                            </span>
+                          )}
+                        </span>
                         <span className="home-conv-meta">
                           {turns} turn{turns === 1 ? "" : "s"}
                         </span>

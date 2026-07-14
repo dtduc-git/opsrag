@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
 from opsrag.llms.content import to_openai_content
+from opsrag.llms.json_extract import extract_first_json_object
 
 
 class LiteLLMLLM:
@@ -156,13 +157,19 @@ class LiteLLMLLM:
                     tc = messages[i]
                     cid = f"call_{counter}"
                     counter += 1
-                    calls.append({
-                        "id": cid, "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc.get("args", {}) or {}),
-                        },
-                    })
+                    fn: dict = {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc.get("args", {}) or {}),
+                    }
+                    # Gemini 3.x thought_signature round-trip: litellm reads
+                    # function-level provider_specific_fields and re-emits the
+                    # thoughtSignature part (its own dummy covers the absent
+                    # case on gemini-3+).
+                    if tc.get("thought_signature"):
+                        fn["provider_specific_fields"] = {
+                            "thought_signature": tc["thought_signature"],
+                        }
+                    calls.append({"id": cid, "type": "function", "function": fn})
                     pending_ids.setdefault(tc["name"], []).append(cid)
                     i += 1
                 out.append({"role": "assistant", "content": None, "tool_calls": calls})
@@ -243,7 +250,18 @@ class LiteLLMLLM:
                 args = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except (json.JSONDecodeError, TypeError):
                 args = {}
-            tool_calls.append(ToolCall(name=getattr(fn, "name", "") or "", args=args))
+            # Gemini 3.x thought_signature -- litellm surfaces it in
+            # function-level (sometimes tool-level) provider_specific_fields.
+            sig = None
+            for holder in (fn, tc):
+                fields = getattr(holder, "provider_specific_fields", None)
+                if isinstance(fields, dict) and fields.get("thought_signature"):
+                    sig = fields["thought_signature"]
+                    break
+            tool_calls.append(ToolCall(
+                name=getattr(fn, "name", "") or "", args=args,
+                thought_signature=sig,
+            ))
 
         model = getattr(resp, "model", None) or self._model
         usage = getattr(resp, "usage", None)
@@ -306,12 +324,5 @@ class LiteLLMLLM:
             gen_kwargs["max_tokens"] = max(max_tokens, self._default_max_tokens)
         resp = await self.generate(**gen_kwargs)
 
-        text = resp.content.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-
-        data = json.loads(text)
+        data = extract_first_json_object(resp.content or "")
         return schema.model_validate(data)

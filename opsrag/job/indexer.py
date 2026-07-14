@@ -135,8 +135,10 @@ async def _run(args: argparse.Namespace) -> int:
     if args.all:
         for repo, branch in cfg.scm.repos_with_branch():
             targets.append(("repo", {"repo": repo, "branch": branch}))
-        # Sources (Confluence, etc.) -- index every configured scope.
-        for source_type, scopes in _configured_source_scopes(cfg).items():
+        # Non-git sources -- every scope that opted into auto-index, limited
+        # to sources whose provider actually got built on this pod.
+        _available = set((pipeline.sources or {}).keys())
+        for source_type, scopes in _configured_source_scopes(cfg, available=_available).items():
             for scope in scopes:
                 targets.append(("source", {"source_type": source_type, "scope": scope}))
     elif args.repo:
@@ -159,28 +161,60 @@ async def _run(args: argparse.Namespace) -> int:
             flush_loop(providers.index_store, indexing_tracker, stop_event=stop_event)
         )
 
+    # Repo-level bounded concurrency. The job path historically ran targets one
+    # at a time; a full `--all` over ~80 repos then crawls sequentially. Mirror
+    # the scheduler's bounded-parallel pass (opsrag.scheduler.daily): index git
+    # repos concurrently under a semaphore, THEN non-git sources (so they don't
+    # compete with git for Vertex token quota). Bound = OPSRAG_INDEX_PARALLEL env,
+    # else scheduler.parallel_limit (default 3). Same qdrant/PG keyspaces are
+    # per-(repo,path) so concurrent repos never collide.
+    parallel_limit = int(
+        os.environ.get("OPSRAG_INDEX_PARALLEL")
+        or getattr(getattr(cfg, "scheduler", None), "parallel_limit", 3)
+        or 3
+    )
+    repo_targets = [p for k, p in targets if k == "repo"]
+    source_targets = [p for k, p in targets if k == "source"]
+    sem = asyncio.Semaphore(max(1, parallel_limit))
     failures = 0
-    try:
-        for kind, params in targets:
+
+    async def _do_repo(params: dict) -> None:
+        nonlocal failures
+        async with sem:
+            repo, branch = params["repo"], params["branch"]
             try:
-                if kind == "repo":
-                    repo, branch = params["repo"], params["branch"]
-                    indexing_tracker.queue_repo(repo, branch)
-                    n = await pipeline.index_repo(repo, branch)
-                    _log.info("indexed repo=%s branch=%s chunks=%d", repo, branch, n)
-                else:
-                    st, scope = params["source_type"], params["scope"]
-                    indexing_tracker.ensure_queued(f"{st}:{scope}", st, source_type=st)
-                    n = await pipeline.index_source(st, scope)
-                    _log.info("indexed source=%s scope=%s chunks=%d", st, scope, n)
+                indexing_tracker.queue_repo(repo, branch)
+                n = await pipeline.index_repo(repo, branch)
+                _log.info("indexed repo=%s branch=%s chunks=%d", repo, branch, n)
             except Exception as exc:  # noqa: BLE001
                 failures += 1
-                _log.error("indexing target failed %s %s: %s", kind, params, exc)
-                if kind == "repo":
-                    indexing_tracker.repo_failed(params["repo"], params["branch"], str(exc))
-                else:
-                    indexing_tracker.repo_failed(f"{params['source_type']}:{params['scope']}",
-                                                 params["source_type"], str(exc))
+                _log.error("indexing target failed repo %s: %s", params, exc)
+                indexing_tracker.repo_failed(repo, branch, str(exc))
+
+    async def _do_source(params: dict) -> None:
+        nonlocal failures
+        async with sem:
+            st, scope = params["source_type"], params["scope"]
+            try:
+                indexing_tracker.ensure_queued(f"{st}:{scope}", st, source_type=st)
+                n = await pipeline.index_source(st, scope)
+                _log.info("indexed source=%s scope=%s chunks=%d", st, scope, n)
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                _log.error("indexing target failed source %s: %s", params, exc)
+                indexing_tracker.repo_failed(f"{st}:{scope}", st, str(exc))
+
+    try:
+        _log.info(
+            "index batch start: %d repos + %d sources, parallel_limit=%d",
+            len(repo_targets), len(source_targets), parallel_limit,
+        )
+        # Git first (concurrent), then non-git sources (concurrent) -- matches
+        # scheduler.daily ordering to keep Vertex token pressure predictable.
+        if repo_targets:
+            await asyncio.gather(*(_do_repo(p) for p in repo_targets))
+        if source_targets:
+            await asyncio.gather(*(_do_source(p) for p in source_targets))
     finally:
         stop_event.set()
         if flush_task is not None:
@@ -193,15 +227,21 @@ async def _run(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
-def _configured_source_scopes(cfg: OpsRAGConfig) -> dict[str, list[str]]:
-    """Map configured non-git sources to their scopes for ``--all``. Currently
-    Confluence (its space allow-list). Extend as new sources gain auto-index."""
+def _configured_source_scopes(
+    cfg: OpsRAGConfig, available: set[str] | None = None
+) -> dict[str, list[str]]:
+    """Map auto-indexed non-git sources to their scopes for ``--all``.
+
+    Config-driven: each source block opts in via its `auto_index` flag and
+    self-describes its targets (Settings.auto_index_source_targets) -- nothing
+    per-source is hardcoded here. `available` = source types with a BUILT
+    provider (pipeline.sources); a configured-but-unbuilt source (e.g. token
+    missing at runtime) is skipped instead of failing the run's exit code."""
     out: dict[str, list[str]] = {}
-    conf = getattr(cfg, "confluence", None)
-    if conf is not None and getattr(conf, "enabled", False):
-        spaces = list(getattr(conf, "spaces_allowlist", []) or [])
-        if spaces:
-            out["confluence"] = spaces
+    for source_type, scope in cfg.auto_index_source_targets():
+        if available is not None and source_type not in available:
+            continue
+        out.setdefault(source_type, []).append(scope)
     return out
 
 

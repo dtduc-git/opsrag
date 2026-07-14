@@ -349,5 +349,5 @@ single-key stack the compose quickstart loads.
 - [`auth.md`](./auth.md) — OIDC + SSO provider setup
 - [`multi-environment.md`](./multi-environment.md) — the `environments` registry
 - [`deployment.md`](./deployment.md) — roles, Helm, and the indexing Job
-- [`mcp-integrations.md`](./mcp-integrations.md) — the 20 MCP integrations
+- [`mcp-integrations.md`](./mcp-integrations.md) — the 27 MCP integrations
 - [`config-example.yaml`](../config-example.yaml) — annotated, exhaustive

@@ -56,19 +56,35 @@ async def record_feedback(
     direction = 1 if thumbs == "up" else -1
     namespaced_user = f"{channel_name}:{fb.user_id or 'unknown'}"
 
+    # The resolved investigation's question+answer, threaded from the cache
+    # write below into the Postgres audit row so the Retrieval-Quality
+    # dashboard shows WHAT was rated (channel feedback carries no snippets
+    # of its own -- the click payload only has the investigation id).
+    query_snippet: str | None = None
+    answer_snippet: str | None = None
+
     # -- 1. investigation_cache (best-effort)
     if investigation_cache is not None:
         try:
-            await investigation_cache.record_feedback(
+            fb_result = await investigation_cache.record_feedback(
                 investigation_id,
                 thumbs=thumbs,
                 correction=None,
             )
+            if fb_result:
+                query_snippet = getattr(fb_result, "query", None)
+                answer_snippet = getattr(fb_result, "answer", None)
         except Exception as exc:  # noqa: BLE001
             _log.warning(
                 "feedback: investigation_cache write failed id=%s err=%s",
                 investigation_id, exc,
             )
+
+    # Ungrounded / LOW-confidence answers aren't cached -> nothing resolved
+    # above. Fall back to the answer text the adapter captured from the click
+    # payload so the dashboard card still shows WHAT was rated.
+    if not answer_snippet:
+        answer_snippet = getattr(fb, "answer_snippet", "") or None
 
     # -- 2. feedback_store (best-effort)
     if feedback_store is not None:
@@ -79,8 +95,8 @@ async def record_feedback(
                 thread_id=fb.thread_id,
                 user_id=namespaced_user,
                 note=None,
-                query_snippet=None,
-                answer_snippet=None,
+                query_snippet=query_snippet,
+                answer_snippet=answer_snippet,
             )
         except Exception as exc:  # noqa: BLE001
             _log.warning(

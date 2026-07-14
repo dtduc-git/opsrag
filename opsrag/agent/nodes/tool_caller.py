@@ -194,6 +194,19 @@ WHEN ANALYZING FAILURES -- you have a `gitlab_get_pipeline_job` trace tail in th
 """
 
 
+def _tool_call_history_row(tc) -> dict:
+    """History row for an emitted tool call. Carries the Gemini 3.x
+    thought_signature when the provider captured one -- replaying the call
+    without it degrades to the dummy signature (and pre-fix 400'd) on
+    gemini-3+ (see opsrag/llms/vertex.py). Shared by this legacy
+    tool_calling lane and the multi_agent triage/reasoner lane."""
+    row = {"role": "tool_call", "name": tc.name, "args": tc.args}
+    sig = getattr(tc, "thought_signature", None)
+    if sig:
+        row["thought_signature"] = sig
+    return row
+
+
 def tool_decide_node(llm, observability: ObservabilityProvider):
     """Build the tool-decide node: LLM with function-calling looks at
     the user query (plus any prior tool results in the loop) and
@@ -271,7 +284,7 @@ def tool_decide_node(llm, observability: ObservabilityProvider):
             len(pending), [p["name"] for p in pending],
         )
         for tc in resp.tool_calls:
-            history.append({"role": "tool_call", "name": tc.name, "args": tc.args})
+            history.append(_tool_call_history_row(tc))
 
         return {
             "tool_calls": pending,

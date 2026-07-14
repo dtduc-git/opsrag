@@ -542,6 +542,7 @@ async def integrations(request: Request) -> dict:
     from the static registry so disabled integrations are still listed as
     available-to-enable.
     """
+    from opsrag.config_mcp import ExternalMCPConfigBlock
     from opsrag.mcp.registry import REGISTRY
     from opsrag.mcp_server.registry_loader import enabled_integration_names
 
@@ -549,10 +550,16 @@ async def integrations(request: Request) -> dict:
     enabled_names = set(enabled_integration_names(cfg)) if cfg is not None else set()
     items: list[dict[str, Any]] = []
     for name, integ in sorted(REGISTRY.items()):
+        # "external" = mounted community MCP server (runtime-registered via the
+        # External MCP Adapter); "builtin" = a native in-house connector.
+        is_external = isinstance(integ.config_type, type) and issubclass(
+            integ.config_type, ExternalMCPConfigBlock
+        )
         items.append({
             "name": integ.name,
             "display_name": integ.display_name,
             "category": integ.category,
+            "origin": "external" if is_external else "builtin",
             "enabled": name in enabled_names,
             "tool_count": len(integ.tool_names),
             "tool_names": list(integ.tool_names),
@@ -933,7 +940,7 @@ def _extract_chart_components(tool_message_history: list[dict]) -> list[dict]:
             values = s.get("values") or []
             points = []
             for pair in values[:max_points]:
-                if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                if not isinstance(pair, list | tuple) or len(pair) < 2:
                     continue
                 ts = _safe_float(pair[0])
                 val = _safe_float(pair[1])
@@ -1072,6 +1079,17 @@ async def _stream_query(graph, req: QueryRequest, providers, qa_cache, investiga
             yield _sse("render_component", comp)
     except Exception as exc:
         _log.warning("chart extraction failed (non-fatal): %s", exc)
+
+    # Generic, tool-agnostic charts: any tool result the reasoner chose to
+    # visualize via the `render_chart` engine tool. Emitted the same way so the
+    # frontend renders a `Chart` component; rebuilt identically on replay by
+    # sessions.replay_components. Non-fatal.
+    try:
+        from opsrag.agent.services.chart_tool import extract_chart_from_history
+        for comp in extract_chart_from_history(final.get("tool_message_history") or []):
+            yield _sse("render_component", comp)
+    except Exception as exc:
+        _log.warning("render_chart extraction failed (non-fatal): %s", exc)
 
     # Emit the investigation plan as a renderable component, if
     # the reasoner used `update_plan` at any point during the turn.
@@ -1315,7 +1333,9 @@ async def admin_reaugment_confluence(
     cursor = None
     for _ in range(200):  # safety bound -- 200 * 2000 = 400k chunks
         points, cursor = await qdrant.scroll(
-            collection_name="opsrag",
+            # The store's configured collection -- was hardcoded "opsrag",
+            # which 404s on deployments using a non-default collection name.
+            collection_name=vector_store._collection,
             scroll_filter=qm.Filter(must=[
                 qm.FieldCondition(key="repo", match=qm.MatchValue(value=repo_key)),
                 qm.FieldCondition(key="chunk_type", match=qm.MatchValue(value="child")),
@@ -1370,8 +1390,7 @@ async def admin_reaugment_confluence(
     if fire_and_forget:
         async def _run_background() -> None:
             await _reaugment_docs(
-                affected_list, scope, repo_key, source, qdrant, pipeline,
-                summary,
+                affected_list, scope, repo_key, source, pipeline, summary,
             )
             _log = logging.getLogger("opsrag.routes")
             _log.info(
@@ -1391,7 +1410,7 @@ async def admin_reaugment_confluence(
 
     # Synchronous path (smoke test) -- block until done.
     await _reaugment_docs(
-        affected_list, scope, repo_key, source, qdrant, pipeline, summary,
+        affected_list, scope, repo_key, source, pipeline, summary,
     )
     summary["failures"] = summary["failures"][:50]
     return summary
@@ -1402,15 +1421,12 @@ async def _reaugment_docs(
     scope: str,
     repo_key: str,
     source,
-    qdrant,
     pipeline,
     summary: dict,
 ) -> None:
     """Per-doc delete-then-reprocess loop. Pulled out so both the
     synchronous (smoke-test) and fire-and-forget paths share the same
     body. Mutates `summary` in place -- caller exposes counters."""
-    from qdrant_client import models as qm
-
     from opsrag.interfaces.source import DocRef
 
     for sp in affected_list:
@@ -1422,13 +1438,13 @@ async def _reaugment_docs(
 
         # Delete BOTH parent and children for this source_path so the
         # new augmented chunks don't coexist with stale un-augmented ones.
+        # Route through the store (not the raw client): it targets the
+        # CONFIGURED collection (the raw call hardcoded "opsrag" -- wrong on
+        # any deployment with a renamed collection) and picks up the keyword
+        # file_key fast path when use_file_key_delete is ON.
         try:
-            await qdrant.delete(
-                collection_name="opsrag",
-                points_selector=qm.Filter(must=[
-                    qm.FieldCondition(key="repo", match=qm.MatchValue(value=repo_key)),
-                    qm.FieldCondition(key="source_path", match=qm.MatchValue(value=sp)),
-                ]),
+            await pipeline.vector_store.delete_by_filter(
+                {"repo": repo_key, "source_path": sp}
             )
         except Exception as exc:
             summary["failed"] += 1
@@ -1576,10 +1592,15 @@ async def slack_interactivity(request: Request) -> Response:
     # 3. Dual-write -- same shape as `/api/investigation/<id>/feedback`.
     direction = 1 if thumbs == "up" else -1
     slack_user = ((payload.get("user") or {}).get("id")) or "slack-unknown"
+    fb = None  # resolved FeedbackResult -> carries the rated query+answer
     cache = getattr(request.app.state, "investigation_cache", None)
     if cache is not None:
         try:
-            await cache.record_feedback(investigation_id, thumbs=thumbs, correction=None)
+            fb = await cache.record_feedback(investigation_id, thumbs=thumbs, correction=None)
+            if fb:  # Slack thumbs credit the answer's loaded runbooks too.
+                await _bump_runbook_thumbs(
+                    request, getattr(fb, "runbook_ids", []) or [], thumbs,
+                )
         except Exception as exc:
             _log.warning("slack interactivity: investigation cache write failed: %s", exc)
     feedback_store = getattr(request.app.state, "feedback_store", None)
@@ -1591,8 +1612,10 @@ async def slack_interactivity(request: Request) -> Response:
                 thread_id=(payload.get("container") or {}).get("thread_ts"),
                 user_id=f"slack:{slack_user}",
                 note=None,
-                query_snippet=None,
-                answer_snippet=None,
+                # Show WHAT was rated in the Retrieval-Quality dashboard
+                # (was blank for Slack feedback -- thumbs only, no snippets).
+                query_snippet=(fb.query if fb else None),
+                answer_snippet=(fb.answer if fb else None),
             )
         except Exception as exc:
             _log.warning("slack interactivity: feedback_store write failed: %s", exc)
@@ -1606,6 +1629,23 @@ async def slack_interactivity(request: Request) -> Response:
     # Future: post an ephemeral "thanks, feedback recorded" via
     # response_url.
     return Response(status_code=200)
+
+
+async def _bump_runbook_thumbs(
+    request: Request, runbook_ids: list[str], thumbs: str,
+) -> None:
+    """Credit every tab runbook the thumbed answer loaded (Fix: the
+    Runbooks tab 👍/👎 columns never moved -- answer feedback had no path
+    to the runbook counters). Thumbs-only: record_thumbs never touches
+    used_count, so USED stays a pure load counter. Best-effort."""
+    store = getattr(request.app.state, "runbook_store", None)
+    if store is None or not runbook_ids:
+        return
+    for rb_id in runbook_ids:
+        try:
+            await store.record_thumbs(rb_id, thumbs=thumbs)
+        except Exception as exc:  # noqa: BLE001 -- defense in depth
+            _log.warning("runbook thumbs bump failed rb=%s: %s", rb_id, exc)
 
 
 @router.post(
@@ -1657,9 +1697,17 @@ async def investigation_feedback(
     cache_ok = False
     if cache is not None:
         try:
-            cache_ok = await cache.record_feedback(
+            fb = await cache.record_feedback(
                 investigation_id, thumbs=req.thumbs, correction=req.correction,
+                # Disambiguates thread-shaped ids: picks the thumbed turn
+                # when a thread stored several investigations.
+                answer_snippet=req.answer_snippet,
             )
+            cache_ok = bool(fb)
+            if cache_ok:  # unresolved answers credit nothing
+                await _bump_runbook_thumbs(
+                    request, getattr(fb, "runbook_ids", []) or [], req.thumbs,
+                )
         except Exception as exc:
             _log.warning("investigation cache feedback write failed: %s", exc)
             cache_ok = False

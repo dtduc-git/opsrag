@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
 from opsrag.llms.content import to_bedrock_content
+from opsrag.llms.json_extract import extract_first_json_object
 
 # boto3 is an OPTIONAL dependency (the `bedrock` extra). Importing it lazily in
 # __init__ keeps this module -- and everything that imports it transitively, e.g.
@@ -192,12 +193,5 @@ class BedrockLLM:
             gen_kwargs["max_tokens"] = max_tokens
         resp = await self.generate(**gen_kwargs)
 
-        text = resp.content.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-
-        data = json.loads(text)
+        data = extract_first_json_object(resp.content or "")
         return schema.model_validate(data)

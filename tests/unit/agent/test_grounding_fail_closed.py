@@ -95,24 +95,22 @@ async def test_hallucination_node_fails_closed_marks_not_grounded():
 
 
 class _BoomGenLLM:
-    """`generate` raises -> verifier can't run."""
+    """`generate_structured` raises -> verifier can't run."""
 
     model_name = "fake-model"
 
-    async def generate(self, **kw):
+    async def generate_structured(self, **kw):
         raise RuntimeError("verifier llm down")
 
 
 class _MalformedGenLLM:
-    """`generate` returns un-parseable content -> verdict is None."""
+    """Provider raises ValueError on un-parseable output (the tolerant
+    extractor's terminal failure) -> verdict is None."""
 
     model_name = "fake-model"
 
-    async def generate(self, **kw):
-        class R:
-            content = "not json at all -- no braces here"
-
-        return R()
+    async def generate_structured(self, **kw):
+        raise ValueError("malformed JSON in LLM output: 'not json at all'")
 
 
 async def test_answer_verifier_appends_caution_on_llm_error():

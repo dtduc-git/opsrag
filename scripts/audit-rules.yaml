@@ -262,6 +262,13 @@ hardcoded_hosts_allowlist:
   - aiplatform.googleapis.com
   - storage.googleapis.com
   - generativelanguage.googleapis.com
+  - ai.google.dev                    # Gemini API docs link (thought-signatures FAQ, code comment)
+  - "*.google.dev"
+  - google.cloud                     # `from google.cloud import bigquery` -- Python package path, not a host
+
+  # MongoDB Atlas (billing_mongodb_atlas MCP -- public Atlas Admin API base)
+  - cloud.mongodb.com
+  - "*.mongodb.com"
   - "*.gserviceaccount.com"          # GCP service-account email-style identifiers
   - iam.gke.io                       # GCP Workload Identity annotation namespace
   - "*.gke.io"
@@ -335,6 +342,7 @@ hardcoded_hosts_allowlist:
 
   # Cloudflare documentation example
   - foo.com                          # CF API '?name=foo.com' comment example
+  - x.io                             # throwaway placeholder link in ui slackText tests (<https://x.io/a>)
 
   # Identity / Zero-Trust providers (public OIDC hosts referenced in docs/auth.md)
   - "*.cloudflare.com"

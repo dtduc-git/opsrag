@@ -143,6 +143,10 @@ channels:
 mcp:
   aws:           { enabled: false }
   azure:         { enabled: false }
+  billing_datadog:       { enabled: false, restricted: true }
+  billing_gcp:           { enabled: false, restricted: true }
+  billing_kubecost:      { enabled: false, restricted: true }
+  billing_mongodb_atlas: { enabled: false, restricted: true }
   cloudflare:    { enabled: false }
   cloudwatch:    { enabled: false }
   code:          { enabled: false }

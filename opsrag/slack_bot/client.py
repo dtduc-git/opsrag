@@ -133,10 +133,11 @@ class SlackBotClient:
         Slack delivers all event types over the same websocket. We must:
           1. Ack EVERY request (even ones we ignore) so Slack stops
              re-delivering.
-          2. Skip messages from bots (subtype=bot_message OR bot_id set)
-             to avoid feedback loops with our own posts.
-          3. Route app_mention -> dispatcher.on_app_mention
-             and message.im -> dispatcher.on_message_im
+          2. Drop our OWN posts (self-guard) to avoid feedback loops.
+          3. Route app_mention -> on_app_mention (bots skipped),
+             message.im -> on_message_im (bots skipped), and
+             message.channel/group -> on_channel_message (bots ALLOWED
+             through for the first-responder, if the dispatcher supports it).
         """
         # 1. Always ack first. Slack retries up to 3x if we don't ack
         # within 3s -- and an unhandled exception elsewhere should never
@@ -177,24 +178,46 @@ class SlackBotClient:
 
         event_type = event.get("type")
 
-        # 2. Bot-message filter. Always skip our own / other bots'
-        # messages to avoid feedback loops.
-        if event.get("subtype") == "bot_message" or event.get("bot_id"):
+        # 2. Hard self-guard (feedback-loop line 1). Drop our OWN top-level
+        # posts before any routing. Best-effort: auth.test may have failed at
+        # startup leaving these None -- the channel-message path has its own
+        # structural backstop (request_app_allowlist excludes our app_id).
+        if (self.self_bot_id and event.get("bot_id") == self.self_bot_id) or (
+            self.self_user_id and event.get("user") == self.self_user_id
+        ):
             return
 
         # 3. Route.
         try:
             if event_type == "app_mention" and self._dispatcher is not None:
+                # @-mention path unchanged: skip bots (incl. our own) here.
+                if event.get("subtype") == "bot_message" or event.get("bot_id"):
+                    return
                 await self._dispatcher.on_app_mention(event)
             elif (
                 event_type == "message"
                 and event.get("channel_type") == "im"
                 and self._dispatcher is not None
             ):
+                # DM path unchanged: skip bots here too.
+                if event.get("subtype") == "bot_message" or event.get("bot_id"):
+                    return
                 await self._dispatcher.on_message_im(event)
+            elif (
+                event_type == "message"
+                and event.get("channel_type") in ("channel", "group")
+                and self._dispatcher is not None
+            ):
+                # First-responder path: DELIBERATELY let bots through -- the
+                # FirstResponder's request_app_allowlist decides which bot
+                # posts (e.g. the SRE-Support Workflow) to answer. A dispatcher
+                # without on_channel_message (the default @-mention shim) makes
+                # this a silent no-op via getattr.
+                handler = getattr(self._dispatcher, "on_channel_message", None)
+                if handler is not None:
+                    await handler(event)
         except Exception:  # noqa: BLE001
-            # The dispatcher owns its own error reporting (posts a
-            # friendly message back to Slack). We just log + swallow so
+            # The dispatcher owns its own error reporting. We log + swallow so
             # one bad event doesn't kill the websocket loop.
             _log.exception(
                 "dispatcher raised for event_type=%s channel=%s user=%s",

@@ -44,17 +44,27 @@ the real read-only boundary (these tools never expose ``_delete_by_query`` /
 from __future__ import annotations
 
 import os
+import random
 import re
+import time as _time
 from typing import Any
 
 import httpx
 
+from opsrag.mcp import kubernetes as _k8s
 from opsrag.mcp.gitlab import MCPTool
 
 _DEFAULT_TIMEOUT_S = 30.0
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 200
 _RESULT_TRUNCATE_CHARS = 4000
+
+# Per-(env, cluster) cached pod pick for the port_forward reach. We resolve
+# the ES Service -> a Running+Ready pod on first use and stick to it for a
+# short TTL (pods rotate on rollouts/evictions, so we soft-expire even on the
+# happy path; a WS/connection error also invalidates + re-resolves).
+_pod_cache: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+_POD_CACHE_TTL_SECONDS = 300.0
 
 
 class MCPElasticsearchError(Exception):
@@ -275,10 +285,485 @@ async def _refresh_cluster_access(cfg: dict) -> None:
         _k8s.invalidate_env_api_cache(cfg["env"])
 
 
+# --- port_forward transport (real pods/portforward WebSocket tunnel) -------
+#
+# For ``reach == "port_forward"`` we do NOT use the httpx service-proxy path in
+# ``_base`` (the API server strips/consumes the ``Authorization`` header on the
+# service-proxy, so the ES ApiKey never reaches ES -> 401). Instead we open a
+# TCP-level ``pods/portforward`` WebSocket tunnel to a backing ES pod through
+# the env's k8s API server and ride the raw HTTP/1.1 request (carrying
+# ``Authorization: ApiKey <es-key>``) end-to-end into ES. The cluster bearer
+# token authenticates only the WebSocket handshake to the API server.
+#
+# The wire-protocol helpers below (``_portforward_request`` / ``_build_http_request``
+# / ``_parse_http_response`` / ``_dechunk`` + the ``_PF_*`` constants) implement the
+# v4.channel.k8s.io SPDY framing, which is subtle -- keep them together and treat
+# them as a self-contained, well-tested unit (the only module-specific piece is the
+# ``MCPElasticsearchError`` exception class).
+
+# v4.channel.k8s.io port-forward framing constants.
+_PF_DATA_CHANNEL = 0   # bytes flowing TO/FROM the forwarded port
+_PF_ERROR_CHANNEL = 1  # error stream for the forwarded port
+# Each forwarded port creates two channels (data, error). For 1 port we
+# expect to see 2 initial "port" frames after handshake -- these announce
+# which port each channel maps to and should be consumed silently.
+_PF_INITIAL_PORT_FRAMES = 2
+
+
+async def _portforward_request(
+    cfg: dict,
+    *,
+    namespace: str,
+    pod: str,
+    port: int,
+    raw_request: bytes,
+    read_timeout: float = 30.0,
+) -> bytes:
+    """Open a port-forward WebSocket to ``pod:port`` and exchange a raw
+    HTTP/1.1 request/response pair through it. Returns the raw HTTP/1.1
+    response bytes (status line + headers + body).
+
+    Protocol notes (v4.channel.k8s.io):
+      * Each WS binary frame is `[channel_byte][payload]`. We write
+        outgoing bytes on channel 0 (data for port[0]); read incoming
+        bytes from the same channel. Channel 1 carries server-side
+        errors -- we collect any payload there into the exception text.
+      * The server sends two initial frames acknowledging the requested
+        port (one per channel). They show up as 2-byte payloads
+        containing the port number; we discard them.
+      * ES speaks HTTP/1.1 keep-alive by default; we ask for
+        ``Connection: close`` so the upstream closes the data channel
+        once the response is fully sent. That's our EOF signal.
+    """
+    import ssl
+
+    import aiohttp
+
+    # API server expects a ws:// or wss:// URL. Build wss:// from the
+    # https://<host> we cached.
+    base = cfg["host"].rstrip("/")
+    if base.startswith("https://"):
+        ws_base = "wss://" + base[len("https://"):]
+    elif base.startswith("http://"):
+        ws_base = "ws://" + base[len("http://"):]
+    else:
+        ws_base = base
+    url = (
+        f"{ws_base}/api/v1/namespaces/{namespace}/pods/{pod}"
+        f"/portforward?ports={port}"
+    )
+
+    headers = {}
+    if cfg.get("token"):
+        headers["Authorization"] = f"Bearer {cfg['token']}"
+
+    # SSLContext from CA cert path (verify=True). When verify is False
+    # (legacy kubeconfig with no CA), disable verification.
+    verify = cfg.get("verify")
+    ssl_ctx: Any
+    if verify is False or verify is None:
+        ssl_ctx = False
+    elif isinstance(verify, str):
+        ssl_ctx = ssl.create_default_context(cafile=verify)
+    else:
+        ssl_ctx = True
+
+    timeout = aiohttp.ClientTimeout(total=read_timeout + 5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # K8s requires the v4.channel.k8s.io subprotocol on the WS
+        # upgrade -- without it the server falls back to v1 framing
+        # which is incompatible with what we read/write below.
+        async with session.ws_connect(
+            url,
+            headers=headers,
+            protocols=("v4.channel.k8s.io",),
+            ssl=ssl_ctx,
+            max_msg_size=0,  # 0 = unlimited; ES responses can be large
+            heartbeat=None,
+        ) as ws:
+            # Consume the two initial "port announcement" frames.
+            consumed = 0
+            err_buf = bytearray()
+            while consumed < _PF_INITIAL_PORT_FRAMES:
+                msg = await ws.receive(timeout=read_timeout)
+                if msg.type in (
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    raise MCPElasticsearchError(
+                        f"port-forward WS closed before initial port "
+                        f"frames (got {msg.type!r}, data={msg.data!r})",
+                        reason="upstream_error",
+                    )
+                if msg.type != aiohttp.WSMsgType.BINARY:
+                    continue
+                data = msg.data
+                if not data:
+                    continue
+                ch = data[0]
+                if ch == _PF_ERROR_CHANNEL:
+                    err_buf.extend(data[1:])
+                consumed += 1
+
+            # Send the HTTP/1.1 request as a single binary frame on
+            # channel 0. ES accepts the entire request as one TCP write
+            # (request line + headers + body); we batch them into one
+            # WS frame for the same reason.
+            await ws.send_bytes(bytes([_PF_DATA_CHANNEL]) + raw_request)
+
+            # Read response bytes from channel 0 until the server
+            # closes the data side (Connection: close).
+            response_buf = bytearray()
+            while True:
+                try:
+                    msg = await ws.receive(timeout=read_timeout)
+                except TimeoutError as exc:  # asyncio.TimeoutError is this alias on py311+
+                    raise MCPElasticsearchError(
+                        f"port-forward read timeout after "
+                        f"{read_timeout}s; partial response "
+                        f"{len(response_buf)} bytes",
+                        reason="upstream_error",
+                    ) from exc
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    if not msg.data:
+                        continue
+                    ch = msg.data[0]
+                    payload = msg.data[1:]
+                    if ch == _PF_DATA_CHANNEL:
+                        response_buf.extend(payload)
+                    elif ch == _PF_ERROR_CHANNEL:
+                        err_buf.extend(payload)
+                elif msg.type in (
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                ):
+                    break
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    raise MCPElasticsearchError(
+                        f"port-forward WS error: {ws.exception()!r}",
+                        reason="upstream_error",
+                    )
+
+            if err_buf and not response_buf:
+                # Server sent an error but no data -- surface the error
+                # rather than returning an empty (and thus unparseable)
+                # response. Common cause: pod refused the connection.
+                raise MCPElasticsearchError(
+                    f"port-forward error stream: {bytes(err_buf).decode('utf-8', 'replace')[:300]}",
+                    reason="upstream_error",
+                )
+            return bytes(response_buf)
+
+
+def _build_http_request(
+    *,
+    method: str,
+    path: str,
+    host: str,
+    headers: dict[str, str],
+    body: bytes,
+) -> bytes:
+    """Hand-roll an HTTP/1.1 request for the port-forward tunnel.
+
+    ES accepts JSON bodies on GET (the official client does this too),
+    so we ALWAYS pass the body slot through -- if `body` is empty we
+    just don't emit `Content-Length`. ``Connection: close`` ensures the
+    server hangs up after the response so we can detect EOF on the
+    tunnel without needing chunked-decoding logic.
+    """
+    lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
+    base_headers = {
+        "Connection": "close",
+        "Accept": "application/json",
+    }
+    # Caller-provided headers override defaults.
+    for k, v in headers.items():
+        if v is None:
+            continue
+        base_headers[k] = v
+    if body:
+        base_headers.setdefault("Content-Length", str(len(body)))
+    for k, v in base_headers.items():
+        lines.append(f"{k}: {v}")
+    head = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+    return head + body
+
+
+def _parse_http_response(raw: bytes) -> tuple[int, dict[str, str], bytes]:
+    """Parse a raw HTTP/1.1 response: (status, headers, body).
+
+    Handles ``Transfer-Encoding: chunked`` (defensive -- most ES versions
+    use Content-Length, but a proxy in front of ES could re-chunk). We
+    do NOT handle gzip/deflate -- we set ``Accept-Encoding: identity``
+    implicitly by NOT advertising compression, so the server won't
+    compress.
+    """
+    if not raw:
+        raise MCPElasticsearchError(
+            "empty HTTP response from port-forward tunnel "
+            "(pod closed the data channel without writing anything)",
+            reason="upstream_error",
+        )
+    sep = raw.find(b"\r\n\r\n")
+    if sep < 0:
+        raise MCPElasticsearchError(
+            f"malformed HTTP response (no header/body separator); "
+            f"first 200 bytes={raw[:200]!r}",
+            reason="upstream_error",
+        )
+    head = raw[:sep].decode("iso-8859-1", "replace")
+    body = raw[sep + 4:]
+    lines = head.split("\r\n")
+    if not lines:
+        raise MCPElasticsearchError(
+            "malformed HTTP response (empty head)", reason="upstream_error",
+        )
+    status_line = lines[0]
+    parts = status_line.split(" ", 2)
+    if len(parts) < 2 or not parts[0].startswith("HTTP/1."):
+        raise MCPElasticsearchError(
+            f"malformed HTTP status line: {status_line!r}",
+            reason="upstream_error",
+        )
+    try:
+        status = int(parts[1])
+    except ValueError as exc:
+        raise MCPElasticsearchError(
+            f"non-integer HTTP status: {parts[1]!r}",
+            reason="upstream_error",
+        ) from exc
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        headers[k.strip().lower()] = v.strip()
+
+    # Handle chunked transfer encoding if present.
+    if headers.get("transfer-encoding", "").lower() == "chunked":
+        body = _dechunk(body)
+    return status, headers, body
+
+
+def _dechunk(buf: bytes) -> bytes:
+    """Decode HTTP/1.1 chunked transfer-encoding into a flat body."""
+    out = bytearray()
+    i = 0
+    n = len(buf)
+    while i < n:
+        eol = buf.find(b"\r\n", i)
+        if eol < 0:
+            break
+        size_str = buf[i:eol].split(b";", 1)[0].strip()
+        try:
+            size = int(size_str, 16)
+        except ValueError:
+            break
+        i = eol + 2
+        if size == 0:
+            break
+        out.extend(buf[i : i + size])
+        i += size + 2  # skip chunk + trailing \r\n
+    return bytes(out)
+
+
+def _pf_pod_selector(target: Any) -> str:
+    """Label selector used to pick a backing pod for the ES Service.
+
+    Prefers an explicit ``EsTarget.pod_label_selector``; otherwise derives the
+    ECK convention from the service name by stripping the ``-es-http`` suffix
+    (ECK names the HTTP Service ``<cr>-es-http`` and labels its pods with
+    ``elasticsearch.k8s.elastic.co/cluster-name=<cr>``), e.g. service
+    ``eck-infra-logs-es-http`` -> ``...cluster-name=eck-infra-logs``."""
+    selector = (getattr(target, "pod_label_selector", None) or "").strip()
+    if selector:
+        return selector
+    service = getattr(target, "service", None) or ""
+    cr = service[: -len("-es-http")] if service.endswith("-es-http") else service
+    return f"elasticsearch.k8s.elastic.co/cluster-name={cr}"
+
+
+async def _resolve_es_pod(
+    cfg: dict, access: dict, *, force_refresh: bool = False,
+) -> str:
+    """Pick a Running+Ready ES pod for ``cfg``'s target Service.
+
+    Lists pods in ``target.namespace`` matching ``_pf_pod_selector(target)``
+    via a plain httpx GET to the env's k8s API server (Bearer token + CA from
+    ``cluster_api_access``), filters to phase=Running with a True Ready
+    condition, random-picks one (read-only traffic; ES fans the search out
+    across shards internally anyway) and caches it per ``(env, cluster)`` for
+    ``_POD_CACHE_TTL_SECONDS``. ``force_refresh`` skips the cache (used after a
+    tunnel connection error -- the pod likely rotated)."""
+    target = cfg["target"]
+    namespace = getattr(target, "namespace", None)
+    selector = _pf_pod_selector(target)
+    cache_key = (cfg["env"], cfg["cluster"])
+    now = _time.monotonic()
+    cached = _pod_cache.get(cache_key)
+    if cached and not force_refresh and (now - cached["picked_at"]) < _POD_CACHE_TTL_SECONDS:
+        return cached["pod_name"]
+
+    host = access["host"].rstrip("/")
+    headers = {"Accept": "application/json"}
+    if access.get("token"):
+        headers["Authorization"] = f"Bearer {access['token']}"
+    async with httpx.AsyncClient(
+        timeout=_DEFAULT_TIMEOUT_S, verify=access.get("verify", False),
+    ) as http:
+        resp = await http.get(
+            f"{host}/api/v1/namespaces/{namespace}/pods",
+            params={"labelSelector": selector}, headers=headers,
+        )
+    if resp.status_code >= 400:
+        raise MCPElasticsearchError(
+            f"elasticsearch mcp: listing pods for selector {selector!r} in "
+            f"namespace {namespace!r} failed: HTTP {resp.status_code} "
+            f"{_truncate(resp.text, 300)}",
+            reason="http",
+        )
+    items = (resp.json() or {}).get("items") or []
+    ready_pods: list[str] = []
+    for p in items:
+        status = p.get("status") or {}
+        if status.get("phase") != "Running":
+            continue
+        conds = status.get("conditions") or []
+        if not any(
+            c.get("type") == "Ready" and c.get("status") == "True" for c in conds
+        ):
+            continue
+        name = (p.get("metadata") or {}).get("name")
+        if name:
+            ready_pods.append(name)
+    if not ready_pods:
+        raise MCPElasticsearchError(
+            f"elasticsearch mcp: no Running+Ready pods matched selector "
+            f"{selector!r} in namespace {namespace!r} for env {cfg['env']!r}. "
+            f"Either the ECK pods are down, the selector is wrong (override via "
+            f"the target's `pod_label_selector`), or the GSA lacks `pods` list "
+            f"permission in that namespace.",
+            reason="no_pod",
+        )
+    picked = random.choice(ready_pods)
+    _pod_cache[cache_key] = {"pod_name": picked, "picked_at": now}
+    return picked
+
+
+async def _pf_request(
+    cfg: dict, method: str, path: str, params: dict | None, body: dict | None,
+    *, tool: str = "elasticsearch", _retried: bool = False,
+) -> Any:
+    """Issue an ES request through a pods/portforward WebSocket tunnel and
+    return the parsed JSON (same shape ``_get``/``_post`` return from httpx).
+
+    The ES ``Authorization: ApiKey`` header (from ``cfg['headers']``, built by
+    ``_config``) rides INSIDE the tunnel straight to ES; the cluster bearer
+    token from ``cluster_api_access`` authenticates only the WebSocket handshake
+    to the API server (set in ``_portforward_request``). Mirrors the httpx path:
+    a 401 refreshes the API-server token + re-resolves the pod and retries once,
+    and non-2xx raises ``MCPElasticsearchError(reason="http")``."""
+    import json as _json
+
+    target = cfg["target"]
+    service = getattr(target, "service", None)
+    namespace = getattr(target, "namespace", None)
+    port = getattr(target, "port", 9200) or 9200
+    if not (service and namespace):
+        raise MCPElasticsearchError(
+            "elasticsearch mcp: reach=port_forward requires `service` and "
+            "`namespace` on the environment's elasticsearch target.",
+            reason="bad_env",
+        )
+
+    access = await _k8s.cluster_api_access(cfg["env"])
+    pod = await _resolve_es_pod(cfg, access)
+
+    # Compose the request-target (path + query string). ES accepts a JSON body
+    # on GET, so both verbs go through the same builder.
+    req_path = path if path.startswith("/") else "/" + path
+    clean = {k: v for k, v in (params or {}).items() if v is not None}
+    if clean:
+        from urllib.parse import urlencode
+        req_path = f"{req_path}?{urlencode(clean)}"
+
+    # ES ApiKey (or basic) Authorization rides end-to-end through the tunnel;
+    # `_config` already put it on cfg["headers"].
+    req_headers: dict[str, str] = {}
+    es_auth = cfg["headers"].get("Authorization")
+    if es_auth:
+        req_headers["Authorization"] = es_auth
+    raw_body = b""
+    if body is not None and body != {}:
+        raw_body = _json.dumps(body, separators=(",", ":")).encode("utf-8")
+        req_headers["Content-Type"] = "application/json"
+    raw_request = _build_http_request(
+        method=method,
+        path=req_path,
+        # Host header is informational to ES (it only cares about the ApiKey +
+        # path); use the Service DNS name for traceability in ES access logs.
+        host=f"{service}.{namespace}.svc:{port}",
+        headers=req_headers,
+        body=raw_body,
+    )
+
+    try:
+        raw_response = await _portforward_request(
+            access, namespace=namespace, pod=pod, port=int(port),
+            raw_request=raw_request,
+        )
+    except MCPElasticsearchError:
+        raise
+    except Exception as exc:
+        # A 401 here means the API server rejected the WS upgrade -- i.e. the
+        # ADC/API-server token expired (the inner 401 retry below never sees
+        # this because the handshake fails before any data flows). Refresh the
+        # token + re-resolve the pod and retry once; otherwise treat it as a
+        # connection-level failure (pod rotated / network blip) and bubble up.
+        import aiohttp as _aiohttp
+        _pod_cache.pop((cfg["env"], cfg["cluster"]), None)
+        is_k8s_401 = (
+            isinstance(exc, _aiohttp.WSServerHandshakeError)
+            and getattr(exc, "status", None) == 401
+        )
+        if is_k8s_401 and not _retried:
+            await _refresh_cluster_access(cfg)
+            return await _pf_request(cfg, method, path, params, body, tool=tool, _retried=True)
+        raise MCPElasticsearchError(
+            f"{tool}: port-forward tunnel failed: {exc!r}", reason="http",
+        ) from exc
+
+    status, _headers, body_bytes = _parse_http_response(raw_response)
+    if status == 401 and not _retried:
+        await _refresh_cluster_access(cfg)
+        _pod_cache.pop((cfg["env"], cfg["cluster"]), None)
+        return await _pf_request(cfg, method, path, params, body, tool=tool, _retried=True)
+    if status >= 400:
+        snippet = body_bytes[:500].decode("utf-8", "replace")
+        raise MCPElasticsearchError(
+            f"{tool}: HTTP {status} {_truncate(snippet, 500)}", reason="http",
+        )
+    if not body_bytes:
+        return {}
+    try:
+        return _json.loads(body_bytes.decode("utf-8"))
+    except Exception as exc:
+        snippet = body_bytes[:300].decode("utf-8", "replace")
+        raise MCPElasticsearchError(
+            f"{tool}: failed to parse ES response: {exc}; body={_truncate(snippet, 300)}",
+            reason="http",
+        ) from exc
+
+
 async def _get(
     cfg: dict, path: str, params: dict | None = None, *,
     tool: str = "elasticsearch", _retried: bool = False,
 ) -> Any:
+    if cfg["reach"] == "port_forward":
+        return await _pf_request(cfg, "GET", path, params, None, tool=tool, _retried=_retried)
     base, headers, auth, verify = await _base(cfg)
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     async with httpx.AsyncClient(
@@ -299,6 +784,8 @@ async def _post(
     cfg: dict, path: str, body: dict, *,
     tool: str = "elasticsearch", _retried: bool = False,
 ) -> Any:
+    if cfg["reach"] == "port_forward":
+        return await _pf_request(cfg, "POST", path, None, body, tool=tool, _retried=_retried)
     base, headers, auth, verify = await _base(cfg)
     async with httpx.AsyncClient(
         headers={**headers, "Content-Type": "application/json"}, auth=auth,

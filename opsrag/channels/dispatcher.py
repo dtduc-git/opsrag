@@ -33,6 +33,7 @@ from opsrag.channels.types import (
     AgentResult,
     FeedbackEvent,
     InboundMessage,
+    ReactionKind,
     ThreadMessage,
 )
 from opsrag.config import VisionConfig
@@ -396,7 +397,14 @@ class ChannelDispatcher:
     # CoreSink: feedback
     # ------------------------------------------------------------------
     async def on_feedback(self, fb: FeedbackEvent) -> None:
-        """Persist feedback, then ephemerally confirm to the clicker."""
+        """Persist feedback, react on the answer message, then ephemerally
+        confirm to the clicker.
+
+        The reaction is public + persistent (visible to everyone in the
+        channel); the ephemeral confirm stays private to the clicker. Both
+        are best-effort and independent -- a react failure must never break
+        the confirm, and vice versa.
+        """
         accepted = await record_feedback(
             fb,
             investigation_cache=self._investigation_cache,
@@ -405,6 +413,18 @@ class ChannelDispatcher:
         )
         if not accepted:
             return
+
+        if fb.channel_id and fb.message_ts:
+            try:
+                kind = (
+                    ReactionKind.THUMBS_UP
+                    if fb.thumbs == "up"
+                    else ReactionKind.THUMBS_DOWN
+                )
+                await self._adapter.react(fb.channel_id, fb.message_ts, kind)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("feedback react failed: %s", exc)
+
         try:
             await self._adapter.confirm_feedback(fb, accepted=True)
         except Exception as exc:  # noqa: BLE001

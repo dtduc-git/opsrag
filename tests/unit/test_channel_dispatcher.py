@@ -488,6 +488,56 @@ async def test_feedback_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_feedback_threads_resolved_query_answer_into_store() -> None:
+    # Regression: Slack feedback rows landed in Postgres with NULL
+    # query/answer snippets, so the Retrieval-Quality "needs attention"
+    # cards were blank. When the cache resolves the investigation it now
+    # returns query+answer; the feedback path must persist them as snippets.
+    from opsrag.agent.cache.investigation_cache import FeedbackResult
+
+    class _CacheWithPayload:
+        async def record_feedback(self, investigation_id, *, thumbs, correction):  # noqa: ANN001
+            return FeedbackResult(
+                ok=True,
+                point_id=investigation_id,
+                query="why is passport-be 400ing?",
+                answer="rs-backend rejects the org sync payload",
+            )
+
+    adapter = FakeAdapter()
+    store = _RecordingStore()
+    disp = _make_dispatcher(
+        adapter, investigation_cache=_CacheWithPayload(), feedback_store=store,
+    )
+    fb = FeedbackEvent(
+        thumbs="down", investigation_id="inv-7", user_id="U9", thread_id="t1",
+    )
+    await disp.on_feedback(fb)
+
+    assert store.calls[0]["query_snippet"] == "why is passport-be 400ing?"
+    assert store.calls[0]["answer_snippet"] == "rs-backend rejects the org sync payload"
+
+
+@pytest.mark.asyncio
+async def test_feedback_uses_payload_answer_snippet_when_cache_resolves_nothing() -> None:
+    # Ungrounded / LOW-confidence answers aren't cached -> the cache resolves no
+    # investigation (record_feedback returns falsy). The answer snippet captured
+    # from the click payload must still reach the store so the dashboard card
+    # isn't blank.
+    adapter = FakeAdapter()
+    store = _RecordingStore()
+    disp = _make_dispatcher(
+        adapter, investigation_cache=_RecordingCache(), feedback_store=store,
+    )
+    fb = FeedbackEvent(
+        thumbs="down", investigation_id="slack-thread:C1:1.1", user_id="U9",
+        thread_id="t1", answer_snippet="Unverified: the deploy failed.",
+    )
+    await disp.on_feedback(fb)
+    assert store.calls[0]["answer_snippet"] == "Unverified: the deploy failed."
+
+
+@pytest.mark.asyncio
 async def test_feedback_down_direction() -> None:
     adapter = FakeAdapter()
     store = _RecordingStore()
@@ -537,6 +587,63 @@ async def test_feedback_store_failure_does_not_block_confirm() -> None:
     disp = _make_dispatcher(adapter, feedback_store=_Boom())
     fb = FeedbackEvent(
         thumbs="up", investigation_id="inv-1", user_id="U1", thread_id=None,
+    )
+    await disp.on_feedback(fb)
+    assert adapter.confirms == [(fb, True)]
+
+
+@pytest.mark.asyncio
+async def test_feedback_up_reacts_thumbs_up_on_answer_message() -> None:
+    adapter = FakeAdapter()
+    disp = _make_dispatcher(adapter)
+    fb = FeedbackEvent(
+        thumbs="up", investigation_id="inv-7", user_id="U9", thread_id="t1",
+        channel_id="C123", message_ts="111.1",
+    )
+    await disp.on_feedback(fb)
+    assert adapter.reactions == [("C123", "111.1", ReactionKind.THUMBS_UP)]
+    # ephemeral confirm still fires alongside the public reaction.
+    assert adapter.confirms == [(fb, True)]
+
+
+@pytest.mark.asyncio
+async def test_feedback_down_reacts_thumbs_down_on_answer_message() -> None:
+    adapter = FakeAdapter()
+    disp = _make_dispatcher(adapter)
+    fb = FeedbackEvent(
+        thumbs="down", investigation_id="inv-8", user_id="U9", thread_id="t1",
+        channel_id="C123", message_ts="222.2",
+    )
+    await disp.on_feedback(fb)
+    assert adapter.reactions == [("C123", "222.2", ReactionKind.THUMBS_DOWN)]
+    assert adapter.confirms == [(fb, True)]
+
+
+@pytest.mark.asyncio
+async def test_feedback_missing_coords_skips_react_but_still_confirms() -> None:
+    adapter = FakeAdapter()
+    disp = _make_dispatcher(adapter)
+    fb = FeedbackEvent(
+        thumbs="up", investigation_id="inv-9", user_id="U9", thread_id="t1",
+        # channel_id / message_ts left at their default "" -- no coords.
+    )
+    await disp.on_feedback(fb)
+    assert adapter.reactions == []
+    assert adapter.confirms == [(fb, True)]
+
+
+@pytest.mark.asyncio
+async def test_feedback_react_failure_does_not_block_confirm() -> None:
+    # A react that raises must not prevent the ephemeral confirm.
+    class _BoomAdapter(FakeAdapter):
+        async def react(self, channel_id, message_id, kind):  # noqa: ANN001
+            raise RuntimeError("slack api down")
+
+    adapter = _BoomAdapter()
+    disp = _make_dispatcher(adapter)
+    fb = FeedbackEvent(
+        thumbs="up", investigation_id="inv-10", user_id="U9", thread_id="t1",
+        channel_id="C123", message_ts="333.3",
     )
     await disp.on_feedback(fb)
     assert adapter.confirms == [(fb, True)]

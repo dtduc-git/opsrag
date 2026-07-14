@@ -86,6 +86,13 @@ class MCPIntegration:
     required_config: tuple[str, ...] = field(default_factory=tuple)
     tool_names: tuple[str, ...] = field(default_factory=tuple)
     health_url_template: str | None = None
+    # Optional zero-arg callable returning auth headers for the /readyz
+    # probe of health_url_template (e.g. a Bearer token from the bound
+    # config). None/empty -> the probe stays an unauthenticated
+    # reachability check. Auth failures surface in the probe DETAIL only;
+    # they never gate readiness (a third-party token expiry must not take
+    # the pod out of rotation).
+    health_headers_fn: Callable[[], dict] | None = None
     factory: Callable[..., Any] | None = None
     fake_factory: Callable[..., Any] | None = None
     # Optional custom validator: (settings, env) -> missing-item str | None.
@@ -202,6 +209,7 @@ REGISTRY: dict[str, MCPIntegration] = {
         tool_names=(
             "billing_gcp_cost_anomalies",
             "billing_gcp_cost_by_label",
+            "billing_gcp_cost_by_month",
             "billing_gcp_cost_by_project",
             "billing_gcp_cost_by_service",
             "billing_gcp_cost_summary",
@@ -270,7 +278,11 @@ REGISTRY: dict[str, MCPIntegration] = {
             "cloudflare_list_page_rules",
             "cloudflare_list_zones",
         ),
-        health_url_template="https://api.cloudflare.com/client/v4/user/tokens/verify",
+        # /zones works for BOTH user and account-owned tokens;
+        # /user/tokens/verify 401s for healthy account tokens (and 400s
+        # unauthenticated -- the old 10s log spam).
+        health_url_template="https://api.cloudflare.com/client/v4/zones?per_page=1",
+        health_headers_fn=_lazy("opsrag.mcp.cloudflare", "health_headers"),
         factory=_lazy("opsrag.mcp.cloudflare", "build"),
         fake_factory=_lazy("opsrag.mcp.cloudflare", "build_fake"),
     ),
@@ -590,6 +602,7 @@ REGISTRY: dict[str, MCPIntegration] = {
             "slack_get_message_by_url",
             "slack_get_thread_by_url",
             "slack_list_channels",
+            "slack_channel_history",
         ),
         factory=_lazy("opsrag.mcp.slack", "build"),
         fake_factory=_lazy("opsrag.mcp.slack", "build_fake"),

@@ -181,7 +181,17 @@ class PostgresIndexStore:
     # -- reader side (backend pods) -----------------------------------------
     async def read_summary(self) -> dict:
         """Same shape as ``IndexingTracker.get_summary`` -- percent/elapsed are
-        recomputed from the stored epochs so all pods agree."""
+        recomputed from the stored epochs so all pods agree.
+
+        ``total_chunks`` is sourced from ``indexed_files.chunk_count`` (the
+        persistent per-file tally that mirrors what is actually in the vector
+        store) rather than ``opsrag_index_progress.total_chunks`` (which only
+        counts chunks *produced this run*). On an incremental re-index every
+        unchanged file is skipped and produces 0 chunks, so the per-run column
+        collapses to 0 for skipped repos and the "In vector store" stat would
+        undercount by ~8x even though Qdrant is untouched. We fall back to the
+        per-run value for sources not tracked in ``indexed_files``
+        (slack/confluence/rootly, or a repo mid first-index)."""
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -191,11 +201,30 @@ class PostgresIndexStore:
                     "FROM opsrag_index_progress ORDER BY repo, branch"
                 )
                 rows = await cur.fetchall()
+                # Source-of-truth chunk counts per (repo, branch). Guarded: a
+                # dev/no-postgres-dedup setup may lack the table -- degrade to
+                # the per-run counts instead of failing the whole summary.
+                store_chunks: dict[tuple[str, str], int] = {}
+                try:
+                    await cur.execute(
+                        "SELECT repo, branch, SUM(chunk_count) "
+                        "FROM indexed_files GROUP BY repo, branch"
+                    )
+                    for r_repo, r_branch, r_chunks in await cur.fetchall():
+                        store_chunks[(r_repo, r_branch)] = int(r_chunks or 0)
+                except Exception as exc:
+                    _log.warning(
+                        "indexed_files chunk rollup failed: %s -- using per-run counts",
+                        exc,
+                    )
         now = time.time()
         repos: list[dict] = []
         t_files = t_indexed = t_chunks = 0
         for row in rows:
             (repo, branch, status, st, dn, tf, idx, skp, tc, ent, err, sa, fa) = row
+            # Prefer the persistent vector-store tally; keep the per-run value
+            # for repos absent from indexed_files (non-git sources / first run).
+            tc = store_chunks.get((repo, branch), tc)
             processed = idx + skp
             percent = round(processed / tf * 100, 1) if tf else 0.0
             elapsed = round((fa or now) - sa, 1) if sa else 0.0

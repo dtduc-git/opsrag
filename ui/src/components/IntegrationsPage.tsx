@@ -49,14 +49,23 @@ function groupByCategory(items: Integration[]): { category: string; items: Integ
 
 function IntegrationCard({ integration }: { integration: Integration }) {
   const [expanded, setExpanded] = useState(false);
-  const { display_name, name, enabled, tool_count, tool_names, has_health_probe, required_env } = integration;
+  const { display_name, name, enabled, tool_count, tool_names, has_health_probe, required_env, origin } = integration;
   const hasTools = tool_names.length > 0;
+  const isExternal = origin === "external";
 
   return (
     <div className={`cache-card integration-card${enabled ? "" : " disabled"}`}>
       <div className="cache-card-head">
         <div className="title">
           <h4>{display_name}</h4>
+          <span
+            className={`badge ${isExternal ? "badge-external" : "badge-neutral"}`}
+            title={isExternal
+              ? "Mounted community/external MCP server"
+              : "Native in-house connector"}
+          >
+            {isExternal ? "external MCP" : "built-in"}
+          </span>
         </div>
         <span className={`badge ${enabled ? "badge-grounded" : "badge-neutral"}`}>
           {enabled ? "enabled" : "disabled"}

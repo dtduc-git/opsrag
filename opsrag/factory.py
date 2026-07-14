@@ -245,6 +245,8 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             dimension=embedder.dimension,
             distance=config.vector_store.distance,
             allow_dimension_change=config.vector_store.allow_dimension_change,
+            timeout=config.vector_store.request_timeout,
+            use_file_key_delete=config.vector_store.use_file_key_delete,
         )
     elif config.vector_store.provider == "pgvector":
         from opsrag.vectorstores.pgvector import PgVectorStore
@@ -655,6 +657,7 @@ def build_providers(config: OpsRAGConfig) -> Providers:
             dimension=code_embedder_provider.dimension,
             distance=cv_cfg.distance,
             allow_dimension_change=cv_cfg.allow_dimension_change,
+            use_file_key_delete=cv_cfg.use_file_key_delete,
         )
 
     # (PurposeRouter is built earlier, before the entity extractor.)

@@ -8,6 +8,8 @@ from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 
+from opsrag.sessions.replay_components import rebuild_rich_components
+
 
 class InMemorySessionStore:
     def __init__(self) -> None:
@@ -111,9 +113,11 @@ class InMemorySessionStore:
         return {"thread_id": thread_id, "has_checkpoint": True}
 
     async def get_messages(self, thread_id: str) -> list[dict]:
-        """Same dedupe-by-(query,generation) replay as the postgres impl."""
-        seen: dict[tuple[str, str], dict] = {}
-        order: list[tuple[str, str]] = []
+        """Collapse each contiguous same-query run to one turn (see the postgres
+        impl for the rationale -- a turn writes several ``generation`` values, so
+        a (query, generation) dedup duplicated messages)."""
+        turns: list[dict] = []
+        prev_query: str | None = None
         config = {"configurable": {"thread_id": thread_id}}
         for cp_tuple in self._saver.list(config):
             values = cp_tuple.checkpoint.get("channel_values") or {}
@@ -121,9 +125,11 @@ class InMemorySessionStore:
             generation = (values.get("generation") or "").strip()
             if not query or not generation:
                 continue
-            key = (query, generation)
-            if key in seen:
+            # New turn iff the query changed from the previous qualifying
+            # checkpoint (same query = same contiguous turn, already captured).
+            if query == prev_query:
                 continue
+            prev_query = query
             sources = []
             for chunk in values.get("final_chunks") or values.get("graded_chunks") or []:
                 src = chunk.get("source_path") if isinstance(chunk, dict) else getattr(chunk, "source_path", None)
@@ -132,23 +138,32 @@ class InMemorySessionStore:
                     label = f"{repo}:{src}" if repo else src
                     if label not in sources:
                         sources.append(label)
-            seen[key] = {
+            turns.append({
                 "query": query,
                 "generation": generation,
                 "sources": sources[:8],
                 "grounded": bool(values.get("generation_grounded")),
                 "query_type": values.get("query_type"),
-            }
-            order.append(key)
+                # Source data for charts/plan -- rebuilt below so they survive
+                # replay instead of vanishing after the live stream (mirrors the
+                # postgres store).
+                "tool_message_history": values.get("tool_message_history") or [],
+                "plan": values.get("plan") or [],
+            })
         messages: list[dict] = []
-        for key in reversed(order):
-            entry = seen[key]
+        for entry in reversed(turns):
             messages.append({"role": "user", "content": entry["query"]})
-            messages.append({
+            assistant_msg = {
                 "role": "assistant",
                 "content": entry["generation"],
                 "sources": entry["sources"],
                 "grounded": entry["grounded"],
                 "query_type": entry["query_type"],
-            })
+            }
+            rich = rebuild_rich_components(
+                entry.get("tool_message_history"), entry.get("plan")
+            )
+            if rich:
+                assistant_msg["rich_components"] = rich
+            messages.append(assistant_msg)
         return messages

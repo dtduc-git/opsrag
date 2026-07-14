@@ -102,21 +102,107 @@ function is401(resp: Response): boolean {
   return resp.status === 401;
 }
 
+// ── Silent session refresh (single-flight) ──────────────────────────────
+// The access-session cookie is short (15 min); the 14-day refresh cookie is
+// meant to silently re-mint it via `POST /auth/refresh`. That endpoint ROTATES
+// the refresh token, so if several requests 401 at once (typical after the
+// session lapses during idle) and each fired its own refresh, they'd invalidate
+// each other and all still bounce to login. So concurrent callers SHARE one
+// in-flight refresh. Exported for tests. Resolves true iff a session was minted.
+let _refreshInFlight: Promise<boolean> | null = null;
+
+// Cap how long a silent refresh / logout may hold the cross-tab lock. Without
+// this, a wedged backend (accepts but never responds) would keep the exclusive
+// `opsrag_session_refresh` lock held for the browser's socket timeout (minutes),
+// blocking refresh AND logout in EVERY same-origin tab. A timed-out refresh
+// aborts -> the catch returns false -> clean fall-through to the login page.
+const _AUTH_FETCH_TIMEOUT_MS = 15000;
+
+function _timeoutSignal(ms: number): AbortSignal | undefined {
+  try {
+    return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(ms)
+      : undefined; // older browsers: no timeout, but never break the request
+  } catch {
+    return undefined;
+  }
+}
+
+// The refresh POST itself. Bare `fetch` (not apiFetch) so a 401 here does NOT
+// recurse. The global window.fetch wrapper adds X-CSRF-Token; the opsrag_csrf
+// cookie outlives the session (max-age == refresh TTL), so it is still present
+// after the access session lapses. Same-origin -> cookies (incl. the refresh
+// cookie, now path="/") are sent.
+async function _postRefresh(): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/auth/refresh`, {
+      method: "POST",
+      signal: _timeoutSignal(_AUTH_FETCH_TIMEOUT_MS),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function refreshSession(): Promise<boolean> {
+  if (_refreshInFlight === null) {
+    const flight = (async (): Promise<boolean> => {
+      // Cross-tab single-flight. The refresh cookie is shared across same-origin
+      // tabs and /auth/refresh ROTATES it (single-use), so without cross-tab
+      // coordination two idle-lapsed tabs would present the SAME token: one
+      // rotates it, the other 401s -> spurious logout (and, with cookies now at
+      // path="/", the loser's server-side clear could wipe the winner's fresh
+      // session). navigator.locks serializes the POST across tabs (a waiting tab
+      // then presents the freshly minted token and succeeds). The in-realm
+      // `_refreshInFlight` latch still dedupes the N concurrent 401s WITHIN this
+      // tab down to one POST. Fall back to a bare POST where Web Locks are
+      // unavailable (older browsers / non-browser test env).
+      const locks =
+        typeof navigator !== "undefined"
+          ? (navigator as Navigator & { locks?: LockManager }).locks
+          : undefined;
+      if (locks && typeof locks.request === "function") {
+        // navigator.locks.request resolves to the callback's resolved value
+        // (it holds the lock until _postRefresh's promise settles). The
+        // await + unknown cast sidesteps a lib typing quirk where the
+        // callback's Promise<boolean> is inferred as the lock's result type.
+        return (await locks.request("opsrag_session_refresh", _postRefresh)) as unknown as boolean;
+      }
+      return _postRefresh();
+    })();
+    _refreshInFlight = flight;
+    // Release the single-flight slot once settled so the NEXT lapse refreshes
+    // again; guard against clobbering a newer flight.
+    void flight.finally(() => {
+      if (_refreshInFlight === flight) _refreshInFlight = null;
+    });
+  }
+  return _refreshInFlight;
+}
+
 /**
- * Central fetch wrapper. On a 401 it flips the app into login mode (sets the
- * login hash + clears stale auth) and throws so callers stop. (The global
- * fetch wrapper above adds the CSRF header to unsafe same-origin requests.)
+ * Central fetch wrapper. On a 401 it first attempts ONE silent session refresh
+ * and retries the original request; only if that fails does it flip the app
+ * into login mode (login hash + typed throw). A 401 is rejected at the auth
+ * gate BEFORE the handler runs, so the original request had no side effect --
+ * retrying is safe even for mutations. The retry uses bare `fetch`, so it never
+ * triggers a second refresh (no loop). (The global fetch wrapper above adds the
+ * CSRF header to unsafe same-origin requests.)
  *
- * NOTE: this does NOT read the body on success, so streaming/SSE callers can
- * pass `{ stream: true }` to skip the 401 short-circuit's body handling and
- * read `resp.body` themselves. The 401 check only inspects `resp.status`.
+ * Only inspects `resp.status` (never reads the body), so streaming/SSE callers
+ * get an untouched `resp.body` on the happy path.
  */
 export async function apiFetch(
   input: string,
   init?: RequestInit,
 ): Promise<Response> {
-  const resp = await fetch(input, init);
+  let resp = await fetch(input, init);
   if (is401(resp)) {
+    if (await refreshSession()) {
+      resp = await fetch(input, init);   // one retry with the re-minted session
+      if (!is401(resp)) return resp;
+    }
     triggerLogin();
     // Surface a typed error so SSE callers (which never reach `.json()`)
     // still abort cleanly before trying to read a body that won't come.
@@ -140,7 +226,7 @@ export interface UIConfig {
   favicon_url: string;
   accent_color: string;
   confluence_base_url: string;
-  slack_workspace_url: string;
+  slack_workspace_url: string | null;
   rootly_web_url: string;
   gitlab_base_url: string;
   model_name?: string | null;
@@ -303,7 +389,7 @@ export interface IndexingRepo {
   branch: string;
   status: string;
   source_type?: string;        // "git" | "confluence" | ... — defaults to "git"
-  display_name?: string | null; // human-readable label, e.g. "slack:#devops"
+  display_name?: string | null; // human-readable label, e.g. "slack:#ops"
   total_files: number;
   indexed_files: number;       // files that produced ≥1 chunk
   skipped_files: number;       // files no parser claimed / parse errors
@@ -351,6 +437,10 @@ export interface ReplayedMessage {
   // this turn. Same value on the user+assistant pair (they share one
   // checkpoint cycle). Null only on legacy rows without a `ts` field.
   ts?: string | null;
+  // Renderable charts/plan re-derived on replay from the turn's persisted
+  // channels (matches the live `render_component` payload shape:
+  // `{component, props}`). Absent when the turn produced no chart/plan.
+  rich_components?: { component: string; props: Record<string, unknown> }[];
 }
 
 
@@ -797,7 +887,12 @@ function parseScopes(raw: unknown): Scope[] {
 
 export async function fetchMe(): Promise<MeResponse> {
   try {
-    const r = await fetch(`${BASE}/me`);
+    let r = await fetch(`${BASE}/me`);
+    // Boot/reload after idle: /me 401s. Try one silent refresh + retry so a page
+    // reload with a still-valid refresh token doesn't bounce a user to login.
+    if (r.status === 401 && (await refreshSession())) {
+      r = await fetch(`${BASE}/me`);
+    }
     if (!r.ok) {
       // 401 in login/oidc mode -> latch "auth required" so AuthGate shows the
       // login page on boot (not just after a later action 401s).
@@ -867,10 +962,29 @@ export async function login(username: string, password: string): Promise<LoginRe
 }
 
 export async function logout(): Promise<void> {
-  try {
-    await fetch(`${BASE}/auth/logout`, { method: "POST" });
-  } catch {
-    // Best-effort — the gate redirects to login regardless.
+  // Drop the single-flight latch and serialize logout on the SAME cross-tab
+  // lock as refresh, so a silent refresh in flight cannot interleave with (and
+  // re-establish a session after) logout. Once the in-flight refresh releases
+  // the lock, logout revokes whatever token is now current.
+  _refreshInFlight = null;
+  const doLogout = async () => {
+    try {
+      await fetch(`${BASE}/auth/logout`, {
+        method: "POST",
+        signal: _timeoutSignal(_AUTH_FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      // Best-effort — the gate redirects to login regardless.
+    }
+  };
+  const locks =
+    typeof navigator !== "undefined"
+      ? (navigator as Navigator & { locks?: LockManager }).locks
+      : undefined;
+  if (locks && typeof locks.request === "function") {
+    await locks.request("opsrag_session_refresh", doLogout);
+  } else {
+    await doLogout();
   }
 }
 
@@ -1414,6 +1528,9 @@ export interface Integration {
   display_name: string;
   enabled: boolean;
   category: string;
+  // "external" = mounted community MCP server; "builtin" = native in-house
+  // connector. Absent on older backends → treat as "builtin".
+  origin?: "external" | "builtin";
   tool_count: number;
   tool_names: string[];
   has_health_probe: boolean;
@@ -1464,4 +1581,45 @@ export async function fetchIndexingJobs(): Promise<IndexingJobsSummary> {
   const r = await fetch(`${BASE}/indexing/jobs`);
   if (!r.ok) throw new Error(`indexing/jobs failed: ${r.status}`);
   return r.json();
+}
+
+// ── Slack permalink + title helpers ─────────────────────────────────────
+
+/**
+ * Build a clickable Slack thread permalink from an OpsRAG session/thread id.
+ * Shared-thread ids: slack-thread:<channelId>:<ts>
+ *   e.g. slack-thread:C0EXAMPLE02:1783938089.103429
+ * <ts> is a canonical Slack timestamp (contains a dot, never a colon).
+ * Returns https://<workspace>.slack.com/archives/<channelId>/p<ts-no-dot>,
+ * matching backend _build_permalink (opsrag/mcp/slack.py:518-530).
+ * Returns null (caller renders plain text, no link) when: workspace missing;
+ * not a `slack-thread:` id (web/`slack-dm:`/other platforms); ts missing or "no-ts".
+ */
+export function slackPermalink(
+  sessionId: string,
+  workspace: string | null | undefined,
+): string | null {
+  if (!workspace) return null;
+  const PREFIX = "slack-thread:";
+  if (!sessionId.startsWith(PREFIX)) return null;
+  // Remainder "<channelId>:<ts>": channelId has no colon; ts has a dot, never a
+  // colon → split on the FIRST colon of the remainder.
+  const rest = sessionId.slice(PREFIX.length);
+  const sep = rest.indexOf(":");
+  if (sep <= 0) return null;
+  const channel = rest.slice(0, sep);
+  const ts = rest.slice(sep + 1);
+  if (!channel || !ts || ts === "no-ts") return null;
+  const tsSquash = "p" + ts.replace(/\./g, ""); // 1783938089.103429 → p1783938089103429
+  const base = workspace.replace(/\/+$/, "");    // strip trailing slash(es)
+  return `${base}/archives/${channel}/${tsSquash}`;
+}
+
+/** Compact, single-line label from a possibly long/multi-line server title. */
+export function normalizeTitle(raw: string | null | undefined, maxLen = 60): string {
+  if (!raw) return "";
+  const firstLine = raw.split(/\r?\n/, 1)[0] ?? "";
+  const collapsed = firstLine.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= maxLen) return collapsed;
+  return collapsed.slice(0, maxLen - 1).trimEnd() + "…";
 }

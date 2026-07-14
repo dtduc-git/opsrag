@@ -312,13 +312,21 @@ def format_answer_as_slack_blocks(
             },
         })
 
-    # 3.5. Inline 👍/👎 feedback -- only when we have an
-    # `investigation_id` to anchor the vote against. Slack posts the
-    # button click to `/slack/interactivity` with `value`-payload
-    # `<direction>:<investigation_id>` and `action_id`
-    # `opsrag_feedback`. Without an investigation_id we omit the row
-    # (no anchor -> no place to record the vote).
-    if investigation_id:
+    # 3.5. Inline 👍/👎 feedback. Anchor the vote on the `investigation_id`
+    # when we have one (grounded tool-path answers get cached + carry a UUID
+    # -> the vote resolves the exact turn + its query/answer snippets).
+    # Otherwise fall back to the `session_id` (the `slack-thread:C:ts` id):
+    # LOW-confidence / unverified answers are deliberately NOT cached, so they
+    # have no investigation_id -- but feedback matters MOST on those, so we
+    # still render the row anchored on the thread. The feedback path resolves
+    # thread-shaped ids (grounded turns stored under this thread resolve +
+    # carry snippets; ungrounded ones record the thumbs against the session,
+    # with the answer snippet captured from the click payload). Slack posts the
+    # click with `value` `<direction>:<anchor>` and `action_id`
+    # `opsrag_feedback_*`; the parser splits on the FIRST ':' so a colon-y
+    # session id survives verbatim. No anchor at all -> omit the row.
+    feedback_anchor = investigation_id or session_id
+    if feedback_anchor:
         blocks.append({
             "type": "actions",
             "block_id": "opsrag_feedback_row",
@@ -328,14 +336,14 @@ def format_answer_as_slack_blocks(
                     "action_id": "opsrag_feedback_up",
                     "text": {"type": "plain_text", "text": "👍 Helpful", "emoji": True},
                     "style": "primary",
-                    "value": f"up:{investigation_id}",
+                    "value": f"up:{feedback_anchor}",
                 },
                 {
                     "type": "button",
                     "action_id": "opsrag_feedback_down",
                     "text": {"type": "plain_text", "text": "👎 Wrong", "emoji": True},
                     "style": "danger",
-                    "value": f"down:{investigation_id}",
+                    "value": f"down:{feedback_anchor}",
                 },
             ],
         })

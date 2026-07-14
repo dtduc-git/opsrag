@@ -28,11 +28,18 @@ from opsrag.mcp.registry import REGISTRY
 
 
 def enabled_integration_names(settings: Any) -> tuple[str, ...]:
-    """Names of integrations with ``enabled is True`` in ``settings.mcp``."""
-    mcp_map = getattr(settings, "mcp", {}) or {}
-    return tuple(
-        name for name, block in mcp_map.items() if getattr(block, "enabled", False)
-    )
+    """Names of integrations with ``enabled is True`` in ``settings.mcp`` OR
+    ``settings.external_mcp`` (External MCP Adapter connectors live on the
+    separate field so their own schema can diverge from native ``mcp``
+    blocks; both must feed the same enabled-gating and RBAC enumeration)."""
+    names: list[str] = []
+    for source in ("mcp", "external_mcp"):
+        block_map = getattr(settings, source, {}) or {}
+        names.extend(
+            name for name, block in block_map.items()
+            if getattr(block, "enabled", False)
+        )
+    return tuple(names)
 
 
 def enabled_tool_names(settings: Any) -> frozenset[str]:
@@ -127,6 +134,18 @@ _TOOL_TO_CONNECTOR: dict[str, str] = {
 }
 
 
+def rebuild_tool_to_connector() -> None:
+    """Re-derive the tool->connector reverse map from the LIVE REGISTRY. Call
+    after runtime REGISTRY inserts (External MCP Adapter) so connector_for_tool
+    resolves the new tools (per-connector prompt, RBAC refusal, audit label)."""
+    global _TOOL_TO_CONNECTOR
+    _TOOL_TO_CONNECTOR = {
+        tool: name
+        for name, integ in REGISTRY.items()
+        for tool in integ.tool_names
+    }
+
+
 def tool_names_for_connectors(connectors: Iterable[str]) -> frozenset[str]:
     """Union the tool names contributed by ``connectors`` (per the registry)."""
     names: set[str] = set()
@@ -155,14 +174,16 @@ _CONNECTOR_SYSTEM_PROMPTS: dict[str, str] = {}
 
 def set_connector_system_prompts(settings: Any) -> None:
     """Populate the per-connector system-prompt map from ``config.mcp.<name>.
-    system_prompt``. Idempotent; safe to call at every startup/reload."""
+    system_prompt`` AND ``config.external_mcp.<name>.system_prompt``.
+    Idempotent; safe to call at every startup/reload."""
     global _CONNECTOR_SYSTEM_PROMPTS
     out: dict[str, str] = {}
-    mcp = getattr(settings, "mcp", {}) or {}
-    for name, block in mcp.items():
-        note = (getattr(block, "system_prompt", None) or "").strip()
-        if note:
-            out[name] = note
+    for source in ("mcp", "external_mcp"):
+        block_map = getattr(settings, source, {}) or {}
+        for name, block in block_map.items():
+            note = (getattr(block, "system_prompt", None) or "").strip()
+            if note:
+                out[name] = note
     _CONNECTOR_SYSTEM_PROMPTS = out
 
 

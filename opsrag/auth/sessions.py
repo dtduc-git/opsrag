@@ -263,9 +263,16 @@ class SessionManager:
             refresh_token,
             max_age=self._refresh_ttl,
             httponly=True,
-            # Scope the refresh cookie to the refresh endpoint only, so it
-            # is not sent on every request (smaller exposure surface).
-            path="/auth/refresh",
+            # path="/" (NOT the scoped "/auth/refresh"): the SPA reaches this
+            # backend under an "/api" reverse-proxy prefix that nginx strips
+            # before the app, so the browser-visible URL is "/api/auth/refresh".
+            # A cookie scoped to "/auth/refresh" fails RFC 6265 path-match
+            # against "/api/auth/refresh" and is NEVER sent -> silent refresh
+            # cannot work. "/" matches the session + CSRF cookies and is prefix-
+            # agnostic. The token stays HttpOnly + single-use (rotated on every
+            # refresh), so riding along on all requests is a negligible exposure
+            # delta for a value JS cannot read. Keep in sync with clear_cookies.
+            path="/",
             **common,
         )
         response.set_cookie(
@@ -281,7 +288,7 @@ class SessionManager:
         """Expire all auth cookies (logout)."""
         for name, path in (
             (self.SESSION_COOKIE, "/"),
-            (self.REFRESH_COOKIE, "/auth/refresh"),
+            (self.REFRESH_COOKIE, "/"),   # must match set_login_cookies (was "/auth/refresh")
             (self.CSRF_COOKIE, "/"),
         ):
             response.delete_cookie(

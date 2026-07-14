@@ -121,7 +121,11 @@ def test_feedback_parse_up() -> None:
     payload = {
         "actions": [{"action_id": "opsrag_feedback_up", "value": "up:inv-42"}],
         "user": {"id": "U7"},
-        "container": {"thread_ts": "100.0"},
+        "container": {
+            "thread_ts": "100.0",
+            "channel_id": "C123",
+            "message_ts": "111.1",
+        },
         "response_url": "https://hooks.example.com/x",
     }
     fb = _payload_to_feedback(payload)
@@ -131,6 +135,73 @@ def test_feedback_parse_up() -> None:
     assert fb.user_id == "U7"
     assert fb.thread_id == "100.0"
     assert fb.raw["response_url"] == "https://hooks.example.com/x"
+    # answer message coords (container form) -- used to react on that message.
+    assert fb.channel_id == "C123"
+    assert fb.message_ts == "111.1"
+
+
+def test_feedback_parse_captures_answer_coords_fallback_form() -> None:
+    # Some payload shapes carry the answer message coords at the top level
+    # (payload["channel"]["id"] / payload["message"]["ts"]) instead of inside
+    # "container" -- the parser must fall back to those.
+    payload = {
+        "actions": [{"action_id": "opsrag_feedback_down", "value": "down:inv-9"}],
+        "user": {"id": "U8"},
+        "container": {},
+        "channel": {"id": "C999"},
+        "message": {"ts": "222.2"},
+        "response_url": "https://hooks.example.com/y",
+    }
+    fb = _payload_to_feedback(payload)
+    assert fb is not None
+    assert fb.channel_id == "C999"
+    assert fb.message_ts == "222.2"
+
+
+def test_feedback_parse_missing_coords_defaults_empty() -> None:
+    payload = {
+        "actions": [{"action_id": "opsrag_feedback_up", "value": "up:inv-1"}],
+        "user": {"id": "U1"},
+    }
+    fb = _payload_to_feedback(payload)
+    assert fb is not None
+    assert fb.channel_id == ""
+    assert fb.message_ts == ""
+
+
+def test_feedback_parse_captures_answer_snippet_from_message() -> None:
+    # The clicked answer message carries the rated answer in its blocks. Capture
+    # it so ungrounded/LOW-confidence feedback (no cached investigation to
+    # resolve snippets from) still lands in the dashboard with context.
+    payload = {
+        "actions": [
+            {"action_id": "opsrag_feedback_down", "value": "down:slack-thread:C1:1.1"},
+        ],
+        "user": {"id": "U1"},
+        "container": {"channel_id": "C1", "message_ts": "222.2"},
+        "message": {
+            "text": "fallback text",
+            "blocks": [
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": "LOW confidence"}]},
+                {"type": "section", "text": {"type": "mrkdwn", "text": "The deploy failed because the migration timed out."}},
+                {"type": "divider"},
+            ],
+        },
+    }
+    fb = _payload_to_feedback(payload)
+    assert fb is not None
+    assert fb.investigation_id == "slack-thread:C1:1.1"
+    assert "migration timed out" in fb.answer_snippet
+
+
+def test_feedback_parse_answer_snippet_empty_when_no_message() -> None:
+    payload = {
+        "actions": [{"action_id": "opsrag_feedback_up", "value": "up:inv-1"}],
+        "user": {"id": "U1"},
+    }
+    fb = _payload_to_feedback(payload)
+    assert fb is not None
+    assert fb.answer_snippet == ""
 
 
 def test_feedback_parse_malformed_returns_none() -> None:
@@ -167,8 +238,10 @@ async def test_react_maps_kinds_to_emoji() -> None:
     await adapter.react("C123", "111.1", ReactionKind.ACK)
     await adapter.react("C123", "111.1", ReactionKind.DONE)
     await adapter.react("C123", "111.1", ReactionKind.ERROR)
+    await adapter.react("C123", "111.1", ReactionKind.THUMBS_UP)
+    await adapter.react("C123", "111.1", ReactionKind.THUMBS_DOWN)
     emojis = [e for _, _, e in fake.reactions]
-    assert emojis == ["eyes", "white_check_mark", "x"]
+    assert emojis == ["eyes", "white_check_mark", "x", "+1", "-1"]
 
 
 @pytest.mark.asyncio

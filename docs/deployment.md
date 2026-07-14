@@ -375,7 +375,7 @@ per-integration credentials.
 ## See also
 
 - [`./helm-chart.md`](./helm-chart.md) — full chart values reference, schema, and upgrade notes
-- [`./mcp-integrations.md`](./mcp-integrations.md) — the 20 MCP integrations and their credentials
+- [`./mcp-integrations.md`](./mcp-integrations.md) — the 27 MCP integrations and their credentials
 - [`./auth.md`](./auth.md) — the two auth modes (`login` default / `oidc`) and SSO providers
 - [`./architecture.md`](./architecture.md) — system architecture and the indexing/serving split
 - [`../specs/001-port-opsrag-opensource/quickstart.md`](../specs/001-port-opsrag-opensource/quickstart.md) — full local walkthrough (sign-in or token, then query)

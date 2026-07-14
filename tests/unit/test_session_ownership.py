@@ -445,3 +445,121 @@ def test_investigation_feedback_open_mode_falls_back_to_client_user_id():
     body = InvestigationFeedbackRequest(thumbs="down", user_id="team-shared")
     asyncio.run(routes.investigation_feedback("inv2", body, req, current_user=_ANON))
     assert fb.calls and fb.calls[0]["user_id"] == "team-shared"
+
+
+# --- feedback -> runbook thumbs wiring (Fix A) ------------------------------
+#
+# When the thumbed answer's investigation record shows it loaded tab
+# runbooks (rb-ids from tool_call_audit), the route bumps each runbook's
+# thumbs counter via RunbookStore.record_thumbs -- and NEVER record_use
+# (used_count must stay a pure load counter).
+
+
+class _FakeFeedbackResult:
+    def __init__(self, ok=True, runbook_ids=()):
+        self.ok = ok
+        self.point_id = "p1" if ok else None
+        self.runbook_ids = list(runbook_ids)
+
+    def __bool__(self):
+        return self.ok
+
+
+class _FakeInvestigationCache:
+    def __init__(self, result):
+        self._result = result
+        self.calls: list[dict] = []
+
+    async def record_feedback(self, investigation_id, *, thumbs,
+                              correction=None, answer_snippet=None):
+        self.calls.append({
+            "id": investigation_id, "thumbs": thumbs,
+            "correction": correction, "answer_snippet": answer_snippet,
+        })
+        return self._result
+
+
+class _FakeRunbookStore:
+    def __init__(self):
+        self.thumbs_calls: list[tuple] = []
+        self.use_calls: list[tuple] = []
+
+    async def record_thumbs(self, runbook_id, *, thumbs):
+        self.thumbs_calls.append((runbook_id, thumbs))
+
+    async def record_use(self, runbook_id, *, thumbs=None):
+        self.use_calls.append((runbook_id, thumbs))
+
+
+def _wired_feedback_request(cache, rb_store):
+    req = _FakeRequest(_store())
+    req.app.state.investigation_cache = cache
+    req.app.state.feedback_store = _FakeFeedbackStore()
+    req.app.state.runbook_store = rb_store
+    return req
+
+
+def test_feedback_bumps_runbook_thumbs_never_record_use():
+    from opsrag.api.models import InvestigationFeedbackRequest
+
+    cache = _FakeInvestigationCache(_FakeFeedbackResult(runbook_ids=["r1", "r2"]))
+    rb = _FakeRunbookStore()
+    req = _wired_feedback_request(cache, rb)
+    body = InvestigationFeedbackRequest(thumbs="up", answer_snippet="snippet text")
+    out = asyncio.run(routes.investigation_feedback("inv9", body, req, current_user=_ANON))
+
+    assert out.recorded is True
+    assert rb.thumbs_calls == [("r1", "up"), ("r2", "up")]
+    assert rb.use_calls == []
+    # the cache received the snippet for thread-id disambiguation
+    assert cache.calls[0]["answer_snippet"] == "snippet text"
+
+
+def test_feedback_no_runbooks_no_bump():
+    from opsrag.api.models import InvestigationFeedbackRequest
+
+    cache = _FakeInvestigationCache(_FakeFeedbackResult(runbook_ids=[]))
+    rb = _FakeRunbookStore()
+    req = _wired_feedback_request(cache, rb)
+    body = InvestigationFeedbackRequest(thumbs="down")
+    asyncio.run(routes.investigation_feedback("inv10", body, req, current_user=_ANON))
+
+    assert rb.thumbs_calls == []
+
+
+def test_feedback_cache_falsy_no_bump_but_still_recorded_via_pg():
+    from opsrag.api.models import InvestigationFeedbackRequest
+
+    cache = _FakeInvestigationCache(_FakeFeedbackResult(ok=False, runbook_ids=["r1"]))
+    rb = _FakeRunbookStore()
+    req = _wired_feedback_request(cache, rb)
+    body = InvestigationFeedbackRequest(thumbs="up")
+    out = asyncio.run(routes.investigation_feedback("inv11", body, req, current_user=_ANON))
+
+    assert rb.thumbs_calls == []          # unresolved answer -> no runbook credit
+    assert out.recorded is True           # Postgres sink still succeeded
+    assert isinstance(out.recorded, bool)  # FeedbackResult coerced, not leaked
+
+
+def test_feedback_runbook_store_absent_still_200():
+    from opsrag.api.models import InvestigationFeedbackRequest
+
+    cache = _FakeInvestigationCache(_FakeFeedbackResult(runbook_ids=["r1"]))
+    req = _FakeRequest(_store())
+    req.app.state.investigation_cache = cache
+    req.app.state.feedback_store = _FakeFeedbackStore()
+    req.app.state.runbook_store = None
+    body = InvestigationFeedbackRequest(thumbs="up")
+    out = asyncio.run(routes.investigation_feedback("inv12", body, req, current_user=_ANON))
+    assert out.recorded is True
+
+
+def test_feedback_route_is_registered_with_the_real_handler():
+    """Regression: a helper inserted between @router.post and the handler
+    stole the decorator -- the endpoint silently unregistered AND lost its
+    require_scope auth gate. Pin the route -> function binding."""
+    route = next(
+        r for r in routes.router.routes
+        if getattr(r, "path", "") == "/investigation/{investigation_id}/feedback"
+    )
+    assert route.endpoint is routes.investigation_feedback

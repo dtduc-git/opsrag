@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { channelPlatformLabel, type Session } from "../api";
+import { channelPlatformLabel, slackPermalink, normalizeTitle, type Session } from "../api";
 
 interface Props {
   sessions: Session[];
@@ -11,6 +11,10 @@ interface Props {
   // the "Start a conversation" empty-state CTA. Also surfaces a per-row
   // platform badge when a conversation carries a `platform`.
   readOnly?: boolean;
+  // Slack workspace base URL (from /ui-config). When set and a row's
+  // thread_id is a `slack-thread:` id, a small "open in Slack" icon is
+  // shown next to the title (hover-revealed via CSS).
+  workspaceUrl?: string | null;
 }
 
 // Relative time from an ISO 8601 string. Null/unparseable -> "".
@@ -44,6 +48,7 @@ export default function ConversationListPane({
   onNew,
   onDelete,
   readOnly = false,
+  workspaceUrl,
 }: Props) {
   const [search, setSearch] = useState("");
 
@@ -96,7 +101,8 @@ export default function ConversationListPane({
       ) : (
         <div className="mdl-list">
           {filtered.map((s) => {
-            const title = s.title || `Conversation ${s.thread_id.slice(0, 8)}`;
+            const title = normalizeTitle(s.title) || `Conversation ${s.thread_id.slice(0, 8)}`;
+            const permalink = slackPermalink(s.thread_id, workspaceUrl);
             const when = ago(s.updated_at);
             const turns = s.turn_count || 0;
             const meta = `${when ? when + " · " : ""}${turns} turn${turns === 1 ? "" : "s"}`;
@@ -107,7 +113,23 @@ export default function ConversationListPane({
                 className={`mdl-row ${s.thread_id === activeThread ? "active" : ""}`}
                 onClick={() => onSelect(s.thread_id)}
               >
-                <span className="mdl-title">{title}</span>
+                <span className="mdl-title-row">
+                  <span className="mdl-title" title={s.title ?? undefined}>{title}</span>
+                  {permalink && (
+                    <span
+                      className="mdl-slack-link"
+                      role="link"
+                      tabIndex={-1}
+                      aria-label="Open Slack thread"
+                      title="Open Slack thread"
+                      onClick={(e) => { e.stopPropagation(); window.open(permalink, "_blank", "noopener,noreferrer"); }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M10 14 21 3M15 3h6v6M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+                      </svg>
+                    </span>
+                  )}
+                </span>
                 {s.preview ? <span className="mdl-preview">{s.preview}</span> : null}
                 <span className="mdl-meta">
                   {s.platform ? (

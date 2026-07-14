@@ -524,6 +524,14 @@ a { color: inherit; text-decoration: none; }
   font-weight: 500;
   letter-spacing: -0.01em;
   font-family: var(--font);
+  /* Long session titles (e.g. a pasted stack trace as the first question)
+     must never wrap the topbar into a multi-line wall of text -- clamp to
+     one line with an ellipsis, same treatment as the sidebar/dashboard
+     previews. min-width: 0 lets the flex child actually shrink. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .topbar h1 .dim, .topbar h2 .dim { color: var(--fg-mute); font-weight: 400; }
 .topbar .actions {
@@ -2731,6 +2739,34 @@ svg:not([width]):not([height]) {
 }
 .msg-bubble pre code { background: none; padding: 0; }
 
+/* GFM markdown tables (remark-gfm). Without this the raw `| a | b |` pipes
+   render as an unstyled run-on line. Scoped to the assistant bubble so it
+   never touches the bespoke .cost-table dashboards. */
+.msg-bubble table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 0.7em;
+  font-size: 0.9em;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.msg-bubble thead th {
+  background: var(--bg-2);
+  font-weight: 600;
+  text-align: left;
+}
+.msg-bubble th,
+.msg-bubble td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+.msg-bubble th:last-child,
+.msg-bubble td:last-child { border-right: none; }
+.msg-bubble tbody tr:last-child td { border-bottom: none; }
+.msg-bubble tbody tr:nth-child(even) td { background: var(--bg-2); }
+
 .code-block {
   margin: 8px 0;
   border: 1px solid var(--line);
@@ -4201,6 +4237,97 @@ html[data-ui-variant="classic"] .avatar.bot img {
 }
 
 /* ============================================================
+   Inline rich components (charts / plan) attached under an
+   assistant message. Wrapper spacing + the InvestigationPlan card,
+   whose `.plan-*` rules were never in the stylesheet (the card
+   rendered as cramped unstyled text). Mirrors the .ts-chart-card
+   frame so all inline components read as one system.
+   ============================================================ */
+.rich-components {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.plan-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 12px 16px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.plan-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.plan-title {
+  font-weight: 600;
+  font-size: 0.92em;
+  color: var(--fg);
+}
+.plan-counts {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 0.8em;
+}
+.plan-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-2);
+}
+.plan-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.plan-item {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+}
+.plan-item-id {
+  font-family: var(--mono);
+  font-size: 0.8em;
+  color: var(--text-3);
+}
+.plan-item-status { font-size: 0.9em; line-height: 1.3; }
+.plan-item-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.plan-item-hypothesis { font-size: 0.9em; color: var(--fg); }
+.plan-item-evidence { font-size: 0.82em; color: var(--text-2); }
+.plan-item-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 0.78em;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+.plan-conf { font-variant-numeric: tabular-nums; }
+/* Status accents reuse the shared semantic vars (both themes). */
+.plan-status-validated .plan-item-status,
+.plan-count.plan-status-validated { color: var(--success); }
+.plan-status-testing .plan-item-status,
+.plan-count.plan-status-testing { color: var(--warning); }
+.plan-status-invalidated .plan-item-status,
+.plan-count.plan-status-invalidated { color: var(--danger); }
+.plan-status-open .plan-item-status,
+.plan-status-deferred .plan-item-status { color: var(--text-3); }
+
+/* ============================================================
    TimeseriesChart — restored from the classic stylesheet after
    the premium redesign accidentally dropped these rules. The
    chart component (ui/src/components/TimeseriesChart.tsx) uses
@@ -4760,12 +4887,126 @@ html[data-ui-variant="classic"] .avatar.bot img {
   border-radius: 6px;
   resize: vertical;
 }
+/* Markdown preview -- document-viewer typography built from the app's
+   design tokens. Without these rules the pane rendered browser-default
+   markdown (no heading hierarchy, invisible inline code, naked PromQL
+   blocks) and read like a plain-text dump. */
 .runbook-editor__preview {
   min-height: 500px;
-  padding: 12px 16px;
-  border: 1px solid var(--border, #ddd);
-  border-radius: 6px;
-  background: var(--surface, #fff);
+  padding: 28px 36px 40px;
+  border: 1px solid var(--line, #ddd);
+  border-radius: 10px;
+  background: var(--bg, #fff);
+  color: var(--fg-2, #3f3f46);
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+.runbook-editor__preview > :first-child { margin-top: 0; }
+.runbook-editor__preview h1 {
+  font-family: var(--f-display);
+  font-size: 1.9rem;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--fg);
+  margin: 0 0 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-2);
+}
+.runbook-editor__preview h2 {
+  font-size: 1.15rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  margin: 30px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.runbook-editor__preview h3 {
+  font-size: 1rem;
+  font-weight: 650;
+  color: var(--fg);
+  margin: 22px 0 8px;
+}
+.runbook-editor__preview h4 {
+  font-size: 0.8rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+  margin: 18px 0 6px;
+}
+.runbook-editor__preview p { margin: 0 0 12px; }
+.runbook-editor__preview ul,
+.runbook-editor__preview ol { margin: 0 0 12px; padding-left: 26px; }
+.runbook-editor__preview li { margin: 4px 0; }
+.runbook-editor__preview li::marker { color: var(--fg-mute); }
+.runbook-editor__preview a { color: var(--accent); text-decoration: none; }
+.runbook-editor__preview a:hover { text-decoration: underline; }
+.runbook-editor__preview strong { color: var(--fg); font-weight: 650; }
+.runbook-editor__preview code {
+  font-family: var(--mono);
+  font-size: 0.82em;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.runbook-editor__preview pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0 0 14px;
+  overflow-x: auto;
+}
+.runbook-editor__preview pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--fg-2);
+  white-space: pre;
+}
+.runbook-editor__preview blockquote {
+  margin: 0 0 14px;
+  padding: 10px 16px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: var(--accent-glow-2);
+  color: var(--fg-2);
+}
+.runbook-editor__preview blockquote p:last-child { margin-bottom: 0; }
+.runbook-editor__preview table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 16px;
+  font-size: 0.88rem;
+}
+.runbook-editor__preview th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-strong);
+}
+.runbook-editor__preview td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.runbook-editor__preview tr:hover td { background: var(--bg-2); }
+.runbook-editor__preview hr {
+  border: none;
+  border-top: 1px solid var(--line-2);
+  margin: 24px 0;
 }
 .runbook-editor__versions { padding: 8px 0; }
 .runbook-version {
@@ -5833,6 +6074,13 @@ html[data-ui-variant="classic"] .avatar.bot img {
    Both layer on the base `.badge` skin. */
 .badge-positive { background: var(--green-glow); color: var(--green); border-color: rgba(22,163,74,0.2); }
 .badge-neutral { background: var(--bg-3); color: var(--fg-dim); border-color: var(--line); }
+/* External MCP connectors (mounted community servers) — brand-accent tag to
+   distinguish them from built-in native connectors in the Integrations list. */
+.badge-external {
+  background: color-mix(in srgb, var(--primary) 13%, transparent);
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+}
 .kg-empty-note { font-size: 12px; color: var(--fg-mute); margin: 0; }
 
 /* KG graph view — view switcher toolbar, type legend, and the ECharts canvas.
@@ -6028,6 +6276,8 @@ html[data-ui-variant="classic"] .avatar.bot img {
   font-size: 13px; font-weight: 500;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.home-conv-title-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.home-conv-title-row .home-conv-title { min-width: 0; }  /* keep ellipsis */
 .home-conv-meta { font-size: 11px; color: var(--fg-mute); font-family: var(--mono); }
 
 /* Usage tiles + chart */
@@ -6351,6 +6601,33 @@ html[data-ui-variant="classic"] .avatar.bot img {
 .mdl-row:hover .mdl-del { opacity: 1; }
 .mdl-del:hover { color: var(--red); background: var(--red-glow); }
 
+.slack-thread-link,
+.mdl-slack-link {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-mute);
+  margin-left: 6px;
+  vertical-align: middle;
+  transition: color var(--t-fast);
+}
+.slack-thread-link:hover,
+.mdl-row:hover .mdl-slack-link,
+.mdl-slack-link:hover { color: var(--accent); cursor: pointer; }
+
+/* keep title ellipsis, park the icon beside it */
+.mdl-title-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.mdl-title-row .mdl-title { min-width: 0; }   /* allow flex child to shrink → ellipsis */
+.mdl-slack-link { flex: 0 0 auto; opacity: 0; }
+.mdl-row:hover .mdl-slack-link,
+.mdl-row.active .mdl-slack-link,
+.home-conv-row:hover .mdl-slack-link { opacity: 1; }
+
+/* Deletable rows (Conversations) pin a ✕ delete button to the top-right corner
+   (.mdl-del: absolute; right:8px; width:18px). The inline Slack icon sits
+   flush-right in the title row and would land under that ✕, so reserve room for
+   it here. Read-only Channels rows have no ✕ (:has fails) -> stay flush-right. */
+.mdl-row:has(.mdl-del) .mdl-title-row { padding-right: 22px; }
+
 .mdl-pill {
   flex: 0 0 auto;
   padding: 2px 7px;
@@ -6614,3 +6891,9 @@ html[data-ui-variant="classic"] .avatar.bot img {
   letter-spacing: -0.02em; color: var(--fg); margin: 18px 0 4px;
 }
 .login-loading-sub { font-size: 14px; color: var(--fg-dim); margin: 0 0 20px; }
+
+/* User-typed / ingested request text is rendered as a plain <p> (not markdown);
+   preserve its line breaks — Slack workflow requests are multi-line — instead of
+   collapsing them into one run-on paragraph. Higher specificity than
+   `.msg-bubble p` so it wins regardless of the duplicated bubble blocks. */
+.msg-bubble p.user-text { white-space: pre-wrap; }

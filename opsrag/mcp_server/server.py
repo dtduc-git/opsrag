@@ -44,6 +44,7 @@ from typing import Any
 from opsrag.mcp_server.audit import AuditLogger
 from opsrag.mcp_server.rate_limit import TokenRateLimiter
 from opsrag.mcp_server.registry import build_external_registry
+from opsrag.mcp_server.registry_loader import active_enabled_tool_names
 
 _log = logging.getLogger("opsrag.mcp_server.server")
 
@@ -323,6 +324,14 @@ class MCPServer:
         # is `{ name, description, inputSchema }`. The internal
         # registry uses `input_schema` (snake_case); transform to the
         # wire-shape here.
+        #
+        # Enabled-gate (dynamic): self._tools is the static SAFE_FOR_EXTERNAL
+        # allow-list snapshot built at construction. Intersect it with the
+        # operator's *enabled* integrations at request time (set_active_enabled
+        # runs AFTER this server is constructed, so a build-time snapshot would
+        # miss it) -- else tools of DISABLED integrations (stackdriver, cloudwatch,
+        # ...) leak into the catalog. None = gating off (dev) -> expose all safe.
+        active = active_enabled_tool_names()
         return {
             "tools": [
                 {
@@ -331,6 +340,7 @@ class MCPServer:
                     "inputSchema": t.input_schema,
                 }
                 for t in self._tools.values()
+                if active is None or t.name in active
             ],
         }
 
@@ -343,9 +353,14 @@ class MCPServer:
             raise MCPProtocolError(-32602, "tools/call: `arguments` must be an object")
 
         tool = self._tools.get(name)
-        if tool is None:
-            # Unknown / un-exposed tool. Audit-log the attempt -- useful
-            # for spotting probe traffic and stale clients.
+        # Enabled-gate (same as tools/list): a tool in the static allow-list
+        # whose integration the operator did NOT enable must be un-callable --
+        # otherwise a disabled connector (e.g. stackdriver over ambient GCP ADC)
+        # is reachable by name even though it's hidden from tools/list.
+        active = active_enabled_tool_names()
+        if tool is None or (active is not None and name not in active):
+            # Unknown / un-exposed / integration-disabled tool. Audit-log the
+            # attempt -- useful for spotting probe traffic and stale clients.
             self._audit_log(
                 ctx=ctx, tool_name=name, args=args, status="denied",
                 error=f"tool not exposed: {name!r}", latency_ms=0,

@@ -16,9 +16,11 @@ Requires: pip install google-cloud-aiplatform anthropic[vertex]
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -28,6 +30,7 @@ from pydantic import BaseModel
 
 from opsrag.interfaces.llm import LLMResponse
 from opsrag.llms.content import to_anthropic_content, to_gemini_parts
+from opsrag.llms.json_extract import extract_first_json_object
 
 _log = logging.getLogger("opsrag.llms.vertex")
 
@@ -68,9 +71,16 @@ OnUsageHook = Callable[[VertexResult], Any | Awaitable[None]]
 @dataclass
 class ToolCall:
     """Phase 03 Pillar 2 -- a function call the LLM emitted during
-    `generate_with_tools()`. Args are already a plain dict."""
+    `generate_with_tools()`. Args are already a plain dict.
+
+    `thought_signature` (base64 str) is the part-level signature Gemini 3.x
+    attaches to functionCall parts; it MUST be replayed with the call in
+    later hops or Vertex rejects the request with 400. None when the model
+    didn't emit one (pre-3 models, non-Gemini providers, synthetic calls).
+    """
     name: str
     args: dict
+    thought_signature: str | None = None
 
 
 @dataclass
@@ -86,17 +96,75 @@ class ToolCallingResponse:
     raw_response: Any = None
 
 
+# Gemini 3.x strictly validates that every functionCall part replayed in
+# conversation history carries a thought_signature; a missing one is a 400
+# ("Function call is missing a thought_signature"), which killed every
+# pro-tier reasoner hop in prod (2026-07-12, masked by google-api-core as
+# "'list' object has no attribute 'get'"). For calls with no captured
+# signature -- synthetic/guard-injected ones -- Google documents this dummy
+# as the escape hatch: https://ai.google.dev/gemini-api/docs/thought-signatures#faqs
+_DUMMY_THOUGHT_SIGNATURE_B64 = base64.b64encode(
+    b"skip_thought_signature_validator"
+).decode()
+
+_GEMINI_MAJOR_RE = re.compile(r"gemini-(\d+)")
+
+
+def _requires_thought_signature(model: str) -> bool:
+    """True for Gemini 3.x and newer -- the models that enforce signatures."""
+    m = _GEMINI_MAJOR_RE.search(model or "")
+    return bool(m) and int(m.group(1)) >= 3
+
+
+def _part_thought_signature_b64(part: Any) -> str | None:
+    """base64 of a response part's thought_signature; None when absent."""
+    raw = getattr(getattr(part, "_raw_part", None), "thought_signature", b"") or b""
+    return base64.b64encode(raw).decode() if raw else None
+
+
+def _normalize_schema_type(type_: Any) -> str:
+    """Vertex's Type enum has no NULL and no union lists. Collapse
+    JSON-Schema `type: [...]` to its first non-null entry and map a bare
+    "null" (an optional-param marker, not a real payload type) to string.
+    Remote MCP servers (e.g. Sentry hosted MCP) emit both shapes; a "null"
+    leaking through kills the whole request at FunctionDeclaration parse
+    ("Invalid enum value NULL"), observed in prod 2026-07-13."""
+    if isinstance(type_, list):
+        type_ = next(
+            (t for t in type_ if isinstance(t, str) and t != "null"), "string",
+        )
+    if not isinstance(type_, str) or type_ == "null":
+        return "string"
+    return type_
+
+
 def _mcp_schema_to_vertex(schema: dict) -> dict:
     """Translate an MCP-shape JSON Schema (`{type, properties, required, ...}`)
     to the subset Vertex's FunctionDeclaration accepts. The two are
-    near-identical; we strip fields Vertex doesn't recognize and
-    flatten `oneOf`/`anyOf` to `string` (Vertex ignores complex unions
-    silently otherwise, which produces opaque function-calling errors).
+    near-identical; we strip fields Vertex doesn't recognize, flatten
+    `oneOf`/`anyOf` to their first non-null concrete branch, and normalize
+    union/null types (Vertex ignores complex unions silently otherwise,
+    which produces opaque function-calling errors).
     """
     if not isinstance(schema, dict):
         return {"type": "object", "properties": {}}
+    if "oneOf" in schema or "anyOf" in schema:
+        # Vertex doesn't accept oneOf/anyOf in function params. Pick the
+        # first NON-NULL concrete-typed branch (optional params commonly
+        # arrive as anyOf[null, T] with null FIRST), fall back to string.
+        # Handled here -- not per-property -- so unions nested anywhere
+        # (array items, sub-objects) normalize through the recursion.
+        branches = schema.get("oneOf") or schema.get("anyOf") or []
+        picked = next(
+            (b for b in branches
+             if isinstance(b, dict) and "type" in b and b["type"] != "null"),
+            {"type": "string"},
+        )
+        merged = {k: v for k, v in schema.items() if k not in ("oneOf", "anyOf")}
+        merged.update({k: v for k, v in picked.items() if k not in merged})
+        return _mcp_schema_to_vertex(merged)
     cleaned: dict = {}
-    type_ = schema.get("type", "object")
+    type_ = _normalize_schema_type(schema.get("type", "object"))
     cleaned["type"] = type_
     if "description" in schema:
         cleaned["description"] = schema["description"]
@@ -106,19 +174,7 @@ def _mcp_schema_to_vertex(schema: dict) -> dict:
         for name, prop in props_in.items():
             if not isinstance(prop, dict):
                 continue
-            if "oneOf" in prop or "anyOf" in prop:
-                # Vertex doesn't accept oneOf/anyOf in function params.
-                # Pick the first concrete-typed branch, fall back to string.
-                branches = prop.get("oneOf") or prop.get("anyOf") or []
-                picked = next(
-                    (b for b in branches if isinstance(b, dict) and "type" in b),
-                    {"type": "string"},
-                )
-                merged = {k: v for k, v in prop.items() if k not in ("oneOf", "anyOf")}
-                merged.update({k: v for k, v in picked.items() if k not in merged})
-                props_out[name] = _mcp_schema_to_vertex(merged)
-            else:
-                props_out[name] = _mcp_schema_to_vertex(prop)
+            props_out[name] = _mcp_schema_to_vertex(prop)
         cleaned["properties"] = props_out
         if "required" in schema:
             cleaned["required"] = list(schema["required"])
@@ -131,12 +187,17 @@ def _mcp_schema_to_vertex(schema: dict) -> dict:
     return cleaned
 
 
-def _messages_to_gemini_contents(messages: list[dict]) -> list:
+def _messages_to_gemini_contents(messages: list[dict], model: str = "") -> list:
     """Translate role/content + tool-call/tool-result messages to Vertex
     `Content`/`Part` objects. Roles supported:
       - user / assistant -- plain text
-      - tool_call -- assistant's prior function call (name, args)
+      - tool_call -- assistant's prior function call (name, args,
+        optional thought_signature)
       - tool_result -- function execution result (name, response)
+
+    `model` gates the dummy thought_signature injection: Gemini 3+ rejects
+    signature-less functionCall replays, older models get the unchanged
+    wire shape.
     """
     from vertexai.generative_models import Content, Part
 
@@ -150,14 +211,21 @@ def _messages_to_gemini_contents(messages: list[dict]) -> list:
         elif role == "tool_call":
             # Re-emit a model turn that's an assistant function-call --
             # Vertex needs this to keep the conversation aligned with the
-            # function_response that follows.
+            # function_response that follows. Replay the captured
+            # thought_signature; without one, Gemini 3+ needs the
+            # documented dummy or the whole request 400s.
             name = msg["name"]
             args = msg.get("args", {}) or {}
+            sig = msg.get("thought_signature") or (
+                _DUMMY_THOUGHT_SIGNATURE_B64
+                if _requires_thought_signature(model) else None
+            )
+            part_dict: dict = {"function_call": {"name": name, "args": args}}
+            if sig:
+                part_dict["thought_signature"] = sig
             from vertexai.generative_models import Part as _P
             contents.append(
-                Content(role="model", parts=[_P.from_dict({
-                    "function_call": {"name": name, "args": args},
-                })])
+                Content(role="model", parts=[_P.from_dict(part_dict)])
             )
         elif role == "tool_result":
             name = msg["name"]
@@ -501,7 +569,7 @@ class VertexAILLM:
             tools=[vertex_tool],
         )
 
-        contents = _messages_to_gemini_contents(messages)
+        contents = _messages_to_gemini_contents(messages, model=self._model)
         config = GenerationConfig(
             temperature=temperature,
             max_output_tokens=max_tokens,
@@ -522,7 +590,10 @@ class VertexAILLM:
                 if fc is not None and getattr(fc, "name", None):
                     # `fc.args` is a Struct/MapComposite; coerce to plain dict.
                     args = dict(fc.args) if fc.args else {}
-                    tool_calls.append(ToolCall(name=fc.name, args=args))
+                    tool_calls.append(ToolCall(
+                        name=fc.name, args=args,
+                        thought_signature=_part_thought_signature_b64(part),
+                    ))
                     continue
                 text = getattr(part, "text", None)
                 if text:
@@ -608,7 +679,7 @@ class VertexAILLM:
             system_instruction=system_prompt,
             tools=[vertex_tool],
         )
-        contents = _messages_to_gemini_contents(messages)
+        contents = _messages_to_gemini_contents(messages, model=self._model)
         config = GenerationConfig(
             temperature=temperature,
             max_output_tokens=max_tokens,
@@ -662,7 +733,10 @@ class VertexAILLM:
                     fc = getattr(part, "function_call", None)
                     if fc is not None and getattr(fc, "name", None):
                         args = dict(fc.args) if fc.args else {}
-                        tool_calls.append(ToolCall(name=fc.name, args=args))
+                        tool_calls.append(ToolCall(
+                        name=fc.name, args=args,
+                        thought_signature=_part_thought_signature_b64(part),
+                    ))
                         continue
                     text = getattr(part, "text", None)
                     if text:
@@ -742,12 +816,5 @@ class VertexAILLM:
         if max_tokens is not None:
             gen_kwargs["max_tokens"] = max(max_tokens, self._default_max_tokens)
         resp = await self.generate(**gen_kwargs)
-        text = resp.content.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-
-        data = json.loads(text)
+        data = extract_first_json_object(resp.content or "")
         return schema.model_validate(data)

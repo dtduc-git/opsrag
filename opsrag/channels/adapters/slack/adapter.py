@@ -22,6 +22,7 @@ Port mapping (design §4.1):
   ``edit``                      ``client.update_message(channel, ts, text)``
   ``finalize``                  ``format_answer_as_slack_blocks`` -> ``update_message(blocks=...)``
   ``react`` ACK/DONE/ERROR      ``client.add_reaction`` eyes / white_check_mark / x
+  ``react`` THUMBS_UP/DOWN      ``client.add_reaction`` +1 / -1 (on the answer msg)
   ``fetch_thread``              ``client.fetch_thread_replies`` -> ``[ThreadMessage]``
   ``resolve_identity``          ``slack_user_to_current_user``
   ``send_denial``               ``client.post_message(channel=user_id, ...)`` (DM)
@@ -76,6 +77,8 @@ _REACTION_EMOJI: dict[ReactionKind, str] = {
     ReactionKind.ACK: "eyes",
     ReactionKind.DONE: "white_check_mark",
     ReactionKind.ERROR: "x",
+    ReactionKind.THUMBS_UP: "+1",
+    ReactionKind.THUMBS_DOWN: "-1",
 }
 
 
@@ -107,6 +110,15 @@ class SlackAdapter(ChannelAdapter):
         self._web_ui_base_url = (getattr(config, "web_ui_base_url", "") or "").rstrip("/")
         self._client: SlackBotClient | None = None
         self._sink: CoreSink | None = None
+        # Optional Slack-only first-responder (attached by boot before connect).
+        self._first_responder: Any = None
+
+    def attach_first_responder(self, first_responder: Any) -> None:
+        """Attach a FirstResponder (Slack-only). Bound to the live client in
+        ``connect``; the shim delegates channel messages to it. Injected by
+        ``channels.boot`` when ``channels.slack.first_responder`` is configured.
+        """
+        self._first_responder = first_responder
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -128,6 +140,8 @@ class SlackAdapter(ChannelAdapter):
                 f"{getattr(self._config, 'app_token_env', '?')})"
             )
         self._client = SlackBotClient(bot_token=bot_token, app_token=app_token)
+        if self._first_responder is not None:
+            self._first_responder.bind_client(self._client)
         shim = _SlackEventShim(self, sink)
         # SlackBotClient.start keeps its ack-everything + bot-loop filter; the
         # shim just receives the already-filtered app_mention / message.im /
@@ -337,6 +351,17 @@ class _SlackEventShim:
             return
         await self._sink.on_feedback(fb)
 
+    async def on_channel_message(self, event: dict[str, Any]) -> None:
+        """Delegate a top-level channel/group message to the first-responder.
+
+        The first-responder owns the full pipeline (gate/subtype/self-guard/
+        classify/dedup/quota/answer). A no-op when none is attached.
+        """
+        fr = getattr(self._adapter, "_first_responder", None)
+        if fr is None:
+            return
+        await fr.on_channel_message(event)
+
 
 def _event_to_inbound(event: dict[str, Any], *, is_dm: bool) -> InboundMessage:
     """Map a Slack ``app_mention`` / ``message.im`` event to ``InboundMessage``.
@@ -396,10 +421,40 @@ def _payload_to_feedback(payload: dict[str, Any]) -> FeedbackEvent | None:
     user_id = user_block.get("id") or "slack-unknown"
     container = payload.get("container") or {}
     thread_id = container.get("thread_ts") or container.get("message_ts")
+    # The answer message's own coords (for reacting), NOT the thread root:
+    # container carries them on a normal block_actions click; fall back to
+    # the legacy top-level channel/message shape some payloads still use.
+    channel_id = (
+        container.get("channel_id")
+        or (payload.get("channel") or {}).get("id")
+        or ""
+    )
+    message_ts = (
+        container.get("message_ts")
+        or (payload.get("message") or {}).get("ts")
+        or ""
+    )
     return FeedbackEvent(
         thumbs=thumbs,
         investigation_id=investigation_id,
         user_id=user_id,
         thread_id=thread_id,
         raw={"response_url": payload.get("response_url") or ""},
+        channel_id=channel_id,
+        message_ts=message_ts,
+        answer_snippet=_answer_snippet_from_message(payload.get("message") or {}),
     )
+
+
+def _answer_snippet_from_message(message: dict[str, Any]) -> str:
+    """Best-effort answer text from the clicked message, for the feedback
+    dashboard snippet. The answer body is the first ``section`` block's
+    mrkdwn (the confidence line is a ``context`` block, sources/cc come
+    later); fall back to the message-level ``text`` (fallback text). Capped
+    to 400 chars to match the ``opsrag_feedback`` column truncation."""
+    for block in message.get("blocks") or []:
+        if block.get("type") == "section":
+            text = ((block.get("text") or {}).get("text") or "").strip()
+            if text:
+                return text[:400]
+    return (message.get("text") or "").strip()[:400]

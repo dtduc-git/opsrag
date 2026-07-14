@@ -77,6 +77,28 @@ ROLE_SCOPES: dict[str, set[str]] = {
 # this by configuring ``role_mappings`` explicitly.
 DEFAULT_ROLE = "member_investigate"
 
+# Config-driven override of the unmatched-user fallback. ``auth.default_roles``
+# (bound once at startup via ``set_default_roles``) replaces the single
+# DEFAULT_ROLE so operators can, e.g., give every authenticated user
+# ``[member_investigate, member_mcp]`` without a per-user override. Empty/None
+# keeps the built-in DEFAULT_ROLE. Unknown role names contribute no scopes
+# (scopes_for_roles is default-deny), so a typo can't over-grant.
+_DEFAULT_ROLES: frozenset[str] = frozenset({DEFAULT_ROLE})
+
+
+def set_default_roles(roles: Iterable[str] | None) -> None:
+    """Bind the configured default-role set (from ``auth.default_roles``).
+
+    Called once at startup. ``None``/empty restores the built-in DEFAULT_ROLE."""
+    global _DEFAULT_ROLES
+    cleaned = frozenset(r.strip() for r in (roles or ()) if r and r.strip())
+    _DEFAULT_ROLES = cleaned or frozenset({DEFAULT_ROLE})
+
+
+def default_roles() -> frozenset[str]:
+    """The active unmatched-user fallback role set."""
+    return _DEFAULT_ROLES
+
 # Role implied by the existing ``is_admin`` boolean signal (e.g. the
 # legacy ``is_admin_for(admin_group_oid)`` check, or a future
 # admin-groups config). Always added on top of group-resolved roles.
@@ -115,11 +137,12 @@ def resolve_roles(
             roles.update(mapped)
     if is_admin:
         roles.add(ADMIN_ROLE)
-    # Authenticated but unmatched -> default interactive role. We only
-    # apply the default when nothing matched at all (including no admin
-    # signal); an explicit mapping wins.
+    # Authenticated but unmatched -> configured default role set (built-in
+    # DEFAULT_ROLE unless auth.default_roles overrides). We only apply the
+    # default when nothing matched at all (including no admin signal); an
+    # explicit mapping wins.
     if not roles:
-        roles.add(DEFAULT_ROLE)
+        roles.update(_DEFAULT_ROLES)
     return roles
 
 

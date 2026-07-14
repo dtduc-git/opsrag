@@ -17,7 +17,14 @@ from fastapi.testclient import TestClient
 from opsrag.auth.login import LoginRateLimiter
 from opsrag.auth.login import router as login_router
 from opsrag.auth.password import hash_password, needs_rehash, verify_password
-from opsrag.auth.scopes import ALL_SCOPES, Scope, scopes_for_roles
+from opsrag.auth.scopes import (
+    ALL_SCOPES,
+    DEFAULT_ROLE,
+    Scope,
+    default_roles,
+    scopes_for_roles,
+    set_default_roles,
+)
 from opsrag.auth.sessions import (
     InlineKeyMaterialError,
     SessionManager,
@@ -288,6 +295,35 @@ async def test_sso_new_account_for_verified_email():
     # Link recorded.
     link = await store.get_identity("google", "g-123")
     assert link is not None and link.user_id == user.id
+    # Absent an ``auth.default_roles`` override, a new SSO user is provisioned
+    # with the built-in default role only.
+    assert set(user.roles) == {DEFAULT_ROLE}
+
+
+@pytest.mark.asyncio
+async def test_sso_new_account_uses_configured_default_roles():
+    """A newly onboarded SSO user is provisioned from ``auth.default_roles``
+    (bound via set_default_roles), NOT the hardcoded DEFAULT_ROLE -- so adding
+    e.g. member_mcp to the default applies to future onboardings automatically.
+    Regression guard for the 'new engineers miss MCP' bug."""
+    set_default_roles(["member_investigate", "member_mcp"])
+    try:
+        store = InMemoryAuthUserStore()
+        ident = ExternalIdentity(
+            provider="microsoft",
+            subject="ms-77",
+            email="onboarded@corp.com",
+            email_verified=True,
+            name="Onboarded Eng",
+        )
+        user = await resolve_or_link_user(ident, store=store)
+        assert set(user.roles) == {"member_investigate", "member_mcp"}
+        # The MCP scope is now effective without any manual admin step.
+        assert Scope.MCP in scopes_for_roles(user.roles)
+    finally:
+        # Restore the process-global default so other tests aren't affected.
+        set_default_roles(None)
+        assert default_roles() == frozenset({DEFAULT_ROLE})
 
 
 @pytest.mark.asyncio
@@ -407,6 +443,52 @@ def test_password_login_unknown_user_401():
     assert r.status_code == 401
 
 
+def _set_cookie_lines(resp) -> list[str]:
+    return [v for k, v in resp.headers.multi_items() if k.lower() == "set-cookie"]
+
+
+def _cookie_path(set_cookie_lines: list[str], name: str) -> str | None:
+    import re
+    line = next((c for c in set_cookie_lines if c.startswith(name + "=")), None)
+    if line is None:
+        return None
+    m = re.search(r"[Pp]ath=([^;]+)", line)
+    return m.group(1) if m else None
+
+
+def test_refresh_cookie_path_is_root_so_it_reaches_the_api_prefix():
+    # Regression: the SPA calls /api/auth/refresh (nginx strips /api before the
+    # app). A refresh cookie scoped to "/auth/refresh" fails RFC 6265 path-match
+    # against the browser-visible "/api/auth/refresh" and is NEVER sent -> silent
+    # refresh is impossible. It must be path="/" like session + csrf.
+    app, store, _ = _make_app()
+    _run(store.create_user(
+        email="u@c.com", password_hash=hash_password("pw"), email_verified=True,
+    ))
+    client = TestClient(app)
+    login = client.post("/auth/login", data={"email": "u@c.com", "password": "pw"})
+    assert login.status_code == 200
+    lines = _set_cookie_lines(login)
+    assert _cookie_path(lines, SessionManager.REFRESH_COOKIE) == "/"
+    # Sanity: session + csrf were already "/".
+    assert _cookie_path(lines, SessionManager.SESSION_COOKIE) == "/"
+    assert _cookie_path(lines, SessionManager.CSRF_COOKIE) == "/"
+
+
+def test_logout_clears_refresh_cookie_at_root_path():
+    # The delete_cookie path MUST match the set path, or the cleared cookie is a
+    # no-op and the refresh cookie lingers after logout.
+    app, store, _ = _make_app()
+    _run(store.create_user(
+        email="u@c.com", password_hash=hash_password("pw"), email_verified=True,
+    ))
+    client = TestClient(app)
+    client.post("/auth/login", data={"email": "u@c.com", "password": "pw"})
+    logout = client.post("/auth/logout")
+    assert logout.status_code == 200
+    assert _cookie_path(_set_cookie_lines(logout), SessionManager.REFRESH_COOKIE) == "/"
+
+
 def test_refresh_rotates_token_and_revokes_old():
     app, store, sm = _make_app()
     _run(
@@ -429,6 +511,36 @@ def test_refresh_rotates_token_and_revokes_old():
         store.get_refresh_session(hash_token(old_refresh))
     )
     assert old_sess is not None and not old_sess.is_active
+
+
+def test_refresh_with_revoked_token_401s_without_clearing_cookies():
+    # Multi-tab safety: a "losing" tab presents an already-rotated (revoked)
+    # refresh token. The server must 401 but MUST NOT emit clear-cookie
+    # deletions -- with cookies at path="/", clearing would wipe the WINNING
+    # tab's freshly minted session/refresh from the shared browser jar.
+    app, store, _ = _make_app()
+    _run(store.create_user(
+        email="u@c.com", password_hash=hash_password("pw"), email_verified=True,
+    ))
+    client = TestClient(app)
+    login = client.post("/auth/login", data={"email": "u@c.com", "password": "pw"})
+    r1 = login.cookies[SessionManager.REFRESH_COOKIE]
+    # Winner: rotate R1 -> R2 (R1 now revoked).
+    client.cookies.set(SessionManager.REFRESH_COOKIE, r1)
+    assert client.post("/auth/refresh").status_code == 200
+    # Loser: replay the revoked R1.
+    client.cookies.set(SessionManager.REFRESH_COOKIE, r1)
+    lost = client.post("/auth/refresh")
+    assert lost.status_code == 401
+    assert lost.json()["detail"]["error"] == "invalid_refresh_token"
+    # The 401 must NOT clear the session/refresh cookies.
+    lines = _set_cookie_lines(lost)
+    cleared = [
+        c for c in lines
+        if c.startswith(SessionManager.SESSION_COOKIE + "=")
+        or c.startswith(SessionManager.REFRESH_COOKIE + "=")
+    ]
+    assert cleared == [], f"invalid refresh must not clear cookies, got: {cleared}"
 
 
 def test_refresh_with_revoked_token_401():

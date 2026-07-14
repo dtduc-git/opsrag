@@ -19,15 +19,20 @@ from opsrag.mcp_server.registry_loader import set_request_connector_perms
 
 
 def _enabled_and_restricted(cfg: Any) -> tuple[list[str], list[str]]:
-    mcp_map = getattr(cfg, "mcp", {}) or {}
+    """Enabled + restricted connector names from ``cfg.mcp`` AND
+    ``cfg.external_mcp`` (External MCP Adapter connectors must feed the same
+    RBAC resolution as native connectors, or they're silently dropped by
+    ``resolve_allowed_connectors``'s enabled-set intersection)."""
     enabled: list[str] = []
     restricted: list[str] = []
-    for name, block in mcp_map.items():
-        if not getattr(block, "enabled", False):
-            continue
-        enabled.append(name)
-        if getattr(block, "restricted", False):
-            restricted.append(name)
+    for source in ("mcp", "external_mcp"):
+        block_map = getattr(cfg, source, {}) or {}
+        for name, block in block_map.items():
+            if not getattr(block, "enabled", False):
+                continue
+            enabled.append(name)
+            if getattr(block, "restricted", False):
+                restricted.append(name)
     return enabled, restricted
 
 

@@ -332,16 +332,20 @@ async def resolve_or_link_user(
                 "(account-takeover guard)"
             )
 
-    # Persist the default interactive role explicitly so it's visible/editable
+    # Persist the configured default role set explicitly so it's visible/editable
     # in the admin Users & Roles view (rather than relying on the login-time
-    # resolve_roles fallback). DEFAULT_ROLE = chat + investigate.
-    from opsrag.auth.scopes import DEFAULT_ROLE
+    # resolve_roles fallback). Uses ``auth.default_roles`` (bound at startup via
+    # set_default_roles) instead of the built-in DEFAULT_ROLE, so operators who
+    # add e.g. ``member_mcp`` to the default get it applied to every newly
+    # onboarded SSO user automatically. ``scopes_for_roles`` is default-deny on
+    # unknown roles, so a config typo can't over-grant.
+    from opsrag.auth.scopes import default_roles
 
     new_user = await store.create_user(
         email=email or f"{identity.provider}:{identity.subject}@sso.local",
         password_hash=None,
         email_verified=bool(identity.email_verified),
-        roles=(DEFAULT_ROLE,),
+        roles=tuple(sorted(default_roles())),
         name=identity.name,
         picture_url=identity.picture_url,
     )

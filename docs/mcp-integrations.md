@@ -431,6 +431,7 @@ A dedicated read-only connector for PagerDuty incidents and on-call schedules, o
   - `slack_get_message_by_url`
   - `slack_get_thread_by_url`
   - `slack_list_channels`
+  - `slack_channel_history` — bot-token keyword scan of a channel's recent history (`conversations.history`); no user token, for channels the bot is in. Time-bounded; may return a partial (`window_complete:false`) result on large / rate-limited channels.
 
 ---
 
@@ -536,7 +537,7 @@ The steps below enable Slack; apply the same pattern to any connector by substit
 
    In a deployment, supply it as a secret reference (e.g. a Kubernetes Secret mounted as an environment variable) rather than committing it.
 
-3. Start OpsRAG. The required env vars and config keys are validated at startup; if any are missing, startup fails fast with `MCP_MISCONFIGURED:slack:SLACK_BOT_TOKEN` (or the first missing item). Once all requirements resolve, the connector's tools (`slack_get_message_by_url`, `slack_get_thread_by_url`, `slack_list_channels`) become available to the agent, and the `/api/integrations` endpoint reports it as enabled (with its `category`).
+3. Start OpsRAG. The required env vars and config keys are validated at startup; if any are missing, startup fails fast with `MCP_MISCONFIGURED:slack:SLACK_BOT_TOKEN` (or the first missing item). Once all requirements resolve, the connector's tools (`slack_get_message_by_url`, `slack_get_thread_by_url`, `slack_list_channels`, `slack_channel_history`) become available to the agent, and the `/api/integrations` endpoint reports it as enabled (with its `category`).
 
 ## See also
 

@@ -48,6 +48,57 @@ from qdrant_client import models as qm
 
 _log = logging.getLogger("opsrag.agent.cache.investigation")
 
+# Keep in sync with opsrag/mcp/runbooks._STORE_ID_PREFIX (duplicated
+# deliberately -- importing it would couple agent/cache -> mcp).
+_RB_PREFIX = "rb-"
+
+# Thread-id resolver scroll page size (module-level so tests can shrink it).
+_RESOLVE_PAGE_LIMIT = 256
+
+
+def extract_loaded_runbook_ids(tool_call_audit: list[dict] | None) -> list[str]:
+    """rb-ids of every TAB-store runbook a stored answer successfully
+    loaded: audit rows with name==runbook_load, no error, args.name=rb-*.
+    Order-preserving, deduped. This is what lets answer feedback credit
+    the runbooks that produced the answer.
+
+    Known limit: runbook_load reports "runbook not found" as an error
+    PAYLOAD (no exception), which the audit records success-shaped -- such
+    phantom ids pass this filter but are harmless downstream
+    (record_thumbs UPDATE matches 0 rows / warns on a non-UUID id)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in tool_call_audit or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("name") != "runbook_load" or "error" in row:
+            continue
+        name = str((row.get("args") or {}).get("name") or "")
+        if name.startswith(_RB_PREFIX):
+            rb_id = name[len(_RB_PREFIX):]
+            if rb_id and rb_id not in seen:
+                seen.add(rb_id)
+                out.append(rb_id)
+    return out
+
+
+@dataclass
+class FeedbackResult:
+    """Outcome of record_feedback. Truthiness mirrors the old bool return
+    so callers that only check `if result:` keep working unchanged."""
+
+    ok: bool
+    point_id: str | None = None
+    runbook_ids: list[str] = field(default_factory=list)
+    # The resolved investigation's question + answer, surfaced so the
+    # feedback audit row (Postgres opsrag_feedback) can show WHAT was rated.
+    # Slack/channel feedback used to persist thumbs only -> blank dashboard.
+    query: str | None = None
+    answer: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
 DEFAULT_INVESTIGATION_COLLECTION = "opsrag_investigations"
 DEFAULT_INVESTIGATION_THRESHOLD = 0.85
 DEFAULT_INVESTIGATION_TOP_K = 3
@@ -149,6 +200,18 @@ class InvestigationCache:
                     exc,
                 )
                 return
+        # thread_id KEYWORD index -- OUTSIDE the create-only branch so
+        # pre-existing deployments get it too (idempotent in Qdrant). It
+        # serves the feedback thread-id resolver; even if it fails, the
+        # scroll below still works as a (small-collection) full scan.
+        try:
+            await self._qdrant.create_payload_index(
+                collection_name=self._collection,
+                field_name="thread_id",
+                field_schema=qm.PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
         self._ensured = True
 
     async def store(
@@ -305,23 +368,67 @@ class InvestigationCache:
             )
         return out
 
-    async def record_feedback(
-        self,
-        investigation_id: str,
-        *,
-        thumbs: str,
-        correction: str | None = None,
-    ) -> bool:
-        """Attach thumbs-up / thumbs-down feedback to a past investigation. `thumbs` must
-        be `"up"` or `"down"`. Optional free-text `correction` lets the
-        user explain why an answer was wrong (used by V2 audit). Stored
-        on the existing point's payload (no separate collection)."""
-        if thumbs not in ("up", "down"):
-            return False
-        await self._ensure_collection()
-        if not self._ensured:
-            return False
-        # Read existing payload + feedback dict, append, re-store.
+    async def _resolve_point(
+        self, investigation_id: str, *, answer_snippet: str | None = None,
+    ) -> tuple[str, dict] | None:
+        """Resolve a feedback target to (point_id, payload).
+
+        The UI can only send the REAL point UUID for live tool-path
+        answers -- cache-hit answers and replayed sessions never received
+        one, so the FE falls back to the THREAD-shaped id
+        (``<uuid>_<8hex>``). A raw ``retrieve`` on that shape is a Qdrant
+        400, which used to silently drop the feedback. Non-UUID ids are
+        resolved here by the ``thread_id`` payload field instead; when a
+        thread has several stored turns, an ``answer_snippet`` substring
+        match picks the thumbed turn. A PROVIDED snippet that matches no
+        stored answer means the thumbed turn was never stored under this
+        thread (qa-cache hits store nothing; SWR refreshes store under
+        ``<thread>__swr``) -- refuse rather than misattribute the thumbs
+        + correction to an unrelated prior turn. Newest-wins only when
+        no snippet was sent (Slack/channel lanes)."""
+        try:
+            uuid.UUID(investigation_id)
+        except ValueError:
+            # Thread-shaped id -> filter by the stored thread_id payload.
+            # Paginate fully: point ids are random uuid4s, so scroll order
+            # is uncorrelated with created_at and a single page could miss
+            # the newest/matching turn on long threads.
+            candidates: list[tuple[str, dict]] = []
+            offset = None
+            try:
+                while True:
+                    points, offset = await self._qdrant.scroll(
+                        collection_name=self._collection,
+                        scroll_filter=qm.Filter(must=[
+                            qm.FieldCondition(
+                                key="thread_id",
+                                match=qm.MatchValue(value=investigation_id),
+                            ),
+                        ]),
+                        limit=_RESOLVE_PAGE_LIMIT,
+                        offset=offset,
+                        with_payload=True,
+                    )
+                    candidates.extend((str(p.id), p.payload or {}) for p in points)
+                    if offset is None:
+                        break
+            except Exception as exc:
+                _log.warning(
+                    "thread-id resolve for feedback failed id=%s: %s",
+                    investigation_id, exc,
+                )
+                return None
+            if not candidates:
+                return None
+            if answer_snippet:
+                candidates = [
+                    c for c in candidates
+                    if answer_snippet in str(c[1].get("answer") or "")
+                ]
+                if not candidates:
+                    return None
+            return max(candidates, key=lambda c: float(c[1].get("created_at") or 0.0))
+
         try:
             points = await self._qdrant.retrieve(
                 collection_name=self._collection,
@@ -330,10 +437,40 @@ class InvestigationCache:
             )
         except Exception as exc:
             _log.warning("retrieve for feedback failed id=%s: %s", investigation_id, exc)
-            return False
+            return None
         if not points:
-            return False
-        payload = points[0].payload or {}
+            return None
+        return str(points[0].id), points[0].payload or {}
+
+    async def record_feedback(
+        self,
+        investigation_id: str,
+        *,
+        thumbs: str,
+        correction: str | None = None,
+        answer_snippet: str | None = None,
+    ) -> FeedbackResult:
+        """Attach thumbs-up / thumbs-down feedback to a past investigation. `thumbs` must
+        be `"up"` or `"down"`. Optional free-text `correction` lets the
+        user explain why an answer was wrong (used by V2 audit). Stored
+        on the existing point's payload (no separate collection).
+
+        Accepts the real point UUID or a thread-shaped id (see
+        ``_resolve_point``). Returns a truthy/falsy ``FeedbackResult``
+        carrying the resolved point id and the rb-ids of every tab
+        runbook the answer loaded -- callers use those to credit the
+        runbooks' thumbs counters."""
+        if thumbs not in ("up", "down"):
+            return FeedbackResult(ok=False)
+        await self._ensure_collection()
+        if not self._ensured:
+            return FeedbackResult(ok=False)
+        resolved = await self._resolve_point(
+            investigation_id, answer_snippet=answer_snippet,
+        )
+        if resolved is None:
+            return FeedbackResult(ok=False)
+        point_id, payload = resolved
         feedback = payload.get("feedback") or {"up": 0, "down": 0, "corrections": []}
         if thumbs == "up":
             feedback["up"] = int(feedback.get("up", 0)) + 1
@@ -348,16 +485,23 @@ class InvestigationCache:
             await self._qdrant.set_payload(
                 collection_name=self._collection,
                 payload={"feedback": feedback},
-                points=[investigation_id],
+                points=[point_id],
             )
             _log.info(
-                "feedback recorded id=%s thumbs=%s up=%d down=%d",
-                investigation_id, thumbs, feedback.get("up", 0), feedback.get("down", 0),
+                "feedback recorded id=%s (requested=%s) thumbs=%s up=%d down=%d",
+                point_id, investigation_id, thumbs,
+                feedback.get("up", 0), feedback.get("down", 0),
             )
-            return True
+            return FeedbackResult(
+                ok=True,
+                point_id=point_id,
+                runbook_ids=extract_loaded_runbook_ids(payload.get("tool_call_audit")),
+                query=(payload.get("question") or None),
+                answer=(payload.get("answer") or None),
+            )
         except Exception as exc:
-            _log.warning("set_payload feedback failed id=%s: %s", investigation_id, exc)
-            return False
+            _log.warning("set_payload feedback failed id=%s: %s", point_id, exc)
+            return FeedbackResult(ok=False)
 
     async def purge(
         self,

@@ -100,6 +100,31 @@ class MCPConfigBlock(BaseModel):
     extra: dict[str, object] = Field(default_factory=dict)
 
 
+class ExternalMCPConfigBlock(MCPConfigBlock):
+    """Config for an UPSTREAM MCP server mounted via the External MCP Adapter.
+
+    NOT a member of MCP_CONFIG_TYPES/KNOWN_MCP_NAMES: external servers live on the
+    separate ``Settings.external_mcp`` field and are registered at RUNTIME inside
+    the app lifespan, so the static drift-asserts never see them. Inherits
+    ``enabled``/``restricted``/``system_prompt`` from the base.
+    """
+
+    transport: Literal["streamable_http", "sse"] = "streamable_http"
+    url: str = ""
+    # Friendly label for the Integrations UI (falls back to the config key).
+    display_name: str | None = None
+    # env-var NAME carrying the upstream bearer token (value stays in secrets).
+    auth_env: str | None = None
+    # Authorization scheme: "Bearer" for most servers; "Sentry-Bearer" for Sentry.
+    auth_scheme: str = "Bearer"
+    read_only: bool = True
+    category: str = "Integrations"
+    # Upstream tool names to KEEP (allowlist-first admission). Empty = keep none.
+    tool_allowlist: list[str] = Field(default_factory=list)
+    # Upstream tool names to always DROP (belt-and-braces: meta-executors/writes).
+    tool_denylist: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Per-integration subclasses.
 # ---------------------------------------------------------------------------

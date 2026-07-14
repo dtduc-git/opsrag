@@ -226,6 +226,18 @@ def sql_daily_trend(table: str, days: int) -> str:
     )
 
 
+def sql_by_month(table: str) -> str:
+    """Net spend per invoice month across an inclusive [from,to] month range.
+    ``invoice.month`` is a 'YYYYMM' string, so a lexical BETWEEN is a correct
+    range for same-century months and lets one query return the whole series."""
+    return (
+        f"SELECT invoice.month AS month, ROUND(SUM({_NET}), 2) AS cost "
+        f"FROM {table} WHERE _PARTITIONTIME >= TIMESTAMP(@pfloor) "
+        f"AND invoice.month BETWEEN @from_month AND @to_month "
+        f"GROUP BY month ORDER BY month"
+    )
+
+
 def sql_anomalies(table: str, *, threshold_pct: float, min_usd: float, limit: int) -> str:
     factor = 1 + threshold_pct / 100.0
     return (
@@ -359,6 +371,26 @@ async def _h_cost_trend(_unused, args: dict) -> Any:
     ]}
 
 
+async def _h_cost_by_month(_unused, args: dict) -> Any:
+    """Net GCP spend per invoice month for the last N months (default 3, max 12)
+    -- a clean monthly series for cost-over-time charts, in ONE call (vs. calling
+    cost_summary once per month). Feed `by_month` straight into `render_chart`
+    (type=line, x=month, y=cost_usd). Net of credits. Read-only."""
+    table = _table()
+    months = _clamp(args.get("months"), default=3, lo=2, hi=12)
+    to_month = _valid_month(args.get("month"))  # inclusive latest month
+    from_month = to_month
+    for _ in range(months - 1):
+        from_month = _prev_month(from_month)
+    rows = await _run_query(
+        sql_by_month(table),
+        {"from_month": from_month, "to_month": to_month, "pfloor": _partition_floor(from_month)},
+    )
+    return {"months": months, "from_month": from_month, "to_month": to_month, "by_month": [
+        {"month": str(r.get("month")), "cost_usd": float(r.get("cost") or 0)} for r in rows
+    ]}
+
+
 async def _h_cost_anomalies(_unused, args: dict) -> Any:
     """Services whose yesterday spend jumped above a rolling 7-day baseline
     (default >30% and >$50). The FinOps early-warning signal."""
@@ -421,6 +453,15 @@ BILLING_GCP_TOOLS: list[MCPTool] = [
         handler=_h_cost_trend,
     ),
     MCPTool(
+        name="billing_gcp_cost_by_month",
+        description="Net GCP spend per invoice month for the last N months (default 3, max 12) — a monthly cost-over-time series in ONE call. Feed the result into render_chart (type=line) for a 3-month billing trend. Net of credits. Read-only.",
+        input_schema={"type": "object", "properties": {
+            "months": {"type": "integer", "description": "Number of months back, inclusive of the latest (2-12, default 3)."},
+            **_MONTH_PROP,
+        }},
+        handler=_h_cost_by_month,
+    ),
+    MCPTool(
         name="billing_gcp_cost_anomalies",
         description="GCP services whose yesterday spend jumped above their rolling 7-day baseline (default >30% and >$50) — cost early-warning. Read-only.",
         input_schema={
@@ -462,6 +503,10 @@ async def _fake_run_query(sql: str, params: list | None = None) -> list[dict]:
     if "UNNEST(labels)" in sql:  # by label
         return [{"label_value": "team-a", "cost": 2245.0},
                 {"label_value": "(unlabelled)", "cost": 199.0}]
+    if "invoice.month AS month" in sql:  # monthly series
+        return [{"month": "202605", "cost": 49508.64},
+                {"month": "202606", "cost": 51472.20},
+                {"month": "202607", "cost": 14979.62}]
     if "AS day" in sql:  # daily trend
         return [{"day": "2026-07-08", "cost": 2303.0}, {"day": "2026-07-09", "cost": 2248.0}]
     if "AS yesterday" in sql:  # anomalies

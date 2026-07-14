@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   getRunbook,
   createRunbook,
@@ -312,7 +313,10 @@ export function RunbookEditorPage({ runbookId, initialDraft, onSaved, onCancel }
         )}
         {activeTab === "preview" && (
           <div className="runbook-editor__preview markdown-body">
-            <ReactMarkdown>{body || "_(empty)_"}</ReactMarkdown>
+            {/* remark-gfm: tables / task-lists / strikethrough — same as
+                ChatMessage; without it runbook verdict tables render as raw
+                pipe text. */}
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{body || "_(empty)_"}</ReactMarkdown>
           </div>
         )}
         {activeTab === "versions" && (

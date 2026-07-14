@@ -31,10 +31,21 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
+from opsrag.config_mcp import ExternalMCPConfigBlock
 from opsrag.mcp import ALL_MCP_TOOLS, MCPTool
 from opsrag.mcp.gitlab import GitLabMCPError
+from opsrag.mcp.registry import REGISTRY as _REGISTRY
+from opsrag.mcp_server.registry_loader import connector_for_tool
 
 _log = logging.getLogger("opsrag.mcp_server.registry")
+
+
+def _is_external_tool(tool_name: str) -> bool:
+    """True if the tool belongs to a runtime-registered external connector
+    (config_type is an ExternalMCPConfigBlock subclass)."""
+    conn = connector_for_tool(tool_name)
+    integ = _REGISTRY.get(conn) if conn else None
+    return bool(integ and issubclass(integ.config_type, ExternalMCPConfigBlock))
 
 
 # Explicit external-facing tool name allow-list.
@@ -143,16 +154,21 @@ SAFE_FOR_EXTERNAL_TOOLS: set[str] = {
     "prometheus_targets",
     # Vector search over the indexed corpus
     "knowledge_search",
-    # Slack -- read-only message/thread access via known URLs / channel lists.
+    # Slack -- read-only message/thread access via known URLs / channel lists,
+    # plus bot-token channel-history keyword scan (`slack_channel_history`,
+    # via conversations.history -- no user token, works for channels the bot
+    # is in).
     # `slack_search_messages` is DELIBERATELY EXCLUDED: Slack's
     # `search.messages` API requires `search:read` scope which is
     # USER-token-only (xoxp-). Our cluster ships only a bot token
     # (xoxb-), so the tool always 401s. Exposing it just confuses the
     # agent (dev feedback 2026-05-15: "can't search in slack"). Add it
-    # back once a user token is provisioned.
+    # back once a user token is provisioned. `slack_channel_history` is the
+    # bot-token alternative for keyword discovery within a joined channel.
     "slack_get_message_by_url",
     "slack_get_thread_by_url",
     "slack_list_channels",
+    "slack_channel_history",
     # Datadog -- APM traces, monitors, SLOs, metrics. Reads against DD
     # API using DD_API_KEY + DD_APP_KEY (already wired into the cluster
     # opsrag-secrets External Secret). Log search lives in the
@@ -173,6 +189,18 @@ SAFE_FOR_EXTERNAL_TOOLS: set[str] = {
     # Extracts trace_id / span_id / epoch_ms / site / env / service from
     # a Datadog Discover URL the user pasted. Safe to expose.
     "datadog_parse_trace_url",
+    # Sentry (native connector) -- error/exception tracking, read-only GET
+    # against the Sentry REST API (projects/issues/events/stacktraces/
+    # releases/trace). No writes. Preferred over the hosted external
+    # sentry_mcp (whose search tools are AI-gated).
+    "sentry_list_projects",
+    "sentry_search_issues",
+    "sentry_get_issue",
+    "sentry_get_latest_event",
+    "sentry_search_events",
+    "sentry_get_event",
+    "sentry_get_trace",
+    "sentry_list_releases",
     # Elasticsearch -- cross-cluster application-log search (per-env
     # ECK clusters reached via K8s pod port-forward over the K8s API
     # server). 3 read-only tools, all GET-against-_search-shape -- no
@@ -237,7 +265,7 @@ def _parse_step_to_seconds(step: Any) -> int:
     Accepts ``60``, ``"60"``, ``"60s"``, ``"5m"``, ``"1h"``, ``"1d"``.
     Returns seconds. Unparseable input -> 60s (safe default).
     """
-    if isinstance(step, (int, float)):
+    if isinstance(step, int | float):
         return max(1, int(step))
     if not isinstance(step, str):
         return 60
@@ -264,7 +292,7 @@ def _resolve_window_seconds(start: Any, end: Any) -> int | None:
     resolves relative times to unix seconds anyway.
     """
     def _to_unix(v: Any) -> float | None:
-        if isinstance(v, (int, float)):
+        if isinstance(v, int | float):
             return float(v)
         if not isinstance(v, str):
             return None
@@ -308,7 +336,7 @@ def _wrap_query_range_clamp(
             # Shrink to the most recent _PROM_RANGE_MAX_WINDOW_S worth
             # of data: end stays, start moves up.
             try:
-                end_v = float(a["end"]) if not isinstance(a["end"], (int, float)) else float(a["end"])
+                end_v = float(a["end"]) if not isinstance(a["end"], int | float) else float(a["end"])
                 a["start"] = end_v - _PROM_RANGE_MAX_WINDOW_S
                 notes.append(
                     f"window clamped to {_PROM_RANGE_MAX_WINDOW_S // 3600}h"
@@ -375,7 +403,7 @@ def build_external_registry() -> list[MCPTool]:
     for tool in ALL_MCP_TOOLS:
         if tool.name in seen:
             continue
-        if tool.name not in SAFE_FOR_EXTERNAL_TOOLS:
+        if tool.name not in SAFE_FOR_EXTERNAL_TOOLS and not _is_external_tool(tool.name):
             continue
         # Defence-in-depth: drop anything with a write-verb in the name
         # even if it slipped into the allow-list by accident.

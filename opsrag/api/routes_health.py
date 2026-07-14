@@ -123,7 +123,17 @@ async def _probe_enabled_mcps(request: Request) -> tuple[dict[str, dict[str, str
         template = getattr(integration, "health_url_template", None) if integration else None
         # Only probe a concrete URL (no unsubstituted {tokens} / $ENV refs).
         if template and "{" not in template and "$" not in template:
-            ok, detail = await _probe_url(template)
+            # Authenticated probe when the integration exposes headers
+            # (e.g. cloudflare's bound Bearer) -- turns the probe into a
+            # real token-health signal instead of a guaranteed 4xx.
+            headers = None
+            headers_fn = getattr(integration, "health_headers_fn", None)
+            if headers_fn is not None:
+                try:
+                    headers = headers_fn() or None
+                except Exception:  # noqa: BLE001 -- probe must never raise
+                    headers = None
+            ok, detail = await _probe_url(template, headers=headers)
             out[f"mcp:{name}"] = {"status": "up" if ok else "down", "detail": detail}
             ready = ready and ok
         else:
@@ -132,15 +142,27 @@ async def _probe_enabled_mcps(request: Request) -> tuple[dict[str, dict[str, str
     return out, ready
 
 
-async def _probe_url(url: str) -> tuple[bool, str]:
-    """Best-effort GET with a short timeout; never raises."""
+async def _probe_url(url: str, headers: dict | None = None) -> tuple[bool, str]:
+    """Best-effort GET with a short timeout; never raises.
+
+    Readiness stays REACHABILITY-ONLY: any HTTP response returns ok=True;
+    only connection errors mark the component down. When `headers` carry
+    auth, the detail string additionally reports token health (auth OK vs
+    AUTH FAILED) so operators see an expired token in /readyz without the
+    pod ever being pulled from rotation over a third-party credential."""
     try:
         import httpx
 
         async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(url)
-        # Any HTTP response (even 401 from an unauthenticated probe) means the
-        # endpoint is reachable; connection errors mean it is not.
+            resp = await client.get(url, headers=headers)
+        if headers:
+            if resp.status_code in (401, 403):
+                return True, (
+                    f"reachable, AUTH FAILED (HTTP {resp.status_code}) -- "
+                    "check the integration token/scopes"
+                )
+            if 200 <= resp.status_code < 300:
+                return True, f"reachable, auth OK (HTTP {resp.status_code})"
         return True, f"reachable (HTTP {resp.status_code})"
     except Exception as exc:  # noqa: BLE001
         return False, f"unreachable: {type(exc).__name__}"

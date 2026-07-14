@@ -750,7 +750,7 @@ def _summarize_service(svc: Any) -> dict:
         "namespace": svc.metadata.namespace,
         "type": spec.type,
         "cluster_ip": spec.cluster_ip,
-        "external_ips": spec.external_i_ps or [],
+        "external_ips": spec.external_ips or [],
         "selector": spec.selector or {},
         "ports": [
             {"name": p.name, "port": p.port, "target_port": str(p.target_port), "protocol": p.protocol}
@@ -1789,7 +1789,7 @@ def _fake_service(name: str = "example-service") -> _Obj:
         spec=_Obj(
             type="ClusterIP",
             cluster_ip="10.0.1.1",
-            external_i_ps=[],
+            external_ips=[],
             selector={"app": "example"},
             ports=[_Obj(name="http", port=80, target_port=8080, protocol="TCP")],
         ),

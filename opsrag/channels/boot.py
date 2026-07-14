@@ -98,6 +98,35 @@ async def build_and_start(
         vision=getattr(cfg, "vision", None),
     )
 
+    # First-responder (Slack-only, opt-in): a self-contained auto-answerer for
+    # mapped channels. Built with the SAME permission bucket as the dispatcher
+    # so quota is shared, and attached to the adapter before connect so the
+    # live client can be bound into it.
+    fr_cfg = getattr(channel_cfg, "first_responder", None)
+    if (
+        channel_name == "slack"
+        and fr_cfg is not None
+        and getattr(fr_cfg, "enabled", False)
+        and hasattr(adapter, "attach_first_responder")
+    ):
+        from opsrag.slack_bot.first_responder import FirstResponder
+
+        first_responder = FirstResponder(
+            graph=agent_graph,
+            providers=providers,
+            permission=permission,
+            config=fr_cfg,
+            qa_cache=getattr(caches, "qa_cache", None),
+            investigation_cache=getattr(caches, "investigation_cache", None),
+            semantic_router=getattr(caches, "semantic_router", None),
+            web_ui_base_url=getattr(channel_cfg, "web_ui_base_url", "") or "",
+        )
+        adapter.attach_first_responder(first_responder)
+        _log.info(
+            "boot: first-responder attached channel=%s mapped_channels=%d",
+            channel_name, len(getattr(fr_cfg, "channels", {}) or {}),
+        )
+
     await adapter.connect(dispatcher)
     _log.info("boot: role=%s channel=%s worker started", role, channel_name)
     return adapter

@@ -317,8 +317,15 @@ async def refresh(request: Request, response: Response):
     presented_hash = hash_token(raw_refresh)
     sess = await store.get_refresh_session(presented_hash)
     if sess is None or not sess.is_active:
-        # Unknown/expired/revoked. Clear cookies to force re-login.
-        sm.clear_cookies(response)
+        # Unknown/expired/revoked -> 401, but do NOT clear_cookies() here.
+        # The refresh cookie is now path="/" (shared across same-origin tabs).
+        # In a multi-tab idle-lapse both tabs may present the SAME single-use
+        # token; one rotates it, the other arrives with the now-revoked token
+        # and lands here. Clearing cookies would delete the WINNING tab's
+        # freshly minted opsrag_session/opsrag_refresh/opsrag_csrf from the
+        # shared jar and log every tab out. A bare 401 is sufficient: the
+        # client falls back to login on its own, and a stale/dead cookie
+        # lingering is harmless (it just 401s until re-login overwrites it).
         raise HTTPException(status_code=401, detail={"error": "invalid_refresh_token"})
 
     user = await store.get_user_by_id(sess.user_id)

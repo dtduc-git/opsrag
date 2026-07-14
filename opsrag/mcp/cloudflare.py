@@ -19,9 +19,8 @@ graph in one hop.
 
 Token + scopes
 --------------
-Auth: bearer token from env var `CLOUDFLARE_API_KEY` (same env the
-cartography-runner uses for its Cloudflare ingest, set by
-ExternalSecret from GSM `opsrag-cloudflare-api-key`). The token must
+Auth: bearer token from env var `CLOUDFLARE_API_KEY` (populate it from
+your secret store). The token must
 have Read scope on, at minimum:
 
     Zone:Zone, Zone:DNS, Zone:Page Rules, Zone:Firewall Services,
@@ -126,9 +125,8 @@ def bind(
     """Register Cloudflare MCP config.
 
     The factory passes a `token` value (read from `CLOUDFLARE_API_KEY`
-    env var, populated by ExternalSecret from GSM
-    `opsrag-cloudflare-api-key`). If `token` is empty or None, this is
-    a no-op -- every tool will return `reason="not_bound"`.
+    env var, populated from your secret store). If `token` is empty or
+    None, this is a no-op -- every tool will return `reason="not_bound"`.
 
     `default_account_id` is optional. If empty, account-scoped tools
     (e.g. `list_access_apps`) auto-resolve via `_default_account()` on
@@ -159,11 +157,22 @@ def bind(
     )
 
 
+def health_headers() -> dict[str, str]:
+    """Auth headers for the /readyz probe; {} when no token is bound.
+
+    Lets the health prober make an AUTHENTICATED reachability check
+    instead of the bare GET that 400'd every 10s in the logs and carried
+    zero signal about token health."""
+    if _bound and _config is not None:
+        return {"Authorization": f"Bearer {_config.token}"}
+    return {}
+
+
 def _require_bound() -> _BoundConfig:
     if not _bound or _config is None:
         raise MCPCloudflareError(
             "Cloudflare MCP not configured -- set CLOUDFLARE_API_KEY env var "
-            "(populated by ExternalSecret from GSM `opsrag-cloudflare-api-key`).",
+            "(populate it from your secret store).",
             reason="not_bound",
         )
     return _config
@@ -196,11 +205,24 @@ async def _cf_get(path: str, params: dict[str, Any] | None = None) -> dict[str, 
             f"cloudflare network error: {exc!r}", reason="upstream_error",
         ) from exc
 
-    if r.status_code == 401 or r.status_code == 403:
+    # 401 vs 403 are DIFFERENT failures -- conflating them (both used to say
+    # "missing the required scope") sent operators to fix scopes while the
+    # token itself was invalid (observed 2026-07-13). Reason stays
+    # "forbidden" for both so existing tolerate-filters are unchanged.
+    if r.status_code == 401:
         raise MCPCloudflareError(
-            f"cloudflare {r.status_code} -- token missing the required scope "
+            f"cloudflare 401 -- API token invalid, expired, or revoked "
+            f"(path {path!r}). Verify it returns status=active "
+            f"(/user/tokens/verify for user tokens, "
+            f"/accounts/{{account_id}}/tokens/verify for account-owned "
+            f"tokens), then update the `CLOUDFLARE_API_KEY` secret and re-bind.",
+            reason="forbidden",
+        )
+    if r.status_code == 403:
+        raise MCPCloudflareError(
+            f"cloudflare 403 -- token missing the required scope "
             f"for path {path!r}. Add the corresponding Read scope to the "
-            f"opsrag-cloudflare-api-key token and re-bind.",
+            f"`CLOUDFLARE_API_KEY` token and re-bind.",
             reason="forbidden",
         )
     if r.status_code == 404:

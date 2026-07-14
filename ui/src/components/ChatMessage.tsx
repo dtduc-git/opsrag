@@ -1,12 +1,15 @@
 import { useState, useRef, useEffect, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { IconCopy, IconCheck, IconFile, IconThumbUp, IconThumbDown } from "./icons";
 import ThinkingProgress, { type ProgressStep, type CacheHitInfo } from "./ThinkingProgress";
 import TimeseriesChart, { type TimeseriesChartProps } from "./TimeseriesChart";
+import Chart, { type ChartProps } from "./Chart";
 import InvestigationPlan, { type InvestigationPlanProps } from "./InvestigationPlan";
 import DiagramComponent, { type DiagramData } from "./DiagramComponent";
 import Lightbox from "./Lightbox";
 import { postFeedback, postCorrection } from "../api";
+import { prettifySlackTokens } from "../slackText";
 
 // — generic envelope for backend-emitted UI components. Today
 // the only `type` is `TimeseriesChart`; future tool integrations
@@ -53,6 +56,7 @@ export interface Message {
 // new component shipped on the backend doesn't crash older UI builds.
 const RICH_COMPONENT_REGISTRY: Record<string, (props: Record<string, unknown>) => ReactNode> = {
   TimeseriesChart: (props) => <TimeseriesChart {...(props as unknown as TimeseriesChartProps)} />,
+  Chart: (props) => <Chart {...(props as unknown as ChartProps)} />,
   InvestigationPlan: (props) => <InvestigationPlan {...(props as unknown as InvestigationPlanProps)} />,
 };
 
@@ -89,23 +93,24 @@ export interface ChatMessageContext {
   readOnly?: boolean;
 }
 
-function displayAuthorLabel(msg: Message, ctx?: ChatMessageContext): string {
+export function displayAuthorLabel(msg: Message, ctx?: ChatMessageContext): string {
   if (msg.role !== "user") return "OpsRAG";
   const author = msg.authorEmail ?? null;
   const viewer = ctx?.viewerEmail ?? null;
-  // Both null → legacy / anonymous mode → render "You" as before.
-  if (!author && !viewer) return "You";
-  // Either matches → it's the current viewer's turn.
+  // Viewer's own turn (case-insensitive email match) → "You".
   if (author && viewer && author.toLowerCase() === viewer.toLowerCase()) return "You";
-  // No author info on the message but a viewer is logged in → can't
-  // tell whose message this is. Fall back to "You" to avoid showing
-  // misleading information.
-  if (!author) return "You";
-  // Different author: prefer human-readable name, fall back to email's
-  // local-part, fall back to email itself.
+  // We know the author's display name (e.g. a Slack requester resolved by the
+  // first-responder, whose email scope may be absent, or a channel replay
+  // where authorEmail is intentionally null). Show it. MUST come before the
+  // email-null fallback below or such a turn is mislabeled "You".
   if (msg.authorName) return msg.authorName;
-  const at = author.indexOf("@");
-  return at > 0 ? author.slice(0, at) : author;
+  // A different author with an email but no name → local-part, else email.
+  if (author) {
+    const at = author.indexOf("@");
+    return at > 0 ? author.slice(0, at) : author;
+  }
+  // No email and no name → legacy/anon/unattributable → "You".
+  return "You";
 }
 
 function displayAuthorInitial(msg: Message, ctx?: ChatMessageContext): string {
@@ -531,9 +536,10 @@ export default function ChatMessage({ msg, ctx }: { msg: Message; ctx?: ChatMess
               <div className="dot" /><div className="dot" /><div className="dot" />
             </div>
           ) : isUser ? (
-            <p>{msg.content}</p>
+            <p className="user-text">{msg.content}</p>
           ) : (
             <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
               components={{
                 code({ className, children, ...props }: { className?: string; children?: ReactNode; node?: unknown; inline?: boolean }) {
                   // Allow hyphens in language names (e.g. `diagram-json`).
@@ -546,7 +552,7 @@ export default function ChatMessage({ msg, ctx }: { msg: Message; ctx?: ChatMess
                 },
               }}
             >
-              {msg.content + (msg.streaming ? "▍" : "")}
+              {(msg.streaming ? msg.content : prettifySlackTokens(msg.content)) + (msg.streaming ? "▍" : "")}
             </ReactMarkdown>
           )}
         </div>

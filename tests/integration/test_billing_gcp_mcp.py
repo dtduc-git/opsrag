@@ -14,6 +14,7 @@ from opsrag.mcp.registry import REGISTRY
 _EXPECTED = {
     "billing_gcp_cost_anomalies",
     "billing_gcp_cost_by_label",
+    "billing_gcp_cost_by_month",
     "billing_gcp_cost_by_project",
     "billing_gcp_cost_by_service",
     "billing_gcp_cost_summary",
@@ -125,3 +126,14 @@ async def test_cost_anomalies(fake):
     r = await fake.call("billing_gcp_cost_anomalies", {})
     assert r["anomalies"][0]["scope"] == "Cloud SQL"
     assert r["anomalies"][0]["pct_change"] > 0
+
+
+@pytest.mark.asyncio
+async def test_cost_by_month(fake):
+    r = await fake.call("billing_gcp_cost_by_month", {"months": 3, "month": "202607"})
+    assert r["months"] == 3
+    # earliest of a 3-month window ending 202607 is 202605.
+    assert r["from_month"] == "202605" and r["to_month"] == "202607"
+    months = [m["month"] for m in r["by_month"]]
+    assert months == ["202605", "202606", "202607"]
+    assert r["by_month"][-1]["cost_usd"] == 14979.62

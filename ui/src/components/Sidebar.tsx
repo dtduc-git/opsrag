@@ -182,7 +182,9 @@ export default function Sidebar({
     {
       label: "Operations",
       items: [
-        { page: "integrations", label: "Integrations", icon: I.integrations, title: "MCP integrations", requires: "admin" },
+        // Visible to everyone (2026-07-13): read-only catalog, the backing
+        // GET /integrations was never scope-gated -- hiding it was UX-only.
+        { page: "integrations", label: "Integrations", icon: I.integrations, title: "MCP integrations" },
         { page: "indexing", label: "Indexing Jobs", icon: I.indexing, title: "Repository ingestion jobs", requires: "admin" },
         { page: "users", label: "Users & Roles", icon: I.users, title: "Manage users and their roles (RBAC)", requires: "admin" },
         { page: "guidance", label: "Agent Guidance", icon: I.guidance, title: "Deployment-wide custom instructions (always-applied to answers + chat)", requires: "admin" },

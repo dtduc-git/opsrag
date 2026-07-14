@@ -192,18 +192,8 @@ check_non_english_text() {
                    "non-ascii" \
                    "translate to English or add a tests/fixtures/i18n exemption"
         done < <(python3 -c '
-import sys
+import sys, unicodedata
 path = sys.argv[1]
-# English typographic punctuation that is not a vendor-neutrality concern.
-_TYPO_OK = {
-    0x00A0,  # non-breaking space
-    0x2013, 0x2014,          # en dash, em dash
-    0x2018, 0x2019,          # left/right single quote
-    0x201C, 0x201D,          # left/right double quote
-    0x2022,                  # bullet
-    0x2026,                  # horizontal ellipsis
-    0x2192,                  # rightwards arrow
-}
 try:
     with open(path, "rb") as f:
         for i, raw in enumerate(f, 1):
@@ -216,12 +206,22 @@ try:
                 o = ord(ch)
                 if o == 9 or o == 10 or o == 13 or 0x20 <= o <= 0x7e:
                     continue
-                # Allow common English typographic punctuation. The rule
-                # targets FOREIGN-LANGUAGE text, not Unicode punctuation that
-                # routinely appears in English prose/comments (em/en dashes,
-                # smart quotes, ellipsis, arrows, bullets, NBSP).
-                if o in _TYPO_OK:
+                # The rule targets FOREIGN-LANGUAGE text, i.e. actual words in
+                # a non-Latin script -- NOT the Unicode symbols, math signs,
+                # emoji, marks, or typographic punctuation that routinely appear
+                # in English prose/comments/UX (em/en dashes, smart quotes,
+                # ellipsis, arrows, bullets, middle dots, section signs, >=/<=,
+                # 👍👎⚠️ and other load-bearing glyphs). Only a codepoint that is
+                # a LETTER (Unicode category L*) AND not a Latin-script letter
+                # (accented Latin like é/ü stays fine) is flagged.
+                cat = unicodedata.category(ch)
+                if not cat.startswith("L"):
                     continue
+                try:
+                    if unicodedata.name(ch).startswith("LATIN"):
+                        continue
+                except ValueError:
+                    continue  # unnamed letter -> not a vendor-neutrality concern
                 stripped = line.rstrip("\n")
                 print(f"{i}:{stripped}")
                 break

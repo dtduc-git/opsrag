@@ -29,6 +29,7 @@ All four tools issue Slack Web API GETs (`conversations.history`,
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -55,6 +56,21 @@ _CHANNELS_CACHE_TTL_S = 300.0  # 5 min, per spec
 _MESSAGE_TRUNCATE_CHARS = 2000
 _DEFAULT_SEARCH_LIMIT = 20
 _MAX_SEARCH_LIMIT = 100
+# conversations.list is Tier-2 throttled (~20 req/min); a large workspace can
+# take minutes of Retry-After sleep to fully paginate and blow the MCP client
+# timeout. Bound it: an overall wall-clock budget (enforced per page via
+# asyncio.wait_for, so it interrupts even a mid-Retry-After sleep) plus a page
+# cap. On either bound we return partial results rather than hang.
+_LIST_CHANNELS_BUDGET_S = 15.0
+_LIST_CHANNELS_MAX_PAGES = 25  # 200 channels/page
+# conversations.history (channel-history read) is bounded the same way as the
+# channel list -- it paginates and is rate-limited (Tier-3, ~50 req/min).
+_HISTORY_BUDGET_S = 10.0
+_HISTORY_MAX_PAGES = 20  # 200 messages/page
+_DEFAULT_HISTORY_SINCE = "14d"
+_DEFAULT_HISTORY_LIMIT = 20
+_MAX_HISTORY_LIMIT = 100
+_SINCE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
 class SlackMCPError(Exception):
@@ -191,16 +207,25 @@ def parse_slack_url(url: str) -> ParsedSlackURL:
 _channels_cache: dict[str, Any] = {"ts": 0.0, "channels": []}
 
 
-async def _list_channels_cached(client: SlackClient) -> list[dict]:
-    """Cached `conversations.list` (5-min TTL). Returns the full
-    channel list (id, name, is_member, etc.). Cache key is global --
-    one workspace per process -- so a refresh hits when stale."""
+async def _list_channels_cached(client: SlackClient) -> tuple[list[dict], bool]:
+    """Bounded, cached `conversations.list` (5-min TTL).
+
+    Returns ``(channels, complete)``. ``complete`` is False when the walk hit
+    the time budget or page cap before Slack stopped handing back a cursor --
+    callers surface that so the agent knows the list is partial. A partial
+    list is NOT cached, so a later call can finish the walk once rate limits
+    recover. Cache key is global (one workspace per process)."""
     now = time.time()
     if (now - _channels_cache["ts"]) < _CHANNELS_CACHE_TTL_S and _channels_cache["channels"]:
-        return _channels_cache["channels"]
+        return _channels_cache["channels"], True
     channels: list[dict] = []
     cursor: str | None = None
-    while True:
+    complete = False
+    deadline = now + _LIST_CHANNELS_BUDGET_S
+    for _page in range(_LIST_CHANNELS_MAX_PAGES):
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break  # budget exhausted -> partial
         params: dict[str, Any] = {
             "limit": 200,
             "exclude_archived": True,
@@ -209,9 +234,17 @@ async def _list_channels_cached(client: SlackClient) -> list[dict]:
         if cursor:
             params["cursor"] = cursor
         try:
-            data = await client._get("conversations.list", params)  # noqa: SLF001 (intended reuse)
+            # wait_for caps each page against the overall budget, so a mid
+            # Retry-After sleep in the client is cancelled rather than run long.
+            data = await asyncio.wait_for(
+                client._get("conversations.list", params),  # noqa: SLF001 (intended reuse)
+                timeout=remaining,
+            )
+        except (TimeoutError, httpx.HTTPError):
+            break  # budget hit mid-request, or 429/5xx retries exhausted -> partial
         except RuntimeError as exc:
-            # Surface clearly; don't poison the cache.
+            # App-level ok=false (invalid_auth, missing_scope, ...). Surface
+            # clearly; don't poison the cache.
             raise SlackMCPError(
                 f"conversations.list failed: {exc}",
                 reason="slack_api_error",
@@ -229,10 +262,12 @@ async def _list_channels_cached(client: SlackClient) -> list[dict]:
             })
         cursor = (data.get("response_metadata") or {}).get("next_cursor") or None
         if not cursor:
+            complete = True
             break
-    _channels_cache["ts"] = now
-    _channels_cache["channels"] = channels
-    return channels
+    if complete:
+        _channels_cache["ts"] = now
+        _channels_cache["channels"] = channels
+    return channels, complete
 
 
 # Per-id channel-name cache. Bounded by workspace size (one entry per
@@ -780,7 +815,7 @@ async def _h_list_channels(_unused, args: dict) -> Any:
     bot_token = _resolve_bot_token()
     client = SlackClient(bot_token=bot_token)
     try:
-        channels = await _list_channels_cached(client)
+        channels, complete = await _list_channels_cached(client)
     finally:
         await client.close()
     needle = (args.get("name_substring") or "").strip().lstrip("#").lower()
@@ -790,11 +825,161 @@ async def _h_list_channels(_unused, args: dict) -> Any:
         filtered = list(channels)
     # Sort: bot is a member first (most useful for follow-up history calls), then by name.
     filtered.sort(key=lambda c: (not c.get("is_member"), c.get("name") or ""))
-    return {
+    result: dict[str, Any] = {
         "count": len(filtered),
         "total": len(channels),
         "channels": filtered[:200],  # hard cap on response size
+        "complete": complete,
     }
+    if not complete:
+        result["warning"] = (
+            "PARTIAL list -- conversations.list is rate-limited (Tier-2, ~20 req/min) "
+            "and enumeration hit the time budget before finishing; results are not cached. "
+            "To reach a specific channel, prefer slack_get_message_by_url with its "
+            "permalink, or narrow with name_substring and retry to extend coverage."
+        )
+    return result
+
+
+_CHANNEL_ID_RE = re.compile(r"[CGD][A-Z0-9]{6,}")
+
+
+def _parse_since(value: str | None) -> float | None:
+    """Resolve a `since` arg to a `conversations.history` `oldest` bound
+    (unix seconds). Accepts relative ('30d', '24h', '90m', '2w'), ISO-8601,
+    or unix seconds; None/'' -> no lower bound."""
+    if not value:
+        return None
+    v = str(value).strip()
+    m = re.fullmatch(r"(\d+)\s*([smhdw])", v, re.IGNORECASE)
+    if m:
+        return time.time() - int(m.group(1)) * _SINCE_UNITS[m.group(2).lower()]
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    except ValueError as exc:
+        raise SlackMCPError(
+            f"Unparseable `since` {value!r}; use e.g. '7d', '24h', ISO-8601, or unix seconds.",
+            reason="bad_args",
+        ) from exc
+
+
+async def _resolve_channel_arg(client: SlackClient, arg: str) -> tuple[str, str | None]:
+    """Resolve a channel arg to (id, name). Accepts a channel id (C.../G.../D...)
+    or a #name/name (best-effort via the bounded channel list -- pass the id
+    when possible, since the list can be partial on large workspaces)."""
+    raw = arg.strip()
+    if _CHANNEL_ID_RE.fullmatch(raw):
+        return raw, await _resolve_channel_name(client, raw)
+    name = raw.lstrip("#").lower()
+    channels, _complete = await _list_channels_cached(client)
+    for c in channels:
+        if (c.get("name") or "").lower() == name:
+            return c["id"], c.get("name")
+    raise SlackMCPError(
+        f"Channel {arg!r} not found by name (the channel list can be partial on large, "
+        f"rate-limited workspaces). Pass the channel id (C...) -- from slack_list_channels "
+        f"or the channel URL.",
+        reason="channel_not_found",
+    )
+
+
+def _searchable_text(raw: dict) -> str:
+    """Cheap lowercased body for keyword matching: top-level text + flattened
+    attachments/blocks (so bot-alert content is searchable), no mention resolve."""
+    base = raw.get("text") or ""
+    rich = _flatten_rich_content(raw.get("attachments"), raw.get("blocks"))
+    return f"{base}\n{rich}".lower()
+
+
+async def _h_channel_history(_unused, args: dict) -> Any:
+    channel_arg = (args.get("channel") or "").strip()
+    if not channel_arg:
+        raise SlackMCPError(
+            "`channel` is required (a channel id like C0..., or a #name).",
+            reason="bad_args",
+        )
+    terms = (args.get("query") or "").strip().lower().split()
+    limit = max(1, min(int(args.get("limit") or _DEFAULT_HISTORY_LIMIT), _MAX_HISTORY_LIMIT))
+    since_arg = args.get("since")
+    oldest = _parse_since(since_arg if since_arg is not None else _DEFAULT_HISTORY_SINCE)
+
+    bot_token = _resolve_bot_token()
+    client = SlackClient(bot_token=bot_token)
+    matches: list[dict] = []
+    scanned = 0
+    window_complete = False
+    limit_reached = False
+    try:
+        channel_id, channel_name = await _resolve_channel_arg(client, channel_arg)
+        cursor: str | None = None
+        deadline = time.time() + _HISTORY_BUDGET_S
+        for _page in range(_HISTORY_MAX_PAGES):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break  # budget exhausted -> partial
+            params: dict[str, Any] = {"channel": channel_id, "limit": 200}
+            if oldest is not None:
+                params["oldest"] = f"{oldest:.6f}"
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                data = await asyncio.wait_for(
+                    client._get("conversations.history", params),  # noqa: SLF001
+                    timeout=remaining,
+                )
+            except (TimeoutError, httpx.HTTPError):
+                break  # budget hit mid-request, or 429/5xx retries exhausted -> partial
+            except RuntimeError as exc:
+                # not_in_channel / channel_not_found / missing_scope -> clear error.
+                raise _wrap_runtime_error(exc, channel=channel_id) from exc
+            for raw in data.get("messages", []):
+                if raw.get("subtype") == "thread_broadcast":
+                    continue  # re-fetched as part of its parent thread
+                scanned += 1
+                if terms and not all(t in _searchable_text(raw) for t in terms):
+                    continue
+                matches.append(
+                    await _shape_message(client, raw, channel=channel_id, channel_name=channel_name)
+                )
+                if len(matches) >= limit:
+                    limit_reached = True
+                    break
+            if limit_reached:
+                break
+            cursor = (data.get("response_metadata") or {}).get("next_cursor") or None
+            if not cursor:
+                window_complete = True
+                break
+    finally:
+        await client.close()
+
+    result: dict[str, Any] = {
+        "channel": channel_id,
+        "channel_name": channel_name,
+        "query": " ".join(terms) or None,
+        "count": len(matches),
+        "scanned": scanned,
+        "window_complete": window_complete,
+        "limit_reached": limit_reached,
+        "messages": matches,
+    }
+    if limit_reached:
+        result["warning"] = (
+            f"Showing the first {limit} matches (newest first); more may exist earlier in the "
+            f"window -- raise `limit`, narrow `query`, or shorten `since`."
+        )
+    elif not window_complete:
+        result["warning"] = (
+            "PARTIAL scan -- hit the time/page budget before covering the full `since` window; "
+            "these are the most recent messages only. Narrow `since`, or use "
+            "slack_get_thread_by_url on a specific permalink for full context."
+        )
+    return result
 
 
 # --- tool registry --------------------------------------------------
@@ -878,7 +1063,10 @@ SLACK_TOOLS: tuple[MCPTool, ...] = (
         description=(
             "List Slack channels visible to the bot. Useful for resolving a channel "
             "name -> id before drilling into history. Filter with `name_substring` "
-            "(case-insensitive). Cached for 5 minutes per process."
+            "(case-insensitive). Cached for 5 minutes per process. On very large, "
+            "rate-limited workspaces the walk is time-bounded and may return a PARTIAL "
+            "list (`complete: false` + a `warning`); to reach a specific channel prefer "
+            "`slack_get_message_by_url` with its permalink."
         ),
         input_schema={
             "type": "object",
@@ -890,6 +1078,49 @@ SLACK_TOOLS: tuple[MCPTool, ...] = (
             },
         },
         handler=_h_list_channels,
+    ),
+    MCPTool(
+        name="slack_channel_history",
+        description=(
+            "Read and keyword-filter recent messages from a Slack channel the bot is a "
+            "member of. Uses the BOT token (no user token needed) -- the way to find prior "
+            "discussion of an issue (e.g. 'sms hang' in #ops) when you don't have a "
+            "permalink. `channel` is a channel id (C...; most reliable) or a #name. `query` "
+            "matches messages containing ALL its words (case-insensitive; also searches "
+            "flattened bot-alert attachments/blocks) -- omit for the most recent messages. "
+            "`since` bounds the lookback ('7d','24h', ISO-8601, or unix; default 14d); "
+            "`limit` caps results (default 20, max 100). Returns matches newest-first with "
+            "permalinks + `thread_ts` (chain into slack_get_thread_by_url for full threads). "
+            "On large / rate-limited channels the scan is time-bounded and may be PARTIAL "
+            "(`window_complete:false` + a `warning`). The bot must be invited to the channel "
+            "or it returns a clear not_in_channel error."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "description": "Channel id (C...; most reliable) or #name / name.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Space-separated words; a message matches when it contains "
+                        "ALL of them (case-insensitive substring per word). Omit for most-recent."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Optional lookback: '7d','24h','90m','2w', ISO-8601, or unix seconds. Default 14d.",
+                },
+                "limit": {
+                    "type": "number",
+                    "description": f"Max messages, default {_DEFAULT_HISTORY_LIMIT}, hard cap {_MAX_HISTORY_LIMIT}.",
+                },
+            },
+            "required": ["channel"],
+        },
+        handler=_h_channel_history,
     ),
 )
 
@@ -939,7 +1170,7 @@ class _FakeSlackClient:
                         "is_archived": False,
                         "num_members": 42,
                         "topic": {"value": "Production alerts"},
-                        "purpose": {"value": "SRE on-call signal"},
+                        "purpose": {"value": "Ops on-call signal"},
                     },
                     {
                         "id": "C0000000002",
@@ -964,8 +1195,28 @@ class _FakeSlackClient:
                         "thread_ts": None,
                         "reply_count": 0,
                         "reactions": [{"name": "white_check_mark", "count": 2}],
-                    }
+                    },
+                    {
+                        "ts": "1700000300.000500",
+                        "user": "U0000000009",
+                        "text": "sms service is hanging again -- celery worker stuck, restarting the pod.",
+                        "thread_ts": "1700000300.000500",
+                        "reply_count": 2,
+                    },
+                    {
+                        "ts": "1700000100.000700",
+                        "user": None,
+                        "bot_id": "B01ALERT",
+                        "username": "Alertmanager",
+                        "text": "",
+                        "attachments": [
+                            {"title": "KubePodCrashLooping", "text": "pod sms-celery-advanced-exporter down"}
+                        ],
+                        "thread_ts": None,
+                        "reply_count": 0,
+                    },
                 ],
+                "response_metadata": {"next_cursor": ""},
             }
         if method == "users.info":
             uid = (params or {}).get("user", "U0000000000")

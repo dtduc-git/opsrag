@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
+
+from pydantic import BaseModel, Field
 
 from opsrag.agent.prompts import ANSWER_VERIFIER_PROMPT
 from opsrag.interfaces.chunker import Chunk
@@ -59,37 +60,23 @@ def _build_evidence_block(chunks: list[Chunk]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-# Strip Markdown / JSON fences from the LLM verdict before json.loads.
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.DOTALL)
+class _VerifierVerdict(BaseModel):
+    """Schema the verifier LLM must fill. Validated by the provider's
+    `generate_structured` (which parses tolerantly via
+    `extract_first_json_object` -- see opsrag/llms/json_extract.py)."""
+
+    verified: list[str] = Field(default_factory=list)
+    unverifiable: list[str] = Field(default_factory=list)
 
 
-def _parse_verdict(raw: str) -> dict[str, list[str]] | None:
-    """Best-effort JSON extraction. Returns None on malformed input."""
-    if not raw or not raw.strip():
-        return None
-    text = _FENCE_RE.sub("", raw.strip())
-    # If the model surrounded JSON with prose, snip to the outermost braces.
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    candidate = text[start : end + 1]
-    try:
-        obj = json.loads(candidate)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(obj, dict):
-        return None
-    verified = obj.get("verified") or []
-    unverifiable = obj.get("unverifiable") or []
-    if not isinstance(verified, list) or not isinstance(unverifiable, list):
-        return None
-    # Coerce items to str so downstream formatting stays safe.
-    return {
-        "verified": [str(x) for x in verified if x is not None],
-        "unverifiable": [str(x) for x in unverifiable if x is not None],
-    }
-
+# Hard cap on the verifier LLM call. verify_answer emits NO SSE events
+# while the LLM thinks; gemini-3 thinking on a big (16KB evidence + 8KB
+# answer) prompt ran 59.9s live and starved the stream past the ~60s
+# proxy idle timeout -- the finished answer then never reached the live
+# UI (empty bubble until reload; observed in prod 2026-07-13). 25s keeps
+# the silent window well under the cutoff; on timeout we fail closed
+# (caution note), same as any other verifier failure.
+_VERIFY_TIMEOUT_SEC = 25.0
 
 # Fail-closed caution appended when the verifier itself could not run (LLM
 # error or malformed verdict). We can't confirm the concrete claims, so we tell
@@ -282,17 +269,36 @@ def verify_answer_node(
             "Return ONLY the JSON object."
         )
 
+        # `generate_structured`, NOT plain `generate(max_tokens=1024)`:
+        # gemini-3 thinking tokens count against max_output_tokens on the
+        # plain path -- observed live 2026-07-13: finish_reason=length with
+        # ZERO visible content, so the verdict was starved and the
+        # fail-closed caution landed on essentially every answer. The
+        # structured path sets json response mode and floors max_tokens at
+        # the provider default.
         verdict: dict[str, list[str]] | None = None
         try:
-            response = await llm.generate(
-                purpose="answer-verify",
-                messages=[{"role": "user", "content": user_msg}],
-                system_prompt=ANSWER_VERIFIER_PROMPT,
-                temperature=0.0,
-                max_tokens=1024,
+            # max_tokens is a CAP, not a spend -- 16384 costs nothing extra
+            # unless used. Gemini-3 thinking scales with the (16KB evidence +
+            # 8KB answer) prompt and blew through 4096 live; modern Claude /
+            # OpenAI targets all accept ≥16k output caps.
+            import asyncio
+
+            result = await asyncio.wait_for(
+                llm.generate_structured(
+                    purpose="answer-verify",
+                    messages=[{"role": "user", "content": user_msg}],
+                    schema=_VerifierVerdict,
+                    system_prompt=ANSWER_VERIFIER_PROMPT,
+                    max_tokens=16384,
+                ),
+                timeout=_VERIFY_TIMEOUT_SEC,
             )
-            verdict = _parse_verdict(response.content)
-        except Exception as exc:  # network / LLM failure -> fail closed (verdict None)
+            verdict = {
+                "verified": [str(x) for x in result.verified if x is not None],
+                "unverifiable": [str(x) for x in result.unverifiable if x is not None],
+            }
+        except Exception as exc:  # LLM failure / malformed output -> fail closed
             _log.warning("answer_verifier llm failed: %s", exc)
             verdict = None
 
